@@ -17,6 +17,14 @@ import type {
   TrackState,
 } from "../lib/types";
 
+const cartoKey = process.env.NEXT_PUBLIC_CARTO_BASEMAP_API_KEY?.trim();
+const basemapUrl = cartoKey
+  ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(cartoKey)}`
+  : "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const basemapAttribution =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' +
+  (cartoKey ? ' &copy; <a href="https://carto.com/attributions">CARTO</a>' : "");
+
 type Props = {
   fleet: Record<string, TelemetrySample>;
   track: TrackState | null;
@@ -101,10 +109,9 @@ export default function TacticalMap({
       attributionControl
     >
       <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution={
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        }
+        url={basemapUrl}
+        attribution={basemapAttribution}
+        maxZoom={cartoKey ? 20 : 19}
       />
       <ScaleControl position="bottomleft" imperial={false} />
 

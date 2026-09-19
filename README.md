@@ -192,6 +192,8 @@ Live metrics: **coverage, collaboration, efficiency, tracking accuracy**, plus *
 
 ### Connected terrain and camera preview
 
+The 2D operational map uses CARTO Dark Matter when `NEXT_PUBLIC_CARTO_BASEMAP_API_KEY` is configured, and OpenStreetMap otherwise. Set the key in ignored `frontend/.env.local` for a native frontend or root `.env` for Compose, then restart the frontend (rebuild a production frontend). This is a browser-visible basemap credential; keep the actual value out of Git. CARTO now requires the [`key` tile URL parameter](https://carto.com/basemaps/apikey/). Both providers retain their required attribution.
+
 Open `/backend` on the frontend for the combined ArcticSim world, four camera feeds, fleet telemetry, and backend evidence. The **Simulator world** view embeds the actual Gazebo scene; selectable object tags add live mission roles, altitude and speed to native Gazebo poses. Select a tag for heading, battery, link status and intent, or use Locate to centre the view. Stale telemetry is marked explicitly. The optional 2D plot and 3D schematic retain estimated targets and coverage. The world and four feeds share a side-by-side monitor on wide windows, with a 2×2 camera grid below the world on narrower screens. **Expand monitor** opens the combined view in fullscreen; Escape returns to the dashboard. Camera images refresh while their panels are visible. The embedded simulator retains its own pause/reset controls.
 
 For this Windows workspace the preview is at `http://127.0.0.1:3002/backend`, the backend at port 8000, the terrain viewer at 8080, and simulator status at 8090. Start the existing configured four-asset simulator before the backend:
