@@ -151,7 +151,7 @@ export function useMissionTelemetry(url = DEFAULT_WS_URL): MissionTelemetry {
       connection,
       lastReceived: observations.wallTime,
       ageSeconds,
-      isFresh: connection === "live" && connectionHasState && ageSeconds !== null && ageSeconds * 1000 <= STALE_AFTER_MS,
+      isFresh: connection === "live" && connectionHasState && (state.status === undefined || state.status === "ok") && ageSeconds !== null && ageSeconds * 1000 <= STALE_AFTER_MS,
       hasReceived: observations.count > 0,
       frameCount: observations.count,
       receivedHz: observedRate(observations, currentTime),
@@ -206,10 +206,11 @@ const track: Validator = (value) => fields(value, { lat: latitude, lon: longitud
   vn: finite, ve: finite, speed_mps: finite, class_hint: string, confidence: finite, age_s: finite, sigma_m: finite,
   history: arrayOf((point) => Array.isArray(point) && point.length === 2 && latitude(point[0]) && longitude(point[1])),
 });
-const scorecard: Validator = (value) => fields(value, { coverage: finite, collaboration: finite, efficiency: finite, tracking: finite }, {
+const scorecard: Validator = (value) => fields(value, { coverage: finite, collaboration: finite, efficiency: finite, tracking: nullable(finite) }, {
   time_to_detect_s: nullable(finite), meters_flown: finite, commands_issued: finite, overlap_ratio: finite, unique_roles: finite, cells_seen: finite, cells_total: finite, track_error_m: nullable(finite),
 });
 const stateFields: Record<string, Validator> = {
+  status: oneOf("ok", "warming", "stale", "failed", "complete"),
   adapter: string, deployed: boolean, heartbeat: finite, tick_hz: finite,
   fleet: mapOf(vehicle), scores: scorecard, track: nullable(track), truth: nullable(position), advisor: nullable(strategy),
   detections: arrayOf((value) => fields(value, { source_id: string, lat: latitude, lon: longitude, class_hint: string, confidence: finite }, { range_m: nullable(finite), timestamp: finite, bearing: nullable(finite) })),
@@ -229,7 +230,7 @@ export function parseTelemetryMessage(raw: string): ParsedMessage | null {
   if (value.type === "strategy") {
     return value.data === null || strategy(value.data) ? { kind: "strategy", strategy: value.data as StrategyPlan | null } : null;
   }
-  if (value.type !== "state" || "status" in value) return null;
+  if (value.type !== "state") return null;
   if (!["fleet", "scores", "track", "heartbeat", "arena"].some((key) => Object.prototype.hasOwnProperty.call(value, key))) return null;
   if (!fields(value, {}, stateFields)) return null;
   return { kind: "state", state: value as SwarmState };

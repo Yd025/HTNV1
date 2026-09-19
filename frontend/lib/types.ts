@@ -37,7 +37,7 @@ export type Scorecard = {
   coverage: number;
   collaboration: number;
   efficiency: number;
-  tracking: number;
+  tracking: number | null;
   time_to_detect_s?: number | null;
   meters_flown?: number;
   commands_issued?: number;
@@ -50,6 +50,7 @@ export type Scorecard = {
 
 export type SwarmState = {
   type?: string;
+  status?: "ok" | "warming" | "stale" | "failed" | "complete";
   adapter?: string;
   deployed?: boolean;
   heartbeat?: number;

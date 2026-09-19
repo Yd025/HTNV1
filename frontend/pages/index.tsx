@@ -752,7 +752,7 @@ function Score({
   icon,
 }: {
   label: string;
-  value?: number;
+  value?: number | null;
   detail: string;
   icon: string;
 }) {

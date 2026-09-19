@@ -104,6 +104,53 @@ test("parser accepts the wire contract and rejects malformed/warming frames", ()
   assert.equal(parse(JSON.stringify({ ...base, commands: [{ vehicle_id: "plane-1", type: "hold", lat: null, lon: null, alt: null, sector: null }] })).kind, "state");
 });
 
+test("backend state envelopes preserve unavailable tracking and additive evidence", () => {
+  const { parse } = createHarness();
+  // Same additive fields as the recorded backend contract, with truth unavailable.
+  // Keep this fixture portable: it does not depend on another developer checkout.
+  const frame = {
+    ...base, status: "ok", adapter: "whiteout",
+    scores: { ...base.scores, tracking: null, track_error_m: null },
+    run: { run_id: "camera-fixture", mode: "live", sequence: 11, evaluation_truth_available: false },
+    observations: { received: 0, forwarded: 0, rejected: [], latest_age_s: null },
+    recording: { enabled: false }, command_outcomes: [],
+  };
+  const parsed = parse(JSON.stringify(frame));
+  assert.equal(parsed.kind, "state");
+  assert.equal(parsed.state.scores.tracking, null);
+  assert.equal(parsed.state.status, "ok");
+  assert.equal(parsed.state.run.mode, "live");
+  assert.equal(parse(JSON.stringify({ ...frame, scores: { ...frame.scores, tracking: 0.75 } })).state.scores.tracking, 0.75);
+  for (const tracking of ["unavailable", {}, []]) {
+    assert.equal(parse(JSON.stringify({ ...frame, scores: { ...frame.scores, tracking } })), null);
+  }
+  assert.equal(parse(JSON.stringify({ ...frame, status: "unknown" })), null);
+  assert.equal(parse(JSON.stringify({ ...frame, status: 1 })), null);
+});
+
+test("backend terminal and stale state is accepted without being labeled fresh", () => {
+  const harness = createHarness();
+  harness.flush();
+  const socket = harness.sockets[0];
+  socket.open();
+  socket.message({ ...base, status: "ok", scores: { ...base.scores, tracking: null } });
+  harness.flush();
+  assert.equal(harness.output.isFresh, true);
+  assert.equal(harness.output.state.scores.tracking, null);
+  for (const status of ["warming", "stale", "failed", "complete"]) {
+    socket.message({ ...base, status, deployed: false });
+    harness.flush();
+    assert.equal(harness.output.state.status, status);
+    assert.equal(harness.output.state.deployed, false);
+    assert.equal(harness.output.isFresh, false);
+    assert.equal(harness.output.connection, "live");
+  }
+  socket.message({ ...base, status: "ok" });
+  harness.flush();
+  assert.equal(harness.output.isFresh, true);
+  harness.cleanup();
+});
+
 test("stream lifecycle retains state, measures actual traffic, and reconnects safely", () => {
   const harness = createHarness();
   const { flush, advance, sockets } = harness;
