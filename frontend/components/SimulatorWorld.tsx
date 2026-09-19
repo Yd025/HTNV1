@@ -14,14 +14,15 @@ type Props = {
   colors: ThemeColors;
 };
 const CAMERA_VIEWS = [
-  { id: "orbit", label: "Follow ship", detail: "Drag to orbit · scroll to zoom" },
+  { id: "orbit", label: "Follow ship", detail: "Centered elevated view · drag to orbit · scroll to zoom" },
+  { id: "inspect", label: "Asset + ship", detail: "Reference radius overview with a live ship close-up" },
   { id: "free", label: "Free", detail: "Unlink the camera and navigate manually" },
 ] as const;
 const ROLE_LABELS: Record<string, string> = { search: "Search area", cue: "Cue sensors", track: "Track ship", confirm: "Confirm contact", reserve: "Stand by" };
 const CLASS_LABELS: Record<string, string> = { tower: "Sensor tower", plane: "Search plane", copter: "Quadcopter", rover: "Ground rover" };
 type CameraMode = typeof CAMERA_VIEWS[number]["id"];
 type NativeAsset = { id: string; vehicleClass: VehicleClass };
-type ViewerStatus = { connected: boolean; matched: string[]; assets?: NativeAsset[]; shipAvailable?: boolean; followingShip?: boolean; cameraMode?: CameraMode };
+type ViewerStatus = { connected: boolean; matched: string[]; assets?: NativeAsset[]; shipAvailable?: boolean; followingShip?: boolean; cameraMode?: CameraMode; selection?: { id: string; radius_m: number | null } | null };
 type CaptureWindow = Window & { __overwatchCaptureCanvas?: (canvas: HTMLCanvasElement) => void };
 const format = (value: unknown, unit = "") => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : "Unavailable";
 
@@ -71,10 +72,11 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
         const reportedMode = CAMERA_VIEWS.some(view => view.id === message.cameraMode) ? message.cameraMode as CameraMode : undefined;
         const assets: NativeAsset[] = Array.isArray(message.assets) ? message.assets.slice(0, 128).filter((item: NativeAsset) => item && typeof item.id === "string" && item.id.length <= 100 && Object.hasOwn(CLASS_LABELS, item.vehicleClass)) : [];
         nativeIds.current = assets.map(item => item.id);
-        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string"), assets, shipAvailable: message.shipAvailable === true, followingShip: message.followingShip === true, cameraMode: reportedMode });
+        const selection = message.selection && typeof message.selection.id === "string" ? { id: message.selection.id, radius_m: typeof message.selection.radius_m === "number" && Number.isFinite(message.selection.radius_m) && message.selection.radius_m > 0 ? message.selection.radius_m : null } : null;
+        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string"), assets, shipAvailable: message.shipAvailable === true, followingShip: message.followingShip === true, cameraMode: reportedMode, selection });
       }
       if (message.type === "overwatch:select" && typeof message.id === "string" &&
-        (nativeIds.current.includes(message.id) || latest.current.state.adapter === "whiteout" && Object.values(latest.current.state.fleet ?? {}).some(vehicle => vehicle.vehicle_id === message.id))) onSelect(message.id);
+        (nativeIds.current.includes(message.id) || latest.current.state.adapter === "whiteout" && Object.values(latest.current.state.fleet ?? {}).some(vehicle => vehicle.vehicle_id === message.id))) { onSelect(message.id); setCameraMode("inspect"); }
     };
     window.addEventListener("message", receive);
     const timeout = window.setTimeout(() => setFailed(true), 15000);
@@ -126,12 +128,13 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
 
   function focus(id: string) {
     onSelect(id);
-    chooseCamera("free");
+    chooseCamera("inspect");
     frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:focus", version: 1, id }), window.location.origin);
   }
 
   function chooseCamera(mode: CameraMode) {
     setCameraMode(mode);
+    if (ready) frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:camera", version: 1, mode, reset: mode === "orbit" }), window.location.origin);
     Sentry.addBreadcrumb({ category: "simulator.camera", message: `Camera view: ${mode}`, data: { mode }, level: "info" });
   }
 
@@ -139,6 +142,7 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
   const cameraStatus = !ready ? "Waiting for native viewer"
     : cameraMode === "free" ? "Free camera · drag, pan and zoom manually"
     : !viewer.connected ? `${selectedView.label} paused · world disconnected`
+    : cameraMode === "inspect" ? `Asset + ship · reference radius overview${viewer.shipAvailable ? " · ship close-up at top right" : " · ship unavailable"}`
     : !viewer.shipAvailable ? `${selectedView.label} waiting for target_vessel`
     : viewer.followingShip && viewer.cameraMode === cameraMode ? `${selectedView.label} active · ${selectedView.detail}`
     : `Switching to ${selectedView.label.toLowerCase()}`;
@@ -169,13 +173,14 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
       <iframe ref={frame} src="/api/simulator-viewer" title="ArcticSim live 3D terrain, fleet and mission tags" allow="fullscreen" allowFullScreen />
       {!ready && !failed && <div className={s.loading} role="status">Loading terrain and live object tags…</div>}
       {asset && <section className={s.inspector} aria-label={`Selected object ${asset.vehicle_id}`}>
-        <div className={s.inspectorHead}><strong>{asset.vehicle_id}</strong><span>{CLASS_LABELS[asset.vehicle_class ?? ""] ?? "Asset"} · {ROLE_LABELS[asset.role ?? ""] ?? "Assignment unavailable"}</span><button type="button" onClick={() => onSelect(null)} aria-label="Close object details">Close</button></div>
-        {assetHasTelemetry ? <>
+        <div className={s.inspectorHead}><strong>{asset.vehicle_id}</strong><span>{CLASS_LABELS[asset.vehicle_class ?? ""] ?? "Asset"}</span><button type="button" onClick={() => { onSelect(null); chooseCamera("orbit"); }} aria-label="Close object details">Close</button></div>
+        <p>Reference radius: {viewer.selection?.id === asset.vehicle_id && viewer.selection.radius_m != null ? `${viewer.selection.radius_m.toLocaleString()} m` : "Unavailable"} · sensor reach unverified</p>
+        {assetHasTelemetry ? <details><summary>Mission telemetry · {ROLE_LABELS[asset.role ?? ""] ?? "Assignment unavailable"}</summary>
         <dl><div><dt>Altitude</dt><dd>{format(asset.alt, " m")}</dd></div><div><dt>Speed</dt><dd>{format(asset.groundspeed, " m/s")}</dd></div><div><dt>Heading</dt><dd>{format(asset.heading, "°")}</dd></div><div><dt>Battery</dt><dd>{typeof asset.battery_remaining === "number" && asset.battery_remaining >= 0 ? format(asset.battery_remaining, "%") : "Unavailable"}</dd></div></dl>
         <p>{!isFresh ? "Last received telemetry · " : ""}{asset.mavlink ? "MAVLink connected" : "Vehicle link unavailable"} · {asset.mode ?? "Mode unavailable"}{asset.armed == null ? "" : asset.armed ? " · Armed" : " · Disarmed"}</p>
         <p>Intent: {state.intents?.[asset.vehicle_id] ?? "Unavailable"}{!canLocate(asset.vehicle_id) ? " · Waiting for this object in the world" : ""}</p>
         <p>Assigned task only; visual contact is not confirmed by a role.</p>
-        </> : <p>Located from the native scene. Mission telemetry and assigned role are unavailable for this object.</p>}
+        </details> : <p>Native object · mission assignments unavailable</p>}
       </section>}
     </div>
   </div>;

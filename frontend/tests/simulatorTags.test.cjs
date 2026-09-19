@@ -36,7 +36,7 @@ function element(tagName) {
   };
 }
 
-function harness() {
+function harness(three = { Vector3 }) {
   const origin = "http://localhost:3000";
   const document = { head: element("head"), body: element("body"), createElement: element };
   const models = new Map();
@@ -47,7 +47,7 @@ function harness() {
   let controlUpdates = 0;
   const scene = {
     camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01), lookAt(target) { cameraLookTarget = new Vector3().copy(target); } },
-    controls: { target: new Vector3(), enablePan: true, enableRotate: true, enableZoom: true, noPan: false, noRotate: false, noZoom: false, update() { controlUpdates += 1; } },
+    controls: { target: new three.Vector3(), enablePan: true, enableRotate: true, enableZoom: true, noPan: false, noRotate: false, noZoom: false, update() { controlUpdates += 1; } },
     onMouseScroll() { return "native-scroll"; },
     getByName: id => models.get(id),
     getDomElement: () => ({ getBoundingClientRect: () => ({ left: 20, top: 30, width: 800, height: 600 }) }),
@@ -56,7 +56,7 @@ function harness() {
   const parent = { postMessage(message, targetOrigin) { messages.push({ message, targetOrigin }); } };
   const listeners = {};
   const window = {
-    parent, location: { origin }, scene, THREE: { Vector3 }, iface: { isConnected: true },
+    parent, location: { origin }, scene, THREE: three, iface: { isConnected: true },
     addEventListener(type, listener) { listeners[type] = listener; },
     setTimeout() { throw new Error("Scene should already be available"); },
   };
@@ -226,16 +226,18 @@ test("missing, invisible, clipped and removed native objects cannot leave visibl
   assert.equal(h.leaders[0].hidden, true);
   assert.equal(h.dots[0].hidden, true);
   h.telemetry([]);
-  assert.equal(h.layer.children.length, 0);
+  assert.equal(h.tags.length + h.leaders.length + h.dots.length, 0);
   assert.equal(tag.parentNode, null);
 });
 
-test("turning tags off hides the layer and turning them on uses the current native pose", () => {
+test("turning asset tags off leaves ship overlays available and reenabling uses the current pose", () => {
   const h = harness();
   const object = h.model("copter-1");
   h.telemetry([asset()], { tags: false });
   h.scene.render();
-  assert.equal(h.layer.hidden, true);
+  h.scene.render();
+  assert.equal(h.tags[0].hidden, true);
+  assert.equal(h.layer.hidden, false);
   object.position.set(20, -20, 0);
   h.telemetry([asset()], { tags: true });
   h.scene.render();
@@ -326,14 +328,70 @@ test("focus changes only the local camera and ignores untrusted or unknown reque
   assert.deepEqual(h.scene.controls.target, new Vector3(20, 30, 40));
   assert.deepEqual(object.position, new Vector3(20, 30, 40));
   const cameraOffset = new Vector3().subVectors(h.scene.camera.position, object.position);
-  assert.ok(Math.abs(cameraOffset.length() - 160) < 1e-10);
-  assert.equal(cameraOffset.x, 0);
+  assert.ok(cameraOffset.length() > 120, "camera fits the copter reference radius");
   assert.ok(cameraOffset.y < 0 && cameraOffset.z > 0);
   assert.equal(h.messages.length, 0);
   assert.equal(h.renderCalls.length, 0);
   h.models.delete("copter-1");
   h.send(focus);
   assert.equal(h.controlUpdates, 1);
+});
+
+test("selected radius and ship both fit the overview, including portrait layouts", () => {
+  const T = require("three");
+  for (const aspect of [4 / 3, 0.55]) {
+    const h = harness(T);
+    h.scene.camera = new T.PerspectiveCamera(60, aspect, 0.1, 50000);
+    h.scene.camera.up.set(0, 0, 1);
+    h.scene.scene = new T.Scene();
+    h.scene.getDomElement = () => ({ getBoundingClientRect: () => ({ left: 0, top: 0, width: 600 * aspect, height: 600 }) });
+    h.model("tower-1", 100, 200, 8);
+    const ship = h.model("target_vessel", 8000, -4000, 0);
+    h.telemetry([asset("tower-1", { vehicleClass: "tower", role: "cue" })], { selected: "tower-1" });
+    h.send({ type: "overwatch:focus", version: 1, id: "tower-1" });
+    h.scene.render(); h.scene.camera.updateMatrixWorld();
+    const ring = h.scene.scene.getObjectByName("overwatch-reference-radius");
+    assert.equal(ring.scale.x, 2500);
+    assert.equal(ring.scale.y, 2500);
+    assert.equal(ring.position.x, 100);
+    assert.equal(ring.position.y, 200);
+    for (const p of [[100-2500,200,9], [100+2500,200,9], [100,200-2500,9], [100,200+2500,9], [ship.position.x,ship.position.y,ship.position.z]]) {
+      const screen = new T.Vector3(...p).project(h.scene.camera);
+      assert.ok(Math.abs(screen.x) < 0.9 && Math.abs(screen.y) < 0.9 && Math.abs(screen.z) < 1, "radius and native ship remain inside the viewport");
+    }
+    const label = h.layer.children.find(child => child.className === "ow-range");
+    assert.match(label.textContent, /Reference radius 2.5 km/);
+    assert.match(label.textContent, /sensor reach unverified/);
+    h.telemetry([asset("tower-1", { vehicleClass: "tower" })], { selected: null });
+    h.scene.render();
+    assert.equal(ring.visible, false);
+    assert.equal(label.hidden, true);
+  }
+});
+
+test("ship inset restores the main renderer viewport and never changes model poses", () => {
+  const T = require("three"), h = harness(T), calls = [];
+  h.scene.camera = new T.PerspectiveCamera(60, 4/3, 0.1, 50000);
+  h.scene.scene = new T.Scene();
+  h.scene.renderer = { autoClear: true, setViewport(...values) { calls.push(["viewport", ...values]); }, setScissor() {}, setScissorTest(on) { calls.push(["scissor", on]); }, clear() {}, render() { calls.push(["inset"]); } };
+  h.model("tower-1", 10, 20, 8);
+  const ship = h.model("target_vessel", 300, 400, 0);
+  h.telemetry([asset("tower-1", { vehicleClass: "tower" })], { selected: "tower-1" });
+  h.scene.render();
+  assert.ok(calls.some(call => call[0] === "inset"));
+  assert.deepEqual(calls.at(-1), ["viewport", 0, 0, 800, 600]);
+  assert.deepEqual(calls.at(-2), ["scissor", false]);
+  assert.equal(h.scene.renderer.autoClear, true);
+  assertVector(ship.position, { x: 300, y: 400, z: 0 });
+  h.window.THREE = { ...T, REVISION: "86" };
+  calls.length = 0; h.scene.render();
+  assert.equal(calls.find(call => call[0] === "viewport")[2], 12, "native r86 expects a top-left viewport origin");
+  h.scene.renderer.render = () => { throw new Error("Auxiliary render failed"); };
+  assert.equal(h.scene.render(), "native-render-result");
+  assert.equal(h.scene.renderer.autoClear, true);
+  assert.equal(h.layer.children.find(child => child.className === "ow-inset").hidden, true);
+  h.window.iface.isConnected = false; h.scene.render();
+  assert.equal(h.layer.children.find(child => child.className === "ow-inset").hidden, true);
 });
 
 test("ship follow tracks native movement in the paint call and preserves orbit and zoom", () => {
