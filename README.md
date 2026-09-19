@@ -84,7 +84,53 @@ python -B eval.py --seconds 30 --profile all
 
 These local checks do not validate ArcticSim camera calibration or the live fleet; those still require the simulator integration pass.
 
-## Learn two-tower placement and search
+## ArcticSim slide-based fleet learning
+
+The main page now opens **Teach the fleet to search**, an offline experiment using the installed Fort Ross terrain and the four assets from the supplied ArcticSim slides: two towers, one quadcopter, and one fixed-wing aircraft. It learns a sparse boat-motion model and five search-priority weights, compares tower placements, and uses A* to route the drones to selected search points. It is a small statistical search model, not a language model or a globally optimal unknown-target planner. The existing live mission and camera panels remain below it.
+
+**Spawn random boat** generates a fresh route on connected water. **Run this placement** reuses the displayed mission seed and any explicit boat start, so tower changes can be compared against the same boat route. **Place boat / Move tower** supports map clicks and coordinate inputs, snapping to connected water or legal land; towers remain at least 250 m apart. The map displays both drone trails and planned graph routes, smooth curved scan guides, reporting sensors, and the shortest horizontal line to the nearest sensor reporting at the latest recorded observation. **Exact camera footprints** exposes the sea-plane frustum geometry as an optional layer. A dashed nearest-sensor line is only a distance guide. The displayed boat is evaluation truth and is never passed to the search policy. **Watch all tests** starts at the first saved unseen mission and plays the sequence.
+
+**This mission, as it happens** keeps graphs and numbers synchronized with playback. Coverage, tracking custody, RMSE, estimate availability, drone distance, reporting-source changes and sensor contributions use only observations through the current time. Pause holds the data; rewind removes later observations; changing missions or placements starts a fresh set of live values. The scene animates smoothly between recorded poses while measurements update at the declared 5-second simulation cadence. A separate, collapsed **Completed benchmark** contains the fixed 200-mission comparison. During retraining, candidate graphs update as results arrive and partial held-out comparison curves/tables update every ten completed missions, with per-policy sample counts and unstarted policies left blank.
+
+**Retrain model** runs the actual local Python experiment with progress and candidate placements on the page. It fits motion counts from 256 independent trajectories (15,360 transitions), evaluates 12 joint placement/policy candidates on 24 training missions, validates the initial candidate and up to three training finalists on 24 separate missions, and freezes the selected policy before evaluating 200 untouched missions per method. Every mission lasts 300 seconds with observations sampled every 5 seconds. The sweep baseline, untrained graph search, and trained model use the same 200 test boats and four assets. The two baseline tower mounts are the source positions snapped onto the sampled land grid. No test result selects the winner. Training is seeded elitist parameter search; it is not neural-network fine-tuning.
+
+The saved [model](frontend/public/experiments/graph-model.json), [full report and 200 mission replays](frontend/public/experiments/graph-report.json), and [source-derived profile](frontend/public/experiments/arctic-profile.json) include source fingerprints, protocol, every candidate, per-mission results and limitations. Graphs show training detection and cumulative held-out detection; misses stay in the denominator and receive the 300-second time cap. The comparison includes coverage, custody, observation-derived position RMSE, estimate availability, horizontal drone travel, and reporting-source changes. These are defined local measures, not the unpublished official scoring formula. Reporting-source changes include reacquisition after gaps, not confirmed live handoffs. Detection and localization use explicit synthetic assumptions (90% detection probability when geometrically visible, 15 m coordinate noise); real camera accuracy remains uncalibrated.
+
+Saved seed **190926** found **198/200 boats (99%)**, versus 182/200 (91%) for the untrained graph and 164/200 (82%) for the sweep baseline. Capped mean delay was **73.725 s**, versus 79.500 s and 94.425 s respectively. The paired mean saving versus the sweep is 20.7 s (95% bootstrap interval 6.999–32.679 s). Selected tower coordinates in world X/Y are **(−1625, 0)** and **(2031.25, 1083.33)**; headings are 57.17° and 203.48° clockwise from +Y. Coverage and position RMSE slightly regressed versus the untrained graph. Tower 2 contributed only two positive samples in this benchmark; the drones do most of the observed tracking, so these results do not establish the best tower-only layout. The page exposes each platform's contribution and all regressions.
+
+Verified values and their limits:
+
+| Item | Value used | Source / interpretation |
+| --- | --- | --- |
+| Terrain | 6,500 m square; 49² grid, 135.42 m spacing | Installed Fort Ross DEM and Gazebo heightmap; 746 navigable nodes with 2,609 checked water edges |
+| Water / tower sites | DEM water ≤0.05 m; shore buffer; land slope ≤15° | Water threshold from `terrain/course.py`; buffer, slope and grid are explicit planning constraints |
+| Tower camera | 59.989° HFOV, 35.976° VFOV, 1280×720 | Installed `terrain/tower.py`; camera center 2.7 m above base |
+| Quadcopter camera | 114.592° HFOV, 98.865° VFOV, 960×720 | Installed gimbal SDF; −45° pitch is an experiment assumption |
+| Plane camera | 68.984° HFOV, 42.261° VFOV, 1280×720 | Installed skywalker SDF; pitch ≈−8° |
+| Camera limit | 1,500 m optical-axis depth | SDF clipping plane, **not a guaranteed circular detection radius**; displayed rings are distance references |
+| Speeds | Boat 3 m/s; quad 10 m/s; plane 15 m/s | Generated vessel world and ArduPilot cruise/waypoint parameters |
+| Aircraft height | Quad 60 m / plane 120 m terrain clearance | Experimental assumptions, not source flight commands; turns and climbs are simplified |
+
+The slides list lower camera image resolutions (640×480 quad, 640×360 plane/towers) and approximately the same horizontal views. The export records the installed source configuration rather than silently mixing slide and source resolutions. Coordinates are ArcticSim **world X/Y**, rotated relative to true north; see the profile's convergence and scale metadata. Terrain occlusion is sampled, and narrow obstacles below grid resolution remain unresolved. Source camera rates are 10 Hz; the offline evaluator deliberately samples at 0.2 Hz. This experiment does not claim live frame-rate performance or detection from every possible water position.
+
+The slide's coverage, detection speed, search efficiency, tracking duration/accuracy, autonomy and collaboration categories are represented by the graphs and local metrics. Slide 24 documents `POST /api/tracks` on simulator port 8010 (name, lat, lon; optional heading and speed). Synthetic evaluation truth is **not** uploaded as a real detection. Live submission and deployment still require verified camera pose/altitude and detector calibration; this model remains an offline experiment and never sends fleet commands.
+
+Research: [Hart, Nilsson & Raphael's A*](https://ai.stanford.edu/~nilsson/OnlinePubs-Nils/PublishedPapers/astar.pdf) supplies the shortest-graph-route foundation. [Obstacle-aware informative target search](https://arxiv.org/abs/1902.10182) motivates balancing coverage, information and obstacles; [cooperative sensor planning](https://publications.ri.cmu.edu/sensor-planning-for-large-numbers-of-robots) motivates avoiding redundant search. A shortest route to one selected search point does not establish globally optimal search or tower placement. Maze wall-following/Trémaux/Pledge do not solve probabilistic unknown-target placement; BFS is suitable for equal-cost graph edges, while this terrain graph has unequal 3D travel costs.
+
+Reproduce from `backend/` (Python 3.12+, optional dependencies isolated from live control):
+
+```bash
+python -m pip install -r requirements-training.txt
+python -B export_arctic_profile.py --help
+python -B train_graph_search.py --seed 190926
+python -B -m unittest discover -s tests -p 'test_graph*.py'
+```
+
+The terrain export requires an adjacent ArcticSim source checkout with its generated Fort Ross assets; the checked-in profile is enough to rerun training. `--quick` is a smaller smoke run and is not the saved benchmark. Set the frontend server's `GRAPH_PYTHON` to the Python executable containing NumPy. In this workspace it is configured in ignored `frontend/.env.local`. Browser training runs only on loopback, uses fixed subprocess arguments without a shell, allows one job at a time, and saves separate sessions under ignored `frontend/.graph-jobs/`. Results and models can be downloaded. The live controller on port 8000 is unaffected. Run frontend checks with `node --test tests/*.test.cjs` and `node node_modules/typescript/bin/tsc --noEmit` from `frontend/`.
+
+## Historical flat-arena placement experiment
+
+The earlier two-tower-only panel and the following benchmarks are retained in source for comparison. They use a different 3 km flat arena and synthetic sensors; they are not the current main-page ArcticSim experiment.
 
 The main page's **Put the towers to the test** panel starts with the saved learned placement and a seeded random boat route. **Spawn random boat** samples a new start and destination anywhere in the square, independently of the towers. Drag either tower or route endpoint, then choose **Run test** to see the boat, radial pulses, and rotating camera views. A solid distance line selects the nearest tower that can currently see the boat; a dashed line is only a nearest-tower distance guide. It does not claim a sighting outside range/FOV, terrain-aware routing, or continuous target custody. First sightings are sampled once per second over 180 seconds; boats hold at their destinations.
 

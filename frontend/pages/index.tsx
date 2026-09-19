@@ -2,7 +2,7 @@ import dynamic from "next/dynamic";
 import Head from "next/head";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
-import PlacementDemo from "../components/PlacementDemo";
+import GraphTrainingDemo from "../components/GraphTrainingDemo";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
@@ -34,7 +34,7 @@ const sections: {
     value: "overview",
     label: "Overview",
     icon: "arena",
-    description: "Test tower placements, then follow the live mission below.",
+    description: "Train the search fleet, test unseen boats, then follow the live mission below.",
   },
   {
     value: "fleet",
@@ -283,7 +283,7 @@ export default function CommandCenter() {
             )}
             {section === "overview" && (
               <>
-                <PlacementDemo />
+                <GraphTrainingDemo />
                 <section className="score-strip" aria-label="Mission scores">
                   <Score
                     label="Coverage"
