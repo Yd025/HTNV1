@@ -72,13 +72,26 @@ class SwarmBrain:
         self.last_error: str | None = None
         self._closed = False
         self._truth: tuple[float, float] | None = None
+        self.search_planner = None
+        self._search_sample_time_s: float | None = None
+        self._search_commands: dict[str, Command] = {}
+        self._search_detected = False
 
     async def connect(self) -> None:
         if self._closed:
             raise RuntimeError("A closed brain cannot be restarted; create a fresh SwarmBrain for a new run")
         if self.connected:
             return
+        search_policy = getattr(self.adapter, "search_policy", None)
+        if search_policy and (self.adapter.name != "local" or self.mode != "synthetic"):
+            raise ValueError("Search policies are supported only by the local synthetic adapter")
         await self.adapter.connect()
+        if search_policy:
+            from search_policy import SearchPlanner
+            self.search_planner = SearchPlanner(self.adapter.arena(), algorithm=search_policy["algorithm"], **search_policy["planner"])
+            self._search_sample_time_s = None
+            self._search_commands.clear()
+            self._search_detected = False
         self.metrics = MetricsEngine(self.adapter.arena())
         self._started = time.monotonic()
         record_dir = os.getenv("RUN_LOG_DIR", "").strip()
@@ -101,6 +114,7 @@ class SwarmBrain:
                 "source_sha256": source_hash.hexdigest(),
                 "python_version": platform.python_version(),
                 "scenario": os.getenv("RUN_SCENARIO", "unspecified"),
+                "search_policy": search_policy,
                 "settings": {"brain_hz": TICK_HZ, "observation_max_age_s": self._gate.max_age_s,
                              "command_refresh_s": 1.0, "tracker_gate_m": self.tracker.gate_m},
             }
@@ -142,6 +156,9 @@ class SwarmBrain:
             self.world.detections = detections
             if detections:
                 self.last_detect_at = time.time()
+                if self.search_planner:
+                    self._search_detected = True
+                    self._search_commands.clear()
 
             with sentry_sdk.start_span(op="track.update", name="target_track"):
                 self.world.track = self.tracker.update(detections, now=self._started + elapsed_s)
@@ -153,13 +170,24 @@ class SwarmBrain:
 
             cmds: list[Command] = []
             self.command_outcomes = []
+            # Placement experiments affect FIND only. Existing C2 and platform
+            # agents retain acquisition/handoff/tracking, through this dispatcher.
+            search_commands = {}
+            if self.search_planner and not (self._search_detected or self.world.track or self.world.detections or self.world.last_cue):
+                sample_time_s = getattr(self.adapter, "search_sample_time_s", None)
+                if sample_time_s is not None and sample_time_s != self._search_sample_time_s:
+                    self._search_commands = {c.vehicle_id: c for c in self.search_planner.commands(vehicles, sample_time_s)}
+                    self._search_sample_time_s = sample_time_s
+                # Empty polls between sampled observations are not negative
+                # evidence. Existing dispatch suppression handles cached goals.
+                search_commands = self._search_commands
             for v in vehicles:
                 if not comms[v.vehicle_id]:
                     continue
                 decision = self.squad.tick(v, self.world)
                 for call in decision.calls:
                     self.world.post(v.vehicle_id, call.recipient, call.kind, call.body)
-                cmd = decision.command
+                cmd = search_commands.get(v.vehicle_id, decision.command)
                 if cmd:
                     cmds.append(cmd)
             for cmd in cmds:
@@ -235,6 +263,9 @@ class SwarmBrain:
                     "clock": "Unix receipt timestamps; monotonic control intervals",
                     "evaluation_truth_available": self._truth is not None,
                     "source_run_id": getattr(self.adapter, "manifest", {}).get("run_id")},
+            "search_experiment": {"enabled": self.search_planner is not None,
+                                  "mode": "synthetic" if self.search_planner else None,
+                                  "algorithm": getattr(self.adapter, "search_policy", {}).get("algorithm") if getattr(self.adapter, "search_policy", None) else None},
             "observations": self.observation_status,
             "command_outcomes": self.command_outcomes,
             "recording": self.recorder.status if self.recorder else {"enabled": False},

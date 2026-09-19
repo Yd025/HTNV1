@@ -7,6 +7,8 @@ from sim.types import SimAdapter
 
 def build_adapter(name: str | None = None) -> SimAdapter:
     kind = (name or os.getenv("ADAPTER", "local")).strip().lower()
+    if kind != "local" and os.getenv("SEARCH_POLICY_FILE", "").strip():
+        raise ValueError("SEARCH_POLICY_FILE is a local synthetic experiment; clear it before live/replay use")
     if kind == "replay":
         from replay import ReplayAdapter
 

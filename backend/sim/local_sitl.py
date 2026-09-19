@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import random
 import time
 
 from geo import (
@@ -56,7 +58,8 @@ def _fleet_spec() -> list[dict]:
 
 
 class KinematicCraft:
-    def __init__(self, spec: dict) -> None:
+    def __init__(self, spec: dict, arena: Arena | None = None) -> None:
+        self.arena = arena
         self.vehicle_id = spec["vehicle_id"]
         self.sysid = spec["sysid"]
         self.vehicle_class: VehicleClass = spec["vehicle_class"]
@@ -76,7 +79,8 @@ class KinematicCraft:
             return
         if self.cmd.lat is None or self.cmd.lon is None:
             return
-        tn, te = ll_to_ne(self.cmd.lat, self.cmd.lon)
+        origin = (self.arena.origin_lat, self.arena.origin_lon) if self.arena else (ORIGIN_LAT, ORIGIN_LON)
+        tn, te = ll_to_ne(self.cmd.lat, self.cmd.lon, *origin)
         dn, de = tn - self.north, te - self.east
         dist = (dn ** 2 + de ** 2) ** 0.5
         speed = SPEED[self.vehicle_class]
@@ -88,8 +92,8 @@ class KinematicCraft:
         step = min(speed * dt, dist)
         self.north += dn / dist * step
         self.east += de / dist * step
-        self.north, self.east = clamp_arena(self.north, self.east)
-        self.heading = wrap_heading(bearing_deg(*ne_to_ll(self.north - dn, self.east - de), *ne_to_ll(self.north, self.east)))
+        self.north, self.east = clamp_arena(self.north, self.east, self.arena.half_m if self.arena else ARENA_HALF_M)
+        self.heading = wrap_heading(math.degrees(math.atan2(de, dn)))
         if self.cmd.alt is not None:
             self.alt += (self.cmd.alt - self.alt) * min(1.0, dt * 0.6)
         if self.vehicle_class == "rover":
@@ -97,7 +101,8 @@ class KinematicCraft:
         self.groundspeed = speed
 
     def state(self, mavlink: bool) -> VehicleState:
-        lat, lon = ne_to_ll(self.north, self.east)
+        origin = (self.arena.origin_lat, self.arena.origin_lon) if self.arena else (ORIGIN_LAT, ORIGIN_LON)
+        lat, lon = ne_to_ll(self.north, self.east, *origin)
         return VehicleState(
             vehicle_id=self.vehicle_id,
             sysid=self.sysid,
@@ -124,14 +129,26 @@ class LocalSitlAdapter:
                 TowerMount("tower-sw", *ne_to_ll(-900, -900), heading=45.0),
             ],
         )
-        self._kin: dict[str, KinematicCraft] = {s["vehicle_id"]: KinematicCraft(s) for s in _fleet_spec()}
+        self._force_kinematic = os.getenv("FORCE_KINEMATIC", "1") == "1"
+        self.search_policy: dict | None = None
+        policy_path = os.getenv("SEARCH_POLICY_FILE", "").strip()
+        if policy_path:
+            if not self._force_kinematic:
+                raise ValueError("SEARCH_POLICY_FILE is supported only with FORCE_KINEMATIC=1")
+            from search_experiment import arena_for, load_policy
+            self.search_policy = load_policy(policy_path)
+            self._arena = arena_for(self.search_policy)
+        self._kin: dict[str, KinematicCraft] = {s["vehicle_id"]: KinematicCraft(s, self._arena) for s in _fleet_spec()}
         self._bridges: dict = {}
-        self._target = TargetSim()
+        self._target = TargetSim(origin_lat=self._arena.origin_lat, origin_lon=self._arena.origin_lon, half_m=self._arena.half_m)
+        self._search_rng = random.Random(2026)
         self._last_tick = time.monotonic()
+        self._search_started_s = self._last_tick
+        self._search_sample_index: int | None = None
+        self.search_sample_time_s: float | None = None
         self._comms = {vid: True for vid in self._kin}
         for tw in self._arena.towers:
             self._comms[tw.vehicle_id] = True
-        self._force_kinematic = os.getenv("FORCE_KINEMATIC", "1") == "1"
 
     @property
     def mode(self) -> str:
@@ -139,6 +156,17 @@ class LocalSitlAdapter:
         return "synthetic" if self._force_kinematic else "hybrid"
 
     async def connect(self) -> None:
+        if self.search_policy:
+            # Existing tracker, metrics and post-detection maneuvers resolve
+            # default coordinates through geo, as in the Whiteout adapter.
+            import geo as geo_mod
+            geo_mod.ORIGIN_LAT = self._arena.origin_lat
+            geo_mod.ORIGIN_LON = self._arena.origin_lon
+            geo_mod.ARENA_HALF_M = self._arena.half_m
+            self._search_started_s = time.monotonic()
+            self._search_sample_index = None
+            self.search_sample_time_s = None
+            self._search_rng.seed(2026)
         for vid in self._comms:
             self._comms[vid] = True
         if self._force_kinematic:
@@ -181,7 +209,7 @@ class LocalSitlAdapter:
                 await self._drain_mav(bridge)
                 snap = bridge.snapshot()
                 if snap.get("lat") is not None:
-                    kin.north, kin.east = ll_to_ne(float(snap["lat"]), float(snap["lon"]))
+                    kin.north, kin.east = ll_to_ne(float(snap["lat"]), float(snap["lon"]), self._arena.origin_lat, self._arena.origin_lon)
                     kin.alt = float(snap.get("alt") or kin.alt)
                     kin.heading = float(snap.get("heading") or kin.heading)
                     kin.groundspeed = float(snap.get("groundspeed") or 0.0)
@@ -211,8 +239,26 @@ class LocalSitlAdapter:
         return vehicles
 
     async def poll_detections(self) -> list[Detection]:
+        if self.search_policy:
+            period = float(self.search_policy.get("observation_period_s", 1.0))
+            elapsed = max(0.0, time.monotonic() - self._search_started_s)
+            sample_index = math.floor((elapsed + 1e-9) / period)
+            if self._search_sample_index is not None and sample_index <= self._search_sample_index:
+                return []
+            # Sample current poses once at the next available epoch. Delayed
+            # ticks do not fabricate observations for any skipped epochs.
+            self._search_sample_index = sample_index
+            self.search_sample_time_s = sample_index * period
         vehicles = [self._kin[s["vehicle_id"]].state(False) for s in _fleet_spec()]
-        return self._target.detections_for(vehicles, self._arena.towers, time.time())
+        detections = self._target.detections_for(vehicles, self._arena.towers, time.time())
+        if self.search_policy:
+            probability = self.search_policy["planner"]["detection_probability"]
+            source_ids = sorted([*self._kin, *(t.vehicle_id for t in self._arena.towers)])
+            draws = {source_id: self._search_rng.random() for source_id in source_ids}
+            for detection in detections:
+                detection.observation_id = f"local-search:{self._search_sample_index}:{detection.source_id}"
+            return [d for d in detections if draws[d.source_id] < probability]
+        return detections
 
     async def send_command(self, command: Command) -> None:
         if command.type == "look_at" and command.lat is not None and command.lon is not None:

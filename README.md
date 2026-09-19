@@ -84,6 +84,34 @@ python -B eval.py --seconds 30 --profile all
 
 These local checks do not validate ArcticSim camera calibration or the live fleet; those still require the simulator integration pass.
 
+## Learn two-tower placement and search
+
+The offline experiment repeatedly spawns a synthetic boat, tests two tower placements with the mobile fleet, and saves the best validated configuration. It compares a systematic sweep with probability-guided search; it does not train a language model. Read [the research and algorithm comparison](docs/research/TOWER_SEARCH_RESEARCH.md) for the objective, sensor assumptions, primary sources, and the separate ArcticSim validation steps.
+
+From `backend/`, with Python 3.12 or later (no extra packages needed for training):
+
+```powershell
+python -B train_search.py --candidates 32 --train 32 --validation 48 --test 160 --output ../runs/tower-search
+# Continue learning from the saved incumbent; use new untouched test episodes.
+python -B train_search.py --resume ../runs/tower-search --candidates 32
+```
+
+The output directory contains `best_policy.json`, `latest_report.json`, and a separate report for each completed round. Training chooses candidates; validation selects the algorithm/placement without increasing validation misses; test results are never used for selection. Reports retain missed boats at the 180-second deadline, individual episode results, paired uncertainty intervals, source fingerprints, and towers-only/vehicles-only comparisons. The selected sweep is an explicit benchmark policy, not the pre-existing flight controller's exact patrol.
+
+To preview a saved placement through the existing backend and HUD, start one **local** backend with:
+
+```powershell
+$env:ADAPTER = 'local'
+$env:FORCE_KINEMATIC = '1'
+$env:DATABASE_ENABLED = '0'
+$env:SEARCH_POLICY_FILE = '../runs/tower-search/best_policy.json'
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+The two mounts and FIND policy load into the existing adapter and brain. After a detection, the existing handoff/tracking behavior takes over. Sampling follows the saved observation interval even though control runs at 10 Hz. This preview uses the ordinary local scripted target; the repeatable randomized benchmark runs through `train_search.py`. Stop a running backend before replacing it. Clear `SEARCH_POLICY_FILE` before using WHITEOUT, hybrid SITL or replay; synthetic policies are rejected there. No live tower repositioning or simulator reset is performed by training.
+
+This is a flat 3 km local model with synthetic FOV observations. It does not establish the best positions on Fort Ross terrain, confirmed camera detection, or a global optimum. Target-motion boundary reflections and craft heading were corrected so the optimizer does not exploit a stuck boat or an incorrect camera bearing.
+
 ## Who owns what
 
 | Person | Branch | Main files | Handoff |

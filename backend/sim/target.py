@@ -24,6 +24,11 @@ class TargetSim:
     heading: float = 220.0
     t0: float = field(default_factory=time.monotonic)
     paused_until: float = 0.0
+    origin_lat: float = ORIGIN_LAT
+    origin_lon: float = ORIGIN_LON
+    half_m: float = ARENA_HALF_M
+    _weave_offset: float = field(default=0.0, init=False, repr=False)
+    _weave_direction: float = field(default=1.0, init=False, repr=False)
 
     def reset(self, profile: str | None = None) -> None:
         if profile:
@@ -32,28 +37,43 @@ class TargetSim:
         self.heading = 220.0
         self.t0 = time.monotonic()
         self.paused_until = 0.0
+        self._weave_offset = 0.0
+        self._weave_direction = 1.0
 
-    def step(self, dt: float) -> None:
-        now = time.monotonic()
-        elapsed = now - self.t0
+    def step(self, dt: float, *, elapsed_s: float | None = None) -> None:
+        # Offline trials supply simulation time; the live stand-in uses its clock.
+        elapsed = time.monotonic() - self.t0 if elapsed_s is None else elapsed_s
         speed = self.speed_mps
         if self.profile == "stop_and_go":
             cycle = elapsed % 20.0
             if cycle > 12.0:
                 speed = 0.0
         if self.profile == "weave":
-            self.heading = 40.0 + 25.0 * math.sin(elapsed * 0.35)
+            # Apply curvature relative to the supplied heading. After a wall
+            # reflection its sign must also reflect; replacing the heading with
+            # a fixed absolute wave each tick otherwise pins boats to a corner.
+            offset = 25.0 * math.sin(elapsed * 0.35)
+            self.heading = (self.heading + self._weave_direction * (offset - self._weave_offset)) % 360.0
+            self._weave_offset = offset
         vn, ve = heading_to_ne(self.heading)
         self.north += vn * speed * dt
         self.east += ve * speed * dt
-        half = ARENA_HALF_M * 0.85
-        if abs(self.north) > half or abs(self.east) > half:
-            self.heading = (self.heading + 140.0) % 360.0
-            self.north = max(-half, min(half, self.north))
-            self.east = max(-half, min(half, self.east))
+        half = self.half_m * 0.85
+        if not math.isfinite(half) or half <= 0:
+            raise ValueError("Target arena extent must be positive and finite")
+        # Preserve travel beyond the boundary instead of clipping it away.
+        # Separate axis reflections also handle corners and multiple crossings.
+        while abs(self.north) > half:
+            self.north = 2.0 * half - self.north if self.north > half else -2.0 * half - self.north
+            self.heading = (180.0 - self.heading) % 360.0
+            self._weave_direction *= -1.0
+        while abs(self.east) > half:
+            self.east = 2.0 * half - self.east if self.east > half else -2.0 * half - self.east
+            self.heading = (-self.heading) % 360.0
+            self._weave_direction *= -1.0
 
     def latlon(self) -> tuple[float, float]:
-        return ne_to_ll(self.north, self.east, ORIGIN_LAT, ORIGIN_LON)
+        return ne_to_ll(self.north, self.east, self.origin_lat, self.origin_lon)
 
     def detections_for(self, vehicles: list[VehicleState], towers: list[TowerMount], now: float) -> list[Detection]:
         tlat, tlon = self.latlon()
