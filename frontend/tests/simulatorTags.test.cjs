@@ -42,11 +42,12 @@ function harness() {
   const models = new Map();
   const messages = [];
   const renderCalls = [];
+  let cameraLookTarget = null;
   let time = 10000;
   let controlUpdates = 0;
   const scene = {
-    camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01) },
-    controls: { target: new Vector3(), enablePan: true, update() { controlUpdates += 1; } },
+    camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01), lookAt(target) { cameraLookTarget = new Vector3().copy(target); } },
+    controls: { target: new Vector3(), enablePan: true, enableRotate: true, enableZoom: true, noPan: false, noRotate: false, noZoom: false, update() { controlUpdates += 1; } },
     onMouseScroll() { return "native-scroll"; },
     getByName: id => models.get(id),
     getDomElement: () => ({ getBoundingClientRect: () => ({ left: 20, top: 30, width: 800, height: 600 }) }),
@@ -70,9 +71,17 @@ function harness() {
     get leaders() { return layer.children.filter(child => child.className === "ow-line"); },
     get dots() { return layer.children.filter(child => child.className === "ow-dot"); },
     get controlUpdates() { return controlUpdates; },
+    get cameraLookTarget() { return cameraLookTarget; },
     advance(ms) { time += ms; },
-    model(id, x = 0, y = 0, z = 0) {
-      const object = { position: new Vector3(x, y, z), visible: true, getWorldPosition(out) { return out.copy(this.position); } };
+    model(id, x = 0, y = 0, z = 0, yaw = 0) {
+      const object = {
+        position: new Vector3(x, y, z), yaw, visible: true,
+        getWorldPosition(out) { return out.copy(this.position); },
+        localToWorld(out) {
+          const lx = out.x, ly = out.y, c = Math.cos(this.yaw), s = Math.sin(this.yaw);
+          return out.set(lx * c - ly * s + this.position.x, lx * s + ly * c + this.position.y, out.z + this.position.z);
+        },
+      };
       models.set(id, object);
       return object;
     },
@@ -101,6 +110,11 @@ function assertAnchor(h, index, x, y) {
   const dy = Math.max(position.y, Math.min(position.y + tag.offsetHeight, y)) - y;
   assert.ok(Math.abs(parseFloat(h.leaders[index].style.width) - Math.hypot(dx, dy)) < 0.1,
     "leader spans from the exact native anchor to the nearest label edge");
+}
+
+function assertVector(actual, expected, message) {
+  for (const axis of ["x", "y", "z"]) assert.ok(Math.abs(actual[axis] - expected[axis]) < 1e-9,
+    `${message ?? "vector"} ${axis}: expected ${expected[axis]}, received ${actual[axis]}`);
 }
 
 test("bridge rejects messages from another origin, source, or protocol version", () => {
@@ -318,6 +332,62 @@ test("ship follow tracks native movement in the paint call and preserves orbit a
   assert.deepEqual(h.scene.camera.position, previous);
   assert.equal(h.scene.controls.enablePan, true);
   assert.equal(h.scene.onMouseScroll(), "native-scroll");
+});
+
+test("camera presets are ship-relative and cover chase, profiles, overhead and context views", () => {
+  const h = harness();
+  h.model("target_vessel", 10, 20, 0, Math.PI / 2);
+  const expected = {
+    chase: [[37.5, -90, 42.5], [10, 35, 7]],
+    stern: [[10, -100, 32.5], [10, 27.5, 7]],
+    bow: [[10, 130, 32.5], [10, 20, 7]],
+    port: [[-77.5, 20, 32.5], [10, 20, 7]],
+    starboard: [[97.5, 20, 32.5], [10, 20, 7]],
+    portQuarter: [[-52.5, -57.5, 42.5], [10, 27.5, 7]],
+    starboardQuarter: [[72.5, -57.5, 42.5], [10, 27.5, 7]],
+    waterline: [[85, 22.5, 5], [10, 26, 7]],
+    overhead: [[10, 17.5, 140], [10, 20, 0]],
+    wide: [[97.5, -90, 82.5], [10, 27.5, 7]],
+    bridge: [[10, 37.5, 19], [10, 170, 6]],
+  };
+  for (const [mode, [camera, target]] of Object.entries(expected)) {
+    h.send({ type: "overwatch:camera", version: 1, mode });
+    h.advance(1000); h.scene.render();
+    assertVector(h.scene.camera.position, new Vector3(...camera), mode + " camera");
+    assertVector(h.scene.controls.target, new Vector3(...target), mode + " target");
+    assertVector(h.cameraLookTarget, new Vector3(...target), mode + " look target");
+    assert.equal(h.scene.controls.enablePan, false);
+    assert.equal(h.scene.controls.enableRotate, false);
+    assert.equal(h.scene.controls.enableZoom, false);
+    assert.equal(h.scene.controls.noPan, true);
+    assert.equal(h.scene.controls.noRotate, true);
+    assert.equal(h.scene.controls.noZoom, true);
+    assert.equal(h.messages.at(-1).message.cameraMode, mode);
+    assert.equal(h.messages.at(-1).message.followingShip, true);
+  }
+});
+
+test("locked views rotate with heading, switch immediately and free restores navigation", () => {
+  const h = harness();
+  const ship = h.model("target_vessel", 0, 0, 0);
+  h.send({ type: "overwatch:camera", version: 1, mode: "chase" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(-110, -27.5, 42.5), "chase camera");
+  ship.yaw = Math.PI / 2; h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(27.5, -110, 42.5), "rotated chase camera");
+  h.send({ type: "overwatch:camera", version: 1, mode: "bow" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(0, 110, 32.5), "rotated bow camera");
+  h.send({ type: "overwatch:camera", version: 1, mode: "unknown" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(0, 110, 32.5), "unknown mode ignored");
+  h.send({ type: "overwatch:camera", version: 1, mode: "free" });
+  const free = new Vector3().copy(h.scene.camera.position);
+  ship.position.set(20, 30, 0); h.scene.render();
+  assert.deepEqual(h.scene.camera.position, free);
+  assert.equal(h.scene.controls.enablePan, true);
+  assert.equal(h.scene.controls.enableRotate, true);
+  assert.equal(h.scene.controls.enableZoom, true);
+  assert.equal(h.scene.controls.noPan, false);
+  assert.equal(h.scene.controls.noRotate, false);
+  assert.equal(h.scene.controls.noZoom, false);
 });
 
 test("ship follow rejects untrusted messages and pauses on disconnect, invalid or missing model", () => {

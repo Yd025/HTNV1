@@ -12,7 +12,23 @@ type Props = {
   onSelect: (id: string | null) => void;
   colors: ThemeColors;
 };
-type ViewerStatus = { connected: boolean; matched: string[]; shipAvailable?: boolean; followingShip?: boolean };
+const CAMERA_VIEWS = [
+  { id: "orbit", label: "Orbit", detail: "Follow while you orbit and zoom" },
+  { id: "chase", label: "Chase", detail: "Starboard-aft chase aligned with heading" },
+  { id: "stern", label: "Stern", detail: "Centered behind the ship" },
+  { id: "bow", label: "Bow-on", detail: "Ahead of the bow, looking back" },
+  { id: "port", label: "Port", detail: "Left-side profile" },
+  { id: "starboard", label: "Starboard", detail: "Right-side profile" },
+  { id: "portQuarter", label: "Port quarter", detail: "Left rear three-quarter view" },
+  { id: "starboardQuarter", label: "Starboard quarter", detail: "Right rear three-quarter view" },
+  { id: "waterline", label: "Waterline", detail: "Low side-on identification view" },
+  { id: "overhead", label: "Overhead", detail: "Top-down movement and heading" },
+  { id: "wide", label: "Wide aerial", detail: "High context view around the ship" },
+  { id: "bridge", label: "Forward POV", detail: "Elevated view looking past the bow" },
+  { id: "free", label: "Free", detail: "Unlink the camera and navigate manually" },
+] as const;
+type CameraMode = typeof CAMERA_VIEWS[number]["id"];
+type ViewerStatus = { connected: boolean; matched: string[]; shipAvailable?: boolean; followingShip?: boolean; cameraMode?: CameraMode };
 type CaptureWindow = Window & { __overwatchCaptureCanvas?: (canvas: HTMLCanvasElement) => void };
 const format = (value: unknown, unit = "") => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : "Unavailable";
 
@@ -24,7 +40,7 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
   const [tags, setTags] = useState(true);
-  const [followShip, setFollowShip] = useState(true);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [recording, setRecording] = useState(false);
   const [replayBusy, setReplayBusy] = useState(false);
   const [replayId, setReplayId] = useState<string>();
@@ -55,7 +71,8 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
       if (!message || message.version !== 1) return;
       if (message.type === "overwatch:ready") { setReady(true); setFailed(false); }
       if (message.type === "overwatch:status" && Array.isArray(message.matched)) {
-        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string"), shipAvailable: message.shipAvailable === true, followingShip: message.followingShip === true });
+        const reportedMode = CAMERA_VIEWS.some(view => view.id === message.cameraMode) ? message.cameraMode as CameraMode : undefined;
+        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string"), shipAvailable: message.shipAvailable === true, followingShip: message.followingShip === true, cameraMode: reportedMode });
       }
       if (message.type === "overwatch:select" && typeof message.id === "string" &&
         Object.values(latest.current.state.fleet ?? {}).some(vehicle => vehicle.vehicle_id === message.id)) onSelect(message.id);
@@ -68,8 +85,8 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
   useEffect(() => { if (ready) sendState(); }, [state, isFresh, selected, tags, colors, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (ready) frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:follow-ship", version: 1, enabled: followShip }), window.location.origin);
-  }, [ready, followShip]);
+    if (ready) frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:camera", version: 1, mode: cameraMode }), window.location.origin);
+  }, [ready, cameraMode]);
 
   useEffect(() => {
     const target = frame.current?.contentWindow as CaptureWindow | null;
@@ -109,22 +126,38 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
   }
 
   function focus() {
-    setFollowShip(false);
+    chooseCamera("free");
     frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:focus", version: 1, id: selected }), window.location.origin);
   }
+
+  function chooseCamera(mode: CameraMode) {
+    setCameraMode(mode);
+    Sentry.addBreadcrumb({ category: "simulator.camera", message: `Camera view: ${mode}`, data: { mode }, level: "info" });
+  }
+
+  const selectedView = CAMERA_VIEWS.find(view => view.id === cameraMode)!;
+  const cameraStatus = !ready ? "Waiting for native viewer"
+    : cameraMode === "free" ? "Free camera · drag, pan and zoom manually"
+    : !viewer.connected ? `${selectedView.label} paused · world disconnected`
+    : !viewer.shipAvailable ? `${selectedView.label} waiting for target_vessel`
+    : viewer.followingShip && viewer.cameraMode === cameraMode ? `${selectedView.label} active · ${selectedView.detail}`
+    : `Switching to ${selectedView.label.toLowerCase()}`;
 
   return <div className={s.world}>
     <div className={s.toolbar}>
       <label className={s.tags}><input type="checkbox" checked={tags} onChange={event => setTags(event.target.checked)} />Object tags</label>
       <label className={s.picker}><span className={s.srOnly}>Inspect simulator asset</span><select value={asset?.vehicle_id ?? ""} onChange={event => onSelect(event.target.value || null)}><option value="">Inspect an object…</option>{fleet.map(vehicle => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}</select></label>
       <button type="button" onClick={focus} disabled={!ready || !asset || !viewer.matched.includes(asset.vehicle_id)}>Locate</button>
-      <button type="button" aria-pressed={followShip} onClick={() => setFollowShip(value => !value)} disabled={!ready}>{followShip ? "Stop following ship" : "Follow ship"}</button>
       <button type="button" onClick={() => void toggleReplay()} disabled={!ready || !captureAvailable || replayBusy}>{replayBusy ? "Updating replay…" : recording ? "Stop replay recording" : "Record this view"}</button>
       {replayId && <a href={`${SENTRY_BASE}/replays/${replayId}/`} target="_blank" rel="noreferrer">Open replay ↗</a>}
       <span className={s.sync} role="status">{!ready ? failed ? "Viewer unavailable · reload below" : "Connecting to world…" : !viewer.connected ? "World connection lost" : `${viewer.matched.length}/${fleet.length} objects linked · ${isFresh ? "live tags" : "tags stale"}`}</span>
     </div>
+    <div className={s.cameraViews}>
+      <span>Ship camera views</span>
+      <div role="group" aria-label="Ship camera views">{CAMERA_VIEWS.map(view => <button key={view.id} type="button" aria-pressed={cameraMode === view.id} title={view.detail} disabled={!ready} onClick={() => chooseCamera(view.id)}>{view.label}</button>)}</div>
+    </div>
     <div className={s.cameraStatus} role="status">
-      <span>{!ready ? "Waiting for native viewer" : !followShip ? "Free camera" : !viewer.connected ? "Follow paused · world disconnected" : !viewer.shipAvailable ? "Waiting for target_vessel" : viewer.followingShip ? "Following ship · orbit and zoom freely" : "Acquiring ship"}. Native simulator position · observer view.</span>
+      <span>{cameraStatus}. Native simulator position · observer view.</span>
       {replayMessage && <span>{replayMessage}</span>}
     </div>
     <div className={s.viewport}>

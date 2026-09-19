@@ -49,7 +49,7 @@
 .bar i { display: block; height: 100%; background: var(--accent); min-width: 2px; }
 .traceFooter { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; width: 100%; padding-top: 18px; border-top: 1px solid var(--line); }
 .empty { padding: 24px 0; }
-.shipCamera { width:100%; height:560px; min-width:0; border:1px solid var(--line); }
+.shipCamera { width:100%; height:640px; min-width:0; border:1px solid var(--line); }
 .performanceActions { display:flex; gap:10px; flex-wrap:wrap; }
 .performanceActions button { border:1px solid var(--line); background:var(--surface-raised); padding:9px 14px; min-height:40px; font-size:12px; }
 .performanceActions button[aria-pressed=true] { color:var(--accent-text); border-color:var(--accent); }

@@ -9,7 +9,22 @@
   var point, projected, offset;
   // make_world.py names the ship target_vessel. This is a viewer camera only;
   // native truth never enters mission telemetry, detections or vehicle commands.
-  var followShip = false, following = false, framedShip = null, savedPan;
+  // Start free until the trusted parent explicitly requests a view.
+  var cameraMode = 'free', following = false, framedShip = null, framedMode = null, shipScale = 50;
+  var savedControls = null, cameraPoint, lookPoint, boundsSize;
+  var CAMERA_PRESETS = {
+    chase:            { camera: [-2.20, -0.55, 0.85], target: [ 0.30,  0.00, 0.14] },
+    stern:            { camera: [-2.40,  0.00, 0.65], target: [ 0.15,  0.00, 0.14] },
+    bow:              { camera: [ 2.20,  0.00, 0.65], target: [ 0.00,  0.00, 0.14] },
+    port:             { camera: [ 0.00,  1.75, 0.65], target: [ 0.00,  0.00, 0.14] },
+    starboard:        { camera: [ 0.00, -1.75, 0.65], target: [ 0.00,  0.00, 0.14] },
+    portQuarter:      { camera: [-1.55,  1.25, 0.85], target: [ 0.15,  0.00, 0.14] },
+    starboardQuarter: { camera: [-1.55, -1.25, 0.85], target: [ 0.15,  0.00, 0.14] },
+    waterline:        { camera: [ 0.05, -1.50, 0.10], target: [ 0.12,  0.00, 0.14] },
+    overhead:         { camera: [-0.05,  0.00, 2.80], target: [ 0.00,  0.00, 0.00] },
+    wide:             { camera: [-2.20, -1.75, 1.65], target: [ 0.15,  0.00, 0.14] },
+    bridge:           { camera: [ 0.35,  0.00, 0.38], target: [ 3.00,  0.00, 0.12] }
+  };
   var lastSnapshot = 0;
   var style = document.createElement('style');
   style.textContent = '#ow-tags{position:fixed;inset:0;pointer-events:none;z-index:110;font:12px system-ui,sans-serif;--tag-bg:#182232;--tag-text:#e2e7ea;--tag-muted:#a4b0b7;--tag-accent:#e7ad9f;--tag-line:#5b6670}' +
@@ -38,13 +53,17 @@
     var message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
     if (!message || message.version !== 1) return;
+    if (message.type === 'overwatch:camera') {
+      setCameraMode(message.mode);
+      return;
+    }
+    // Keep the first bridge version compatible with an already-open parent.
     if (message.type === 'overwatch:follow-ship') {
-      followShip = message.enabled === true;
-      if (!followShip) releaseFollow();
+      setCameraMode(message.enabled === true ? 'orbit' : 'free');
       return;
     }
     if (message.type === 'overwatch:focus') {
-      if (typeof message.id === 'string' && entries.has(message.id)) { followShip = false; releaseFollow(); focus(message.id); }
+      if (typeof message.id === 'string' && entries.has(message.id)) { setCameraMode('free'); focus(message.id); }
       return;
     }
     if (message.type !== 'overwatch:telemetry' || !Array.isArray(message.fleet) || !layer) return;
@@ -91,33 +110,76 @@
     scene.controls.update();
   }
   function releaseFollow() {
-    if (following && scene.controls && savedPan !== undefined) scene.controls.enablePan = savedPan;
-    following = false; framedShip = null;
+    if (savedControls && scene && scene.controls) Object.keys(savedControls).forEach(function(key) {
+      if (savedControls[key] !== undefined) scene.controls[key] = savedControls[key];
+    });
+    following = false; framedShip = null; framedMode = null; savedControls = null;
+  }
+  function setCameraMode(mode) {
+    if (mode !== 'free' && mode !== 'orbit' && !Object.prototype.hasOwnProperty.call(CAMERA_PRESETS, mode)) return;
+    if (mode === cameraMode) return;
+    cameraMode = mode;
+    framedShip = null; framedMode = null;
+    if (mode === 'free') releaseFollow();
+  }
+  function frameShip(object) {
+    if (!savedControls) savedControls = {
+      enablePan: scene.controls.enablePan, enableRotate: scene.controls.enableRotate, enableZoom: scene.controls.enableZoom,
+      noPan: scene.controls.noPan, noRotate: scene.controls.noRotate, noZoom: scene.controls.noZoom
+    };
+    shipScale = 50;
+    if (window.THREE.Box3) {
+      try {
+        new window.THREE.Box3().setFromObject(object).getSize(boundsSize);
+        var extent = Math.max(boundsSize.x, boundsSize.y, boundsSize.z);
+        if (Number.isFinite(extent) && extent > 0) shipScale = Math.max(15, Math.min(160, extent));
+      } catch (_) { /* Mesh bounds can be incomplete while the native model loads. */ }
+    }
+    if (cameraMode === 'orbit') {
+      offset.subVectors(scene.camera.position, scene.controls.target);
+      if (offset.length() < 1) offset.set(1, -1, 1);
+      offset.normalize().multiplyScalar(Math.max(30, Math.min(500, shipScale * 3)));
+    }
+    framedShip = object; framedMode = cameraMode;
+  }
+  function worldPoint(object, coordinates, output) {
+    output.set(coordinates[0] * shipScale, coordinates[1] * shipScale, coordinates[2] * shipScale);
+    if (typeof object.localToWorld === 'function') object.localToWorld(output);
+    else output.add(point);
+    return output;
   }
   function updateFollow() {
     var object = model('target_vessel');
-    if (!followShip || !window.iface || !window.iface.isConnected || !object || object.visible === false || !scene.camera || !scene.controls || !scene.controls.target) { releaseFollow(); return; }
+    if (cameraMode === 'free' || !window.iface || !window.iface.isConnected || !object || object.visible === false || !scene.camera || !scene.controls || !scene.controls.target) { releaseFollow(); return; }
     object.getWorldPosition(point);
     if (![point.x, point.y, point.z].every(Number.isFinite)) { releaseFollow(); return; }
-    offset.subVectors(scene.camera.position, scene.controls.target);
-    if (framedShip !== object) {
-      var distance = 160;
-      if (window.THREE.Box3) {
-        var size = new window.THREE.Vector3();
-        new window.THREE.Box3().setFromObject(object).getSize(size);
-        var extent = Math.max(size.x, size.y, size.z);
-        if (Number.isFinite(extent) && extent > 0) distance = Math.max(30, Math.min(500, extent * 3));
-      }
-      if (offset.length() < 1) offset.set(1, -1, 1);
-      offset.normalize().multiplyScalar(distance);
-      savedPan = scene.controls.enablePan;
-      scene.controls.enablePan = false;
-      framedShip = object;
+    if (framedShip !== object || framedMode !== cameraMode) frameShip(object);
+    var preset = CAMERA_PRESETS[cameraMode];
+    if (preset) {
+      if ('enablePan' in scene.controls) scene.controls.enablePan = false;
+      if ('enableRotate' in scene.controls) scene.controls.enableRotate = false;
+      if ('enableZoom' in scene.controls) scene.controls.enableZoom = false;
+      if ('noPan' in scene.controls) scene.controls.noPan = true;
+      if ('noRotate' in scene.controls) scene.controls.noRotate = true;
+      if ('noZoom' in scene.controls) scene.controls.noZoom = true;
+      scene.camera.position.copy(worldPoint(object, preset.camera, cameraPoint));
+      scene.controls.target.copy(worldPoint(object, preset.target, lookPoint));
+    } else {
+      if ('enablePan' in scene.controls) scene.controls.enablePan = false;
+      if ('noPan' in scene.controls) scene.controls.noPan = true;
+      if ('enableRotate' in scene.controls && savedControls.enableRotate !== undefined) scene.controls.enableRotate = savedControls.enableRotate;
+      if ('enableZoom' in scene.controls && savedControls.enableZoom !== undefined) scene.controls.enableZoom = savedControls.enableZoom;
+      if ('noRotate' in scene.controls && savedControls.noRotate !== undefined) scene.controls.noRotate = savedControls.noRotate;
+      if ('noZoom' in scene.controls && savedControls.noZoom !== undefined) scene.controls.noZoom = savedControls.noZoom;
+      // Re-derive this after user orbit/zoom so the camera does not fight input.
+      offset.subVectors(scene.camera.position, scene.controls.target);
+      scene.camera.position.copy(point).add(offset);
+      scene.controls.target.copy(point);
     }
-    // Translate camera and orbit target together, preserving user orbit/zoom.
-    scene.camera.position.copy(point).add(offset);
-    scene.controls.target.copy(point);
     scene.controls.update();
+    // gzweb's legacy OrbitControls intentionally comments out lookAt() when
+    // only target/position change. Locked presets must aim the native camera.
+    if (preset && typeof scene.camera.lookAt === 'function') scene.camera.lookAt(scene.controls.target);
     following = true;
   }
   function captureReplay() {
@@ -167,12 +229,13 @@
       entry.leader.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) rotate(' + Math.atan2(dy,dx) + 'rad)';
       entry.dot.style.transform = 'translate(' + (x-3).toFixed(1) + 'px,' + (y-3).toFixed(1) + 'px)';
     });
-    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, connected: !!(window.iface && window.iface.isConnected), shipAvailable: !!model('target_vessel'), followingShip: following }); }
+    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, connected: !!(window.iface && window.iface.isConnected), shipAvailable: !!model('target_vessel'), followingShip: following, cameraMode: cameraMode }); }
   }
   function attach() {
     scene = window.scene;
     if (!scene || typeof scene.render !== 'function' || !window.THREE) { window.setTimeout(attach, 250); return; }
     point = new window.THREE.Vector3(); projected = new window.THREE.Vector3(); offset = new window.THREE.Vector3();
+    cameraPoint = new window.THREE.Vector3(); lookPoint = new window.THREE.Vector3(); boundsSize = new window.THREE.Vector3();
     layer = document.createElement('div'); layer.id = 'ow-tags'; layer.setAttribute('aria-label', 'Live simulator object tags'); document.body.appendChild(layer);
     var original = scene.render;
     scene.render = function() { updateFollow(); var result = original.apply(this, arguments); renderTags(); captureReplay(); return result; };
