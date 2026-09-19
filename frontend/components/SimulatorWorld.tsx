@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import * as Sentry from "@sentry/nextjs";
+import { SENTRY_BASE } from "../lib/sentry";
 import type { ThemeColors } from "../lib/theme";
 import type { SwarmState } from "../lib/types";
 import s from "./SimulatorWorld.module.css";
@@ -10,7 +12,8 @@ type Props = {
   onSelect: (id: string | null) => void;
   colors: ThemeColors;
 };
-type ViewerStatus = { connected: boolean; matched: string[] };
+type ViewerStatus = { connected: boolean; matched: string[]; shipAvailable?: boolean; followingShip?: boolean };
+type CaptureWindow = Window & { __overwatchCaptureCanvas?: (canvas: HTMLCanvasElement) => void };
 const format = (value: unknown, unit = "") => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : "Unavailable";
 
 /** Reuses mission telemetry; the embedded native viewer owns all model poses. */
@@ -21,6 +24,12 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
   const [tags, setTags] = useState(true);
+  const [followShip, setFollowShip] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replayId, setReplayId] = useState<string>();
+  const [replayMessage, setReplayMessage] = useState("");
+  const [captureAvailable, setCaptureAvailable] = useState(false);
   const [viewer, setViewer] = useState<ViewerStatus>({ connected: false, matched: [] });
   const fleet = Object.values(state.fleet ?? {});
   const asset = fleet.find(vehicle => vehicle.vehicle_id === selected);
@@ -46,7 +55,7 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
       if (!message || message.version !== 1) return;
       if (message.type === "overwatch:ready") { setReady(true); setFailed(false); }
       if (message.type === "overwatch:status" && Array.isArray(message.matched)) {
-        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string") });
+        setViewer({ connected: message.connected === true, matched: message.matched.filter((id: unknown) => typeof id === "string"), shipAvailable: message.shipAvailable === true, followingShip: message.followingShip === true });
       }
       if (message.type === "overwatch:select" && typeof message.id === "string" &&
         Object.values(latest.current.state.fleet ?? {}).some(vehicle => vehicle.vehicle_id === message.id)) onSelect(message.id);
@@ -58,7 +67,49 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
 
   useEffect(() => { if (ready) sendState(); }, [state, isFresh, selected, tags, colors, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (ready) frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:follow-ship", version: 1, enabled: followShip }), window.location.origin);
+  }, [ready, followShip]);
+
+  useEffect(() => {
+    const target = frame.current?.contentWindow as CaptureWindow | null;
+    if (!ready || !target) return;
+    let active = true;
+    const integration = Sentry.getClient()?.getIntegrationByName<ReturnType<typeof Sentry.replayCanvasIntegration>>("ReplayCanvas");
+    setCaptureAvailable(Boolean(integration));
+    target.__overwatchCaptureCanvas = (canvas) => {
+      if (!integration || !Sentry.getReplay()?.getReplayId() || canvas.ownerDocument !== target.document) return;
+      canvas.setAttribute("data-sentry-native-canvas", "true");
+      void integration.snapshot(canvas, { skipRequestAnimationFrame: true }).catch(() => {
+        if (active) setReplayMessage("Canvas capture unavailable. Browser interactions can still be recorded.");
+      });
+    };
+    return () => { active = false; delete target.__overwatchCaptureCanvas; };
+  }, [ready]);
+
+  async function toggleReplay() {
+    const replay = Sentry.getReplay();
+    if (!replay || replayBusy) return;
+    setReplayBusy(true);
+    try {
+      if (recording) {
+        await replay.stop();
+        setRecording(false);
+        setReplayMessage("Replay stopped. Open it in Sentry to confirm uploaded segments.");
+      } else {
+        // flush promotes an error-only buffer to a full recording, or starts one.
+        await replay.flush();
+        const id = replay.getReplayId(true);
+        setReplayId(id); setRecording(Boolean(id));
+        setReplayMessage(id ? "Recording native camera frames and browser interactions." : "Replay could not start. Check Sentry configuration.");
+        Sentry.addBreadcrumb({ category: "simulator.camera", message: "Record native ship view", level: "info" });
+      }
+    } catch { setReplayMessage("Replay request failed. Check your network and Sentry configuration."); }
+    finally { setReplayBusy(false); }
+  }
+
   function focus() {
+    setFollowShip(false);
     frame.current?.contentWindow?.postMessage(JSON.stringify({ type: "overwatch:focus", version: 1, id: selected }), window.location.origin);
   }
 
@@ -67,7 +118,14 @@ export default function SimulatorWorld({ state, isFresh, selected, onSelect, col
       <label className={s.tags}><input type="checkbox" checked={tags} onChange={event => setTags(event.target.checked)} />Object tags</label>
       <label className={s.picker}><span className={s.srOnly}>Inspect simulator asset</span><select value={asset?.vehicle_id ?? ""} onChange={event => onSelect(event.target.value || null)}><option value="">Inspect an object…</option>{fleet.map(vehicle => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}</select></label>
       <button type="button" onClick={focus} disabled={!ready || !asset || !viewer.matched.includes(asset.vehicle_id)}>Locate</button>
+      <button type="button" aria-pressed={followShip} onClick={() => setFollowShip(value => !value)} disabled={!ready}>{followShip ? "Stop following ship" : "Follow ship"}</button>
+      <button type="button" onClick={() => void toggleReplay()} disabled={!ready || !captureAvailable || replayBusy}>{replayBusy ? "Updating replay…" : recording ? "Stop replay recording" : "Record this view"}</button>
+      {replayId && <a href={`${SENTRY_BASE}/replays/${replayId}/`} target="_blank" rel="noreferrer">Open replay ↗</a>}
       <span className={s.sync} role="status">{!ready ? failed ? "Viewer unavailable · reload below" : "Connecting to world…" : !viewer.connected ? "World connection lost" : `${viewer.matched.length}/${fleet.length} objects linked · ${isFresh ? "live tags" : "tags stale"}`}</span>
+    </div>
+    <div className={s.cameraStatus} role="status">
+      <span>{!ready ? "Waiting for native viewer" : !followShip ? "Free camera" : !viewer.connected ? "Follow paused · world disconnected" : !viewer.shipAvailable ? "Waiting for target_vessel" : viewer.followingShip ? "Following ship · orbit and zoom freely" : "Acquiring ship"}. Native simulator position · observer view.</span>
+      {replayMessage && <span>{replayMessage}</span>}
     </div>
     <div className={s.viewport}>
       <iframe ref={frame} src="/api/simulator-viewer" title="ArcticSim live 3D terrain, fleet and mission tags" allow="fullscreen" allowFullScreen />

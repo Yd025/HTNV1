@@ -49,5 +49,6 @@
 .bar i { display: block; height: 100%; background: var(--accent); min-width: 2px; }
 .traceFooter { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; width: 100%; padding-top: 18px; border-top: 1px solid var(--line); }
 .empty { padding: 24px 0; }
+.shipCamera { width:100%; height:560px; min-width:0; border:1px solid var(--line); }
 @media (max-width: 1100px) { .columns { grid-template-columns: 1fr; } .hero { align-items: flex-start; } .heroActions { align-items: flex-start; } .readings { gap: 12px; } }
 @media (max-width: 700px) { .hero { flex-direction: column; padding: 23px; gap: 20px; } .products, .statusGrid { grid-template-columns: 1fr; } .status + .status { border-left: 0; border-top: 1px solid var(--line); } .status { padding: 20px; } .product { padding: 20px; } .product h3 { margin-top: 16px; } .card { padding: 20px; } .cardHeading { flex-wrap: wrap; gap: 12px; } .readings { grid-template-columns: 1fr 1fr; row-gap: 24px; } .stage { grid-template-columns: 130px 1fr 60px; gap: 12px; } .panel { gap: 20px; } }

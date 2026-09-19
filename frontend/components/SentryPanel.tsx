@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import type { MissionTelemetry } from "../hooks/useMissionTelemetry";
 import { browserDsn, SENTRY_ORG, SENTRY_PROJECT, sentryLink } from "../lib/sentry";
 import { Icon } from "./ui/Icons";
+import SimulatorWorld from "./SimulatorWorld";
+import { themes } from "../lib/theme";
 import s from "../styles/SentryPanel.module.css";
 
 type Exporter = { enabled?: boolean; closed?: boolean; processed_ticks?: number; dropped_ticks?: number; export_errors?: number; queue_depth?: number };
@@ -18,6 +20,8 @@ export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry
   const [browserReady, setBrowserReady] = useState(false);
   const [checking, setChecking] = useState(false);
   const [verification, setVerification] = useState<Verification | null>(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
   const sending = useRef(false);
   const mounted = useRef(true);
   const { state, isFresh, hasReceived } = telemetry;
@@ -110,8 +114,14 @@ export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry
       {([
         ["traces", "route", "Tracing", "Find the slow stage", "Measured controller spans and browser request performance."],
         ["logs", "layers", "Logs", "Understand the decision", "Run IDs, rejected observations, dispatch failures and UI connection changes."],
-        ["replays", "eye", "Session Replay", "Revisit the flow", "Browser interactions with text masked and media blocked."],
+        ["replays", "eye", "Session Replay", "Revisit the flow", "Follow the native ship camera, with browser text masked."],
       ] as const).map(([view, icon, title, heading, description]) => <a key={view} className={s.product} href={sentryLink(view, view === "logs" ? logsQuery : undefined)} target="_blank" rel="noreferrer"><div className={s.productLabel}><Icon name={icon} /><span>{title}</span><span aria-hidden="true">↗</span></div><h3>{heading}</h3><p>{description}</p></a>)}
+    </section>
+
+    <section className={s.card} aria-labelledby="ship-camera-title">
+      <div className={s.cardHeading}><div><h3 id="ship-camera-title">Ship follow &amp; Replay</h3><p>Keep the ship in view as it moves through the native simulator. Use Record this view to retain a session for inspection.</p></div><button className={s.primary} onClick={() => setShowCamera(value => !value)}>{showCamera ? "Close ship camera" : "Open ship camera"}</button></div>
+      {showCamera && <div className={s.shipCamera}><SimulatorWorld state={state} isFresh={isFresh} selected={selected} onSelect={setSelected} colors={themes.ink.colors} /></div>}
+      <p className={s.caption}>The observer camera follows the simulator’s ship position. Mission tracking still uses detector estimates. Replay captures only this native canvas, up to two frames per second; other media stays blocked.</p>
     </section>
 
     <div className={s.columns}>

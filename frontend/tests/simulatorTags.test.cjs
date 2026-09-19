@@ -46,7 +46,8 @@ function harness() {
   let controlUpdates = 0;
   const scene = {
     camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01) },
-    controls: { target: new Vector3(), update() { controlUpdates += 1; } },
+    controls: { target: new Vector3(), enablePan: true, update() { controlUpdates += 1; } },
+    onMouseScroll() { return "native-scroll"; },
     getByName: id => models.get(id),
     getDomElement: () => ({ getBoundingClientRect: () => ({ left: 20, top: 30, width: 800, height: 600 }) }),
     render(...args) { renderCalls.push({ receiver: this, args }); return "native-render-result"; },
@@ -293,4 +294,62 @@ test("focus changes only the local camera and ignores untrusted or unknown reque
   h.models.delete("copter-1");
   h.send(focus);
   assert.equal(h.controlUpdates, 1);
+});
+
+test("ship follow tracks native movement in the paint call and preserves orbit and zoom", () => {
+  const h = harness();
+  const ship = h.model("target_vessel", 20, 30, 0);
+  h.send({ type: "overwatch:follow-ship", version: 1, enabled: true });
+  h.scene.render();
+  assert.deepEqual(h.scene.controls.target, ship.position);
+  assert.equal(h.scene.controls.enablePan, false);
+  h.scene.camera.position.copy(ship.position).add(new Vector3(30, -60, 40));
+  ship.position.set(25, 35, 0);
+  h.advance(1000); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, ship.position);
+  assert.deepEqual(h.scene.camera.position, new Vector3(55, -25, 40));
+  assert.equal(h.messages.at(-1).message.followingShip, true);
+  let prevented = false;
+  assert.equal(h.scene.onMouseScroll({ preventDefault() { prevented = true; } }), undefined);
+  assert.equal(prevented, true);
+  h.send({ type: "overwatch:follow-ship", version: 1, enabled: false });
+  const previous = new Vector3().copy(h.scene.camera.position);
+  ship.position.set(99, 99, 0); h.scene.render();
+  assert.deepEqual(h.scene.camera.position, previous);
+  assert.equal(h.scene.controls.enablePan, true);
+  assert.equal(h.scene.onMouseScroll(), "native-scroll");
+});
+
+test("ship follow rejects untrusted messages and pauses on disconnect, invalid or missing model", () => {
+  const h = harness();
+  const request = { type: "overwatch:follow-ship", version: 1, enabled: true };
+  const ship = h.model("target_vessel", 20, 30, 0);
+  h.send(request, { source: {} }); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3());
+  h.send(request); h.scene.render();
+  h.window.iface.isConnected = false;
+  ship.position.set(50, 50, 0); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(20, 30, 0));
+  assert.equal(h.scene.controls.enablePan, true);
+  h.window.iface.isConnected = true; h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(50, 50, 0));
+  ship.position.x = NaN; h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(50, 50, 0));
+  h.models.delete("target_vessel"); h.advance(1000); h.scene.render();
+  assert.equal(h.messages.at(-1).message.followingShip, false);
+  const replacement = h.model("target_vessel", 5, 6, 0); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, replacement.position);
+});
+
+test("replay capture runs after native paint, is bounded, and cannot interrupt rendering", () => {
+  const h = harness();
+  let snapshots = 0;
+  h.window.__overwatchCaptureCanvas = () => { assert.ok(h.renderCalls.length > snapshots); snapshots += 1; };
+  h.scene.render(); h.advance(100); h.scene.render();
+  assert.equal(snapshots, 1);
+  h.advance(400); h.scene.render(); assert.equal(snapshots, 2);
+  h.document.hidden = true; h.advance(1000); h.scene.render(); assert.equal(snapshots, 2);
+  h.document.hidden = false;
+  h.window.__overwatchCaptureCanvas = () => { throw new Error("Replay unavailable"); };
+  assert.equal(h.scene.render(), "native-render-result");
 });

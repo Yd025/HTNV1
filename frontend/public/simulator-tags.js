@@ -7,6 +7,10 @@
   var selected = null, enabled = true, fresh = false, receivedAt = 0;
   var scene, layer, lastStatus = 0;
   var point, projected, offset;
+  // make_world.py names the ship target_vessel. This is a viewer camera only;
+  // native truth never enters mission telemetry, detections or vehicle commands.
+  var followShip = false, following = false, framedShip = null, savedPan;
+  var lastSnapshot = 0;
   var style = document.createElement('style');
   style.textContent = '#ow-tags{position:fixed;inset:0;pointer-events:none;z-index:110;font:12px system-ui,sans-serif;--tag-bg:#182232;--tag-text:#e2e7ea;--tag-muted:#a4b0b7;--tag-accent:#e7ad9f;--tag-line:#5b6670}' +
     '.ow-tag{position:absolute;left:0;top:0;pointer-events:auto;display:block;min-width:116px;max-width:180px;padding:7px 10px;text-align:left;background:var(--tag-bg);color:var(--tag-text);border:1px solid var(--tag-line);border-radius:3px;box-shadow:0 3px 10px #0004;cursor:pointer;font:inherit;line-height:1.35;white-space:nowrap}' +
@@ -34,8 +38,13 @@
     var message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
     if (!message || message.version !== 1) return;
+    if (message.type === 'overwatch:follow-ship') {
+      followShip = message.enabled === true;
+      if (!followShip) releaseFollow();
+      return;
+    }
     if (message.type === 'overwatch:focus') {
-      if (typeof message.id === 'string' && entries.has(message.id)) focus(message.id);
+      if (typeof message.id === 'string' && entries.has(message.id)) { followShip = false; releaseFollow(); focus(message.id); }
       return;
     }
     if (message.type !== 'overwatch:telemetry' || !Array.isArray(message.fleet) || !layer) return;
@@ -81,6 +90,43 @@
     scene.controls.target.copy(point);
     scene.controls.update();
   }
+  function releaseFollow() {
+    if (following && scene.controls && savedPan !== undefined) scene.controls.enablePan = savedPan;
+    following = false; framedShip = null;
+  }
+  function updateFollow() {
+    var object = model('target_vessel');
+    if (!followShip || !window.iface || !window.iface.isConnected || !object || object.visible === false || !scene.camera || !scene.controls || !scene.controls.target) { releaseFollow(); return; }
+    object.getWorldPosition(point);
+    if (![point.x, point.y, point.z].every(Number.isFinite)) { releaseFollow(); return; }
+    offset.subVectors(scene.camera.position, scene.controls.target);
+    if (framedShip !== object) {
+      var distance = 160;
+      if (window.THREE.Box3) {
+        var size = new window.THREE.Vector3();
+        new window.THREE.Box3().setFromObject(object).getSize(size);
+        var extent = Math.max(size.x, size.y, size.z);
+        if (Number.isFinite(extent) && extent > 0) distance = Math.max(30, Math.min(500, extent * 3));
+      }
+      if (offset.length() < 1) offset.set(1, -1, 1);
+      offset.normalize().multiplyScalar(distance);
+      savedPan = scene.controls.enablePan;
+      scene.controls.enablePan = false;
+      framedShip = object;
+    }
+    // Translate camera and orbit target together, preserving user orbit/zoom.
+    scene.camera.position.copy(point).add(offset);
+    scene.controls.target.copy(point);
+    scene.controls.update();
+    following = true;
+  }
+  function captureReplay() {
+    var now = Date.now();
+    if (document.hidden || now - lastSnapshot < 500 || typeof window.__overwatchCaptureCanvas !== 'function') return;
+    lastSnapshot = now;
+    // Same paint call as the native WebGL render; no preserved drawing buffer.
+    try { window.__overwatchCaptureCanvas(scene.getDomElement()); } catch (_) { /* Replay cannot interrupt the renderer. */ }
+  }
   function renderTags() {
     if (!scene.camera || !layer) return;
     var canvas = scene.getDomElement(), rect = canvas.getBoundingClientRect();
@@ -121,7 +167,7 @@
       entry.leader.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) rotate(' + Math.atan2(dy,dx) + 'rad)';
       entry.dot.style.transform = 'translate(' + (x-3).toFixed(1) + 'px,' + (y-3).toFixed(1) + 'px)';
     });
-    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, connected: !!(window.iface && window.iface.isConnected) }); }
+    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, connected: !!(window.iface && window.iface.isConnected), shipAvailable: !!model('target_vessel'), followingShip: following }); }
   }
   function attach() {
     scene = window.scene;
@@ -129,7 +175,14 @@
     point = new window.THREE.Vector3(); projected = new window.THREE.Vector3(); offset = new window.THREE.Vector3();
     layer = document.createElement('div'); layer.id = 'ow-tags'; layer.setAttribute('aria-label', 'Live simulator object tags'); document.body.appendChild(layer);
     var original = scene.render;
-    scene.render = function() { var result = original.apply(this, arguments); renderTags(); return result; };
+    scene.render = function() { updateFollow(); var result = original.apply(this, arguments); renderTags(); captureReplay(); return result; };
+    // Native zoom-to-cursor retargets terrain. Preserve OrbitControls' own dolly
+    // while following so wheel zoom stays centered on the ship.
+    var originalScroll = scene.onMouseScroll;
+    if (typeof originalScroll === 'function') scene.onMouseScroll = function(event) {
+      if (following) { if (event && event.preventDefault) event.preventDefault(); return; }
+      return originalScroll.apply(this, arguments);
+    };
     post('overwatch:ready');
   }
   window.addEventListener('message', receive);
