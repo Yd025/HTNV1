@@ -1,0 +1,20 @@
+.world { height:100%; display:flex; flex-direction:column; min-height:0; }
+.toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--surface-muted); font-size:12px; }
+.tags { display:flex; align-items:center; gap:7px; white-space:nowrap; }
+.picker { min-width:0; }
+.toolbar select { max-width:100%; }
+.toolbar button,.toolbar select { min-height:34px; padding:5px 9px; font-size:12px; }
+.toolbar button:disabled { opacity:.5; cursor:not-allowed; }
+.sync { color:var(--text-muted); font-size:11px; }
+.viewport { position:relative; flex:1; min-height:0; }
+.viewport iframe { display:block; border:0; width:100%; height:100%; background:var(--canvas); }
+.loading { position:absolute; inset:0; display:grid; place-items:center; background:var(--canvas); color:var(--text-muted); pointer-events:none; }
+.inspector { position:absolute; bottom:12px; left:12px; width:min(410px,calc(100% - 24px)); padding:12px 14px; border:1px solid var(--line-strong); border-radius:4px; background:var(--surface); box-shadow:0 5px 16px #0003; font-size:11px; }
+.inspectorHead { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.inspectorHead strong { font-size:13px; }.inspectorHead span { color:var(--text-muted); }
+.inspectorHead button { margin-left:auto; min-height:30px; padding:4px 8px; font-size:11px; }
+.inspector dl { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:12px 0; font-variant-numeric:tabular-nums; }
+.inspector dt { color:var(--text-muted); margin-bottom:4px; }.inspector dd { margin:0; }
+.inspector p { line-height:1.5; margin-top:3px; color:var(--text-muted); overflow-wrap:anywhere; }
+.srOnly { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+@media(max-width:640px) { .toolbar { padding:8px; gap:6px 8px; }.sync { flex-basis:100%; }.inspector { padding:9px 11px; bottom:8px; left:8px; width:calc(100% - 16px); }.inspector dl { gap:8px; margin:8px 0; } }

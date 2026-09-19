@@ -50,6 +50,7 @@ export type Scorecard = {
 
 export type SwarmState = {
   type?: string;
+  status?: "ok" | "warming" | "stale" | "failed" | "complete";
   adapter?: string;
   deployed?: boolean;
   heartbeat?: number;
@@ -57,7 +58,7 @@ export type SwarmState = {
   run?: { run_id: string; mode: "synthetic" | "hybrid" | "live" | "replay"; source: string; sequence: number; clock: string; evaluation_truth_available: boolean; source_run_id?: string | null };
   observations?: { received: number; forwarded: number; rejected: { observation_id: string; source_id: string; reason: string }[]; latest_age_s: number | null; basis: string };
   command_outcomes?: { command_id: string; vehicle_id: string; status: "suppressed" | "dispatched" | "dispatch_error"; error?: string }[];
-  recording?: { enabled: boolean; state?: string; dropped_records?: number; complete?: boolean; error?: string | null };
+  recording?: { enabled: boolean; state?: string; dropped_records?: number; written_records?: number; accepted_records?: number; bytes_written?: number; max_bytes?: number; queue_depth?: number; complete?: boolean; error?: string | null; path?: string; run_id?: string };
   scores?: Scorecard;
   fleet?: Record<string, TelemetrySample>;
   detections?: { source_id: string; lat: number; lon: number; class_hint: string; confidence: number; range_m?: number | null; timestamp?: number; observation_id?: string | null; frame_id?: string | null; timestamp_basis?: string; coordinate_frame?: string; provenance?: string | null }[];
@@ -68,7 +69,7 @@ export type SwarmState = {
   advisor?: StrategyPlan | null;
   c2?: { phase?: string; intent?: string };
   intents?: Record<string, string>;
-  commands?: { vehicle_id: string; type: string; lat?: number; lon?: number }[];
+  commands?: { vehicle_id: string; type: string; lat?: number | null; lon?: number | null; alt?: number | null; sector?: number | null; command_id?: string | null }[];
   arena?: { origin_lat: number; origin_lon: number; half_m: number; heading_offset_deg?: number };
 };
 
