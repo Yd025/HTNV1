@@ -153,6 +153,7 @@ export default function CommandCenter() {
                 arena={state.arena}
               />
             )}
+            <CameraRail apiUrl={API_URL} adapter={state.adapter} />
           </div>
           <aside className="flex flex-col gap-4 overflow-y-auto border-l border-slate-800 bg-ice-900 p-4 text-sm">
             <Panel title="Fleet / roles">
@@ -174,6 +175,25 @@ export default function CommandCenter() {
                     </div>
                   </div>
                 ))
+              )}
+            </Panel>
+            <Panel title="Cameras / contact">
+              {(state.detections ?? []).length === 0 && !track ? (
+                <p className="text-slate-500">No vessel in any EO frame yet. Towers are scanning the strait.</p>
+              ) : (
+                <ul className="space-y-2 text-xs text-slate-300">
+                  {(state.detections ?? []).map((d, i) => (
+                    <li key={`${d.source_id}-${i}`}>
+                      {d.source_id} · {d.class_hint} · {(d.confidence * 100).toFixed(0)}%
+                      {d.range_m != null ? ` · ${Math.round(d.range_m)} m` : ""}
+                    </li>
+                  ))}
+                  {track && (
+                    <li className="text-rose-200">
+                      track {track.class_hint} · {(track.confidence ?? 0).toFixed(2)} · {fmt(track.lat)} {fmt(track.lon)}
+                    </li>
+                  )}
+                </ul>
               )}
             </Panel>
             <Panel title="Blackboard">
@@ -203,6 +223,34 @@ function ScoreTile({ label, value, hint }: { label: string; value: number; hint:
       <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">{label}</div>
       <div className="font-mono text-2xl text-teal-300">{(value * 100).toFixed(0)}</div>
       <div className="text-[11px] text-slate-500">{hint}</div>
+    </div>
+  );
+}
+
+const CAMERA_IDS = ["quadcopter", "fixed-wing", "tower-1", "tower-2"] as const;
+
+function CameraRail({ apiUrl, adapter }: { apiUrl: string; adapter?: string }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (adapter !== "whiteout") return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 1400);
+    return () => window.clearInterval(id);
+  }, [adapter]);
+  if (adapter !== "whiteout") return null;
+  return (
+    <div className="absolute bottom-0 left-0 right-0 grid grid-cols-4 gap-px bg-slate-900/90 p-1">
+      {CAMERA_IDS.map((id) => (
+        <figure key={id} className="relative overflow-hidden bg-black">
+          <img
+            src={`${apiUrl}/cameras/${id}/snapshot.jpg?t=${tick}`}
+            alt={id}
+            className="h-24 w-full object-cover sm:h-28"
+          />
+          <figcaption className="pointer-events-none absolute left-1 top-1 font-mono text-[10px] uppercase text-teal-100/90">
+            {id}
+          </figcaption>
+        </figure>
+      ))}
     </div>
   );
 }

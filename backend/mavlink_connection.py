@@ -103,7 +103,7 @@ class MavlinkBridge:
             )
         except Exception:
             pass
-        hb = conn.wait_heartbeat(timeout=10)
+        hb = conn.wait_heartbeat(timeout=5)
         if hb is None and int(getattr(conn, "target_system", 0) or 0) == 0:
             try:
                 conn.close()

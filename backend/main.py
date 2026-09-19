@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import sentry_sdk
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
@@ -110,6 +111,31 @@ async def health() -> dict[str, Any]:
         "scores": latest.get("scores"),
         "sentry": bool(SENTRY_DSN),
     }
+
+
+@app.get("/cameras")
+async def cameras() -> list[dict[str, Any]]:
+    adapter = hub.brain.adapter
+    catalog = getattr(adapter, "camera_catalog", None)
+    if catalog is None:
+        return []
+    return catalog()
+
+
+@app.get("/cameras/{cam_id}/snapshot.jpg")
+async def camera_snapshot(cam_id: str) -> Response:
+    from sim.cameras import grab_jpeg, spec_for
+
+    spec = spec_for(cam_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown camera")
+    import httpx
+
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        jpeg = await grab_jpeg(spec, client)
+    if not jpeg:
+        return Response(status_code=204)
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/telemetry/latest")

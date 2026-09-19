@@ -56,6 +56,7 @@ export type SwarmState = {
   tick_hz?: number;
   scores?: Scorecard;
   fleet?: Record<string, TelemetrySample>;
+  detections?: { source_id: string; lat: number; lon: number; class_hint: string; confidence: number; range_m?: number | null }[];
   track?: TrackState | null;
   truth?: { lat: number; lon: number } | null;
   heatmap?: HeatCell[];

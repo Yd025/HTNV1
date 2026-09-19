@@ -9,3 +9,4 @@ asyncpg>=0.30.0
 elevenlabs>=1.50.0
 pydantic>=2.9.0
 httpx>=0.27.0
+pillow>=10.4.0
