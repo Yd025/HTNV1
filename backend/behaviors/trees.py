@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from geo import ARENA_HALF_M, ORIGIN_LAT, ORIGIN_LON, ll_to_ne, ne_to_ll
+import geo
+from geo import bearing_deg, heading_to_ne, ll_to_ne, ne_to_ll
 from sim.types import Command, VehicleState
 from tracker import Track
 from world import WorldModel
@@ -18,12 +19,12 @@ def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
     track = world.track
     role = v.role or "reserve"
     if v.vehicle_class == "plane":
-        lat, lon = lawnmower_wp(v)
+        lat, lon = lawnmower_wp(v, bias=cue_ll(world))
         return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["plane"])
     if v.vehicle_class == "copter":
-        if role == "track" and track:
-            lat, lon = intercept_wp(track)
-            return Command(vehicle_id=v.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
+        aim = cue_ll(world)
+        if aim and (role == "track" or track or world.detections or world.last_cue):
+            return Command(vehicle_id=v.vehicle_id, type="goto", lat=aim[0], lon=aim[1], alt=CRUISE_ALT["copter"])
         if role == "search":
             plane = next((x for x in world.vehicles.values() if x.vehicle_class == "plane"), None)
             lat, lon = box_search_wp(v, avoid=plane)
@@ -38,24 +39,77 @@ def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
     return Command(vehicle_id=v.vehicle_id, type="hold", lat=v.lat, lon=v.lon, alt=v.alt)
 
 
-def lawnmower_wp(v: VehicleState) -> tuple[float, float]:
-    """North-south lanes across the arena."""
-    n, e = ll_to_ne(v.lat, v.lon)
-    lane_w = 280.0
-    lane = round((e + ARENA_HALF_M) / lane_w)
-    lane = int(max(0, min(int(2 * ARENA_HALF_M / lane_w) - 1, lane)))
-    target_e = -ARENA_HALF_M + (lane + 0.5) * lane_w
-    going_north = lane % 2 == 0
-    if going_north and n > ARENA_HALF_M * 0.75:
-        target_e = -ARENA_HALF_M + (lane + 1.5) * lane_w
-        target_n = ARENA_HALF_M * 0.75
-    elif (not going_north) and n < -ARENA_HALF_M * 0.75:
-        target_e = -ARENA_HALF_M + (lane + 1.5) * lane_w
-        target_n = -ARENA_HALF_M * 0.75
+def water_stare(sector: int, observer: VehicleState | None = None) -> tuple[float, float]:
+    """Look points on water. From a tower, stay inside the 1.5 km camera clip."""
+    if observer is None:
+        rings = (
+            (800.0, 30.0),
+            (1100.0, 90.0),
+            (800.0, 150.0),
+            (1100.0, 210.0),
+            (800.0, 270.0),
+            (1100.0, 330.0),
+        )
+        dist, bearing = rings[int(sector) % len(rings)]
+        n, e = heading_to_ne(bearing)
+        return ne_to_ll(n * dist, e * dist)
+    # Tower-1: channel through the origin. Tower-2: south gap over the
+    # crest — origin bearing stares into the hill; the ship lane is ~110° true.
+    if "2" in observer.vehicle_id:
+        brg = 110.0
+        sweep = (-8.0, -4.0, 0.0, 4.0, 8.0, 2.0)[int(sector) % 6]
+        dist = 1800.0
     else:
-        target_n = ARENA_HALF_M * 0.8 if going_north else -ARENA_HALF_M * 0.8
-    target_e = max(-ARENA_HALF_M * 0.9, min(ARENA_HALF_M * 0.9, target_e))
-    return ne_to_ll(target_n, target_e, ORIGIN_LAT, ORIGIN_LON)
+        brg = bearing_deg(observer.lat, observer.lon, geo.ORIGIN_LAT, geo.ORIGIN_LON)
+        sweep = (-6.0, 0.0, 6.0, -6.0, 0.0, 6.0)[int(sector) % 6]
+        dist = 2200.0
+    n, e = heading_to_ne(brg + sweep)
+    return ne_to_ll(n * dist, e * dist, observer.lat, observer.lon)
+
+
+def cue_ll(world: WorldModel) -> tuple[float, float] | None:
+    """Where air should point given vision: predicted track, else loudest detection."""
+    track = world.track
+    if track and track.confidence >= 0.20:
+        return intercept_wp(track)
+    dets = list(world.detections or [])
+    if dets:
+        best = max(dets, key=lambda d: d.confidence)
+        return best.lat, best.lon
+    if world.last_cue:
+        return world.last_cue
+    return None
+
+
+def _search_half() -> float:
+    """Fort Ross arena is 3.25 km; ISR stays on the inner strait, not the hills."""
+    half = geo.ARENA_HALF_M
+    return 1100.0 if half > 2000.0 else half
+
+
+def lawnmower_wp(v: VehicleState, bias: tuple[float, float] | None = None) -> tuple[float, float]:
+    """North-south lanes. Optional bias steers ISR onto the cued lane — not an intercept."""
+    n, e = ll_to_ne(v.lat, v.lon)
+    half = _search_half()
+    lane_w = 280.0
+    if bias is not None:
+        _, be = ll_to_ne(bias[0], bias[1])
+        lane = round((be + half) / lane_w)
+    else:
+        lane = round((e + half) / lane_w)
+    lane = int(max(0, min(int(2 * half / lane_w) - 1, lane)))
+    target_e = -half + (lane + 0.5) * lane_w
+    going_north = lane % 2 == 0
+    if going_north and n > half * 0.75:
+        target_e = -half + (lane + 1.5) * lane_w
+        target_n = half * 0.75
+    elif (not going_north) and n < -half * 0.75:
+        target_e = -half + (lane + 1.5) * lane_w
+        target_n = -half * 0.75
+    else:
+        target_n = half * 0.8 if going_north else -half * 0.8
+    target_e = max(-half * 0.9, min(half * 0.9, target_e))
+    return ne_to_ll(target_n, target_e)
 
 
 def box_search_wp(v: VehicleState, avoid: VehicleState | None = None) -> tuple[float, float]:

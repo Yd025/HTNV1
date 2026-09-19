@@ -171,7 +171,11 @@ class MavlinkBridge:
     async def _pump(self) -> None:
         while self.connected and self.conn is not None:
             try:
-                await self.recv_sample(timeout=0.2)
+                # Receive and send share a lock. Wait outside it when idle so
+                # telemetry cannot hold outgoing commands for a full timeout.
+                sample = await self.recv_sample(timeout=0.0)
+                if sample is None:
+                    await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -352,9 +356,9 @@ class MavlinkBridge:
 
         async with self._io_lock:
             await asyncio.to_thread(_arm)
-        logger.info("Arm=%s on %s", armed, self.vehicle_id)
+        logger.info("Arm=%s force=%s on %s", armed, force, self.vehicle_id)
 
-    async def takeoff(self, alt: float) -> None:
+    async def takeoff(self, alt: float, pitch_deg: float = 0.0) -> None:
         if self.conn is None:
             return
 
@@ -365,13 +369,71 @@ class MavlinkBridge:
                 self.conn.target_component,
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0,
-                0, 0, 0, 0, 0, 0,
+                float(pitch_deg),
+                0, 0, 0, 0, 0,
                 float(alt),
             )
 
         async with self._io_lock:
             await asyncio.to_thread(_to)
-        logger.info("Takeoff %.0fm on %s", alt, self.vehicle_id)
+        logger.info("Takeoff %.0fm pitch=%.0f on %s", alt, pitch_deg, self.vehicle_id)
+
+    async def set_servo(self, channel: int, pwm: int) -> None:
+        if self.conn is None:
+            return
+
+        def _sv() -> None:
+            assert self.conn is not None
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                0,
+                float(channel),
+                float(max(1000, min(2000, int(pwm)))),
+                0, 0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_sv)
+
+    async def rc_override(self, chan1: int = 0, chan2: int = 0, chan3: int = 0, chan4: int = 0) -> None:
+        """Hold MANUAL sticks. 0 means 'release that channel'."""
+        if self.conn is None:
+            return
+
+        def _rc() -> None:
+            assert self.conn is not None
+            self.conn.mav.rc_channels_override_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                int(chan1),
+                int(chan2),
+                int(chan3),
+                int(chan4),
+                0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_rc)
+
+    async def set_param(self, name: str, value: float) -> None:
+        if self.conn is None:
+            return
+
+        def _p() -> None:
+            assert self.conn is not None
+            self.conn.mav.param_set_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                name.encode("ascii"),
+                float(value),
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_p)
+        logger.info("PARAM %s=%s on %s", name, value, self.vehicle_id)
 
     async def set_roi(self, lat: float, lon: float, alt: float = 0.0) -> None:
         if self.conn is None:

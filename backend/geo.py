@@ -16,13 +16,28 @@ def m_per_deg_lon(lat: float) -> float:
     return M_PER_DEG_LAT * max(0.2, abs(math.cos(math.radians(lat))))
 
 
-def ll_to_ne(lat: float, lon: float, origin_lat: float = ORIGIN_LAT, origin_lon: float = ORIGIN_LON) -> tuple[float, float]:
+def ll_to_ne(
+    lat: float,
+    lon: float,
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
+) -> tuple[float, float]:
+    # Read module globals at call time — WhiteoutAdapter pins Fort Ross after import.
+    origin_lat = ORIGIN_LAT if origin_lat is None else origin_lat
+    origin_lon = ORIGIN_LON if origin_lon is None else origin_lon
     north = (lat - origin_lat) * M_PER_DEG_LAT
     east = (lon - origin_lon) * m_per_deg_lon(origin_lat)
     return north, east
 
 
-def ne_to_ll(north: float, east: float, origin_lat: float = ORIGIN_LAT, origin_lon: float = ORIGIN_LON) -> tuple[float, float]:
+def ne_to_ll(
+    north: float,
+    east: float,
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
+) -> tuple[float, float]:
+    origin_lat = ORIGIN_LAT if origin_lat is None else origin_lat
+    origin_lon = ORIGIN_LON if origin_lon is None else origin_lon
     lat = origin_lat + north / M_PER_DEG_LAT
     lon = origin_lon + east / m_per_deg_lon(origin_lat)
     return lat, lon
@@ -54,8 +69,9 @@ def heading_to_ne(heading_deg: float) -> tuple[float, float]:
     return math.cos(rad), math.sin(rad)
 
 
-def clamp_arena(north: float, east: float, half: float = ARENA_HALF_M) -> tuple[float, float]:
-    return max(-half, min(half, north)), max(-half, min(half, east))
+def clamp_arena(north: float, east: float, half: float | None = None) -> tuple[float, float]:
+    span = ARENA_HALF_M if half is None else half
+    return max(-span, min(span, north)), max(-span, min(span, east))
 
 
 def dist_ne(a: tuple[float, float], b: tuple[float, float]) -> float:

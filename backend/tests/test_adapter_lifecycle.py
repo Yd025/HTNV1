@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from mavlink_connection import MavlinkBridge
+from sim.cameras import MjpegTap
 from sim.local_sitl import LocalSitlAdapter
 from sim.types import Detection
 from sim.whiteout import WhiteoutAdapter
@@ -85,6 +86,47 @@ class AdapterLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.conn)
         self.assertIsNone(bridge._pump_task)
         connection.close.assert_called_once()
+
+    async def test_camera_tap_close_stops_streams_and_clears_frames(self):
+        tap = MjpegTap()
+        task = asyncio.create_task(asyncio.Event().wait())
+        tap._tasks["tower-1"] = task
+        tap.latest["tower-1"] = b"\xff\xd8frame\xff\xd9"
+        await asyncio.sleep(0)
+        await tap.close()
+        await tap.close()
+        self.assertTrue(task.cancelled())
+        self.assertEqual(tap._tasks, {})
+        self.assertIsNone(tap.get("tower-1"))
+
+    async def test_whiteout_close_cancels_reconnect_before_closing_bridges(self):
+        adapter = WhiteoutAdapter()
+        started = asyncio.Event()
+        late_bridge = Mock(close=AsyncMock())
+
+        async def reconnect():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                adapter._bridges["tower-1"] = late_bridge
+
+        task = asyncio.create_task(reconnect())
+        adapter._reconnect_tasks["tower-1"] = task
+        adapter._reconnecting.add("tower-1")
+        await started.wait()
+        with patch.object(adapter._taps, "close", new=AsyncMock()) as close_taps:
+            await adapter.close()
+        self.assertTrue(task.cancelled())
+        close_taps.assert_awaited_once()
+        late_bridge.close.assert_awaited_once()
+        self.assertEqual(adapter._reconnect_tasks, {})
+        self.assertEqual(adapter._reconnecting, set())
+        # Read-only fleet inspection after shutdown must not restart networking.
+        with patch.object(adapter, "_reconnect", new=AsyncMock()) as restart:
+            await adapter.list_vehicles()
+            await asyncio.sleep(0)
+        restart.assert_not_awaited()
 
     async def test_cancelled_connection_attempt_closes_late_transport(self):
         bridge = MavlinkBridge()

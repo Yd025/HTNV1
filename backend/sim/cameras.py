@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass
 
 import httpx
+
+logger = logging.getLogger("overwatch.cameras")
 
 
 def _host() -> str:
@@ -57,3 +61,61 @@ async def grab_jpeg(spec: CameraSpec, client: httpx.AsyncClient) -> bytes | None
     except httpx.HTTPError:
         return None
     return None
+
+
+class MjpegTap:
+    """Hold /stream open so CameraStreamPlugin keeps encoding live frames.
+
+    Snapshot-only grabs increment clients for a few milliseconds. The plugin
+    then returns the last JPEG immediately and almost never encodes a new one,
+    so every tower looks like a frozen sky.
+    """
+
+    def __init__(self) -> None:
+        self.latest: dict[str, bytes] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+
+    def start(self, specs: tuple[CameraSpec, ...] | list[CameraSpec]) -> None:
+        for spec in specs:
+            task = self._tasks.get(spec.vehicle_id)
+            if task is None or task.done():
+                self._tasks[spec.vehicle_id] = asyncio.create_task(
+                    self._pump(spec), name=f"mjpeg-{spec.vehicle_id}"
+                )
+
+    def get(self, vehicle_id: str) -> bytes | None:
+        jpeg = self.latest.get(vehicle_id)
+        if jpeg and jpeg[:2] == b"\xff\xd8":
+            return jpeg
+        return None
+
+    async def close(self) -> None:
+        tasks, self._tasks = self._tasks, {}
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        self.latest.clear()
+
+    async def _pump(self, spec: CameraSpec) -> None:
+        timeout = httpx.Timeout(None, connect=2.0)
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("GET", spec.stream_url()) as resp:
+                        buf = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            buf.extend(chunk)
+                            while True:
+                                start = buf.find(b"\xff\xd8")
+                                end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+                                if start < 0 or end < 0:
+                                    if len(buf) > 2_000_000:
+                                        del buf[:-8000]
+                                    break
+                                self.latest[spec.vehicle_id] = bytes(buf[start : end + 2])
+                                del buf[: end + 2]
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("mjpeg %s dropped: %s", spec.vehicle_id, exc)
+                await asyncio.sleep(1.2)
