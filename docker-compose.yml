@@ -1,0 +1,155 @@
+name: overwatch
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: overwatch-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-overwatch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-overwatch}
+      POSTGRES_DB: ${POSTGRES_DB:-overwatch}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-overwatch} -d ${POSTGRES_DB:-overwatch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - overwatch
+
+  # Heterogeneous SITL stand-in. The radarku image may ignore VEHICLE; kinematic
+  # twins in LocalSitlAdapter still fly if MAVLink is down. FORCE_KINEMATIC=1
+  # skips waiting entirely so teammates can work on HUD/BTs immediately.
+  sitl-plane:
+    image: radarku/ardupilot-sitl:latest
+    container_name: overwatch-sitl-plane
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      VEHICLE: ArduPlane
+      LAT: ${SITL_LAT:-74.6973}
+      LON: ${SITL_LON:--94.8297}
+      ALT: ${SITL_ALT:-90}
+    ports:
+      - "5760:5760"
+    networks:
+      - overwatch
+    profiles: ["sitl"]
+
+  sitl-copter:
+    image: radarku/ardupilot-sitl:latest
+    container_name: overwatch-sitl-copter
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      VEHICLE: ArduCopter
+      LAT: ${SITL_LAT:-74.6973}
+      LON: ${SITL_LON:--94.8297}
+      ALT: ${SITL_ALT:-40}
+    ports:
+      - "5770:5760"
+    networks:
+      - overwatch
+    profiles: ["sitl"]
+
+  sitl-rover:
+    image: radarku/ardupilot-sitl:latest
+    container_name: overwatch-sitl-rover
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      VEHICLE: Rover
+      LAT: ${SITL_LAT:-74.6973}
+      LON: ${SITL_LON:--94.8297}
+      ALT: "0"
+    ports:
+      - "5780:5760"
+    networks:
+      - overwatch
+    profiles: ["sitl"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: overwatch-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://overwatch:overwatch@postgres:5432/overwatch}
+      ADAPTER: ${ADAPTER:-local}
+      FORCE_KINEMATIC: ${FORCE_KINEMATIC:-1}
+      MAVLINK_PLANE: ${MAVLINK_PLANE:-tcp:sitl-plane:5760}
+      MAVLINK_COPTER: ${MAVLINK_COPTER:-tcp:sitl-copter:5760}
+      MAVLINK_ROVER: ${MAVLINK_ROVER:-tcp:sitl-rover:5760}
+      WHITEOUT_URL: ${WHITEOUT_URL:-}
+      WHITEOUT_TOKEN: ${WHITEOUT_TOKEN:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-hackathon}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}
+      STRATEGY_INTERVAL_SEC: ${STRATEGY_INTERVAL_SEC:-15}
+      BRAIN_HZ: ${BRAIN_HZ:-10}
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks:
+      - overwatch
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: overwatch-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/ws/telemetry}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+      - frontend-next:/app/.next
+    depends_on:
+      - backend
+    networks:
+      - overwatch
+
+volumes:
+  postgres-data:
+  frontend-node-modules:
+  frontend-next:
+
+networks:
+  overwatch:
+    driver: bridge
+    name: overwatch
