@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from behaviors.trees import water_stare
 from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
@@ -36,10 +37,11 @@ class TowerAgent(PlatformAgent):
             return AgentDecision(command=_slew(me, track.lat, track.lon), calls=[], intent=self.intent)
 
         self.intent = "scan"
-        call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1)})
-        sector = (int(time.monotonic() / 12.0) + (0 if "1" in me.vehicle_id else 3)) % 6
+        sector = (int(time.monotonic() / 22.0) + (0 if "1" in me.vehicle_id else 3)) % 6
+        lat, lon = water_stare(sector, me)
+        call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1), "sector": sector})
         return AgentDecision(
-            command=Command(vehicle_id=me.vehicle_id, type="search_sector", sector=sector),
+            command=Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=0.0, sector=sector),
             calls=self.calls_of(call),
             intent=self.intent,
         )

@@ -19,8 +19,8 @@ class CopterAgent(PlatformAgent):
         plane = self.peer(world, "plane")
         aim = cue_ll(world)
 
-        # FIX/TRACK: any vision cue is enough to leave the box and prosecute.
-        if aim and (role == "track" or track or world.detections):
+        # FIX/TRACK: a live or latched tower cue is enough to leave the box.
+        if aim and (role == "track" or track or world.detections or world.last_cue):
             lat, lon = aim
             cmd = Command(vehicle_id=me.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
             dist = haversine_m(me.lat, me.lon, lat, lon)

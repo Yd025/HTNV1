@@ -16,6 +16,7 @@ class WorldModel:
     blackboard: list[dict] = field(default_factory=list)
     advisor: dict | None = None
     last_command: dict | None = None
+    last_cue: tuple[float, float] | None = None
     phase: str = "find"
     tick_hz: float = 0.0
     t: float = field(default_factory=time.monotonic)

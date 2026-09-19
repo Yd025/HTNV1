@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from typing import Any
 
+from geo import bearing_deg, haversine_m
 from mavlink_connection import MavlinkBridge
-from sim.cameras import FLEET_CAMERAS, grab_jpeg
+from sim.cameras import FLEET_CAMERAS, MjpegTap, grab_jpeg
 from sim.detector import detect_jpeg, project_hit
 from sim.types import Arena, Command, Detection, TowerMount, VehicleClass, VehicleState
 
@@ -34,6 +36,30 @@ HEADING_OFFSET_DEG = -49.8
 
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
 AIRBORNE_ALT = {"plane": 15.0, "copter": 8.0, "rover": 0.0, "tower": 0.0}
+# Camera optical centre AMSL from fort_ross.world pose.z + HEAD_Z (terrain/tower.py).
+CAM_ALT_MSL = {"tower-1": 119.5, "tower-2": 229.3}
+PITCH_MIN_DEG = -30.0
+PITCH_MAX_DEG = 45.0
+CAM_FAR_M = 1480.0
+
+
+def _wrap180(deg: float) -> float:
+    return ((deg + 180.0) % 360.0) - 180.0
+
+
+def _yaw_pwm(want_true: float) -> int:
+    """Open-loop pan: PWM 1000..2000 → pan −π..+π from grid east (world +X)."""
+    grid_east_true = (HEADING_OFFSET_DEG + 90.0) % 360.0
+    pan = _wrap180(grid_east_true - want_true)
+    cmd = max(0.0, min(1.0, pan / 360.0 + 0.5))
+    return int(1000 + cmd * 1000)
+
+
+def _pitch_pwm(pitch_deg: float) -> int:
+    """Open-loop tilt: cmd 0 = PITCH_MIN (−30 down), cmd 1 = PITCH_MAX (+45 up)."""
+    clamped = max(PITCH_MIN_DEG, min(PITCH_MAX_DEG, pitch_deg))
+    cmd = (clamped - PITCH_MIN_DEG) / (PITCH_MAX_DEG - PITCH_MIN_DEG)
+    return int(1000 + cmd * 1000)
 
 
 def _host() -> str:
@@ -47,28 +73,28 @@ def _fleet_spec() -> list[dict[str, Any]]:
             "vehicle_id": "quadcopter",
             "vehicle_class": "copter",
             "conn": os.getenv("ARCTIC_QUAD", f"udpout:{h}:14550"),
-            "fallback": "",
+            "fallback": f"udpout:{h}:14551",
             "home": (71.995807, -94.839300),
         },
         {
             "vehicle_id": "fixed-wing",
             "vehicle_class": "plane",
             "conn": os.getenv("ARCTIC_PLANE", f"udpout:{h}:14560"),
-            "fallback": "",
+            "fallback": f"udpout:{h}:14561",
             "home": (71.998195, -94.841967),
         },
         {
             "vehicle_id": "tower-1",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER1", f"udpout:{h}:14580"),
-            "fallback": "",
+            "fallback": f"udpout:{h}:14581",
             "home": (71.980671, -94.853711),
         },
         {
             "vehicle_id": "tower-2",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER2", f"udpout:{h}:14590"),
-            "fallback": "",
+            "fallback": f"udpout:{h}:14591",
             "home": (72.011778, -94.804721),
         },
     ]
@@ -87,11 +113,12 @@ def _fleet_spec() -> list[dict[str, Any]]:
 
 
 class _Air:
-    __slots__ = ("phase", "last_cmd_at", "takeoff_sent", "arm_tries")
+    __slots__ = ("phase", "last_cmd_at", "last_takeoff_at", "takeoff_sent", "arm_tries")
 
     def __init__(self) -> None:
         self.phase = "boot"
         self.last_cmd_at = 0.0
+        self.last_takeoff_at = 0.0
         self.takeoff_sent = False
         self.arm_tries = 0
 
@@ -108,8 +135,8 @@ class WhiteoutAdapter:
             half_m=FORT_ROSS_HALF_M,
             heading_offset_deg=HEADING_OFFSET_DEG,
             towers=[
-                TowerMount("tower-1", 71.980671, -94.853711, heading=0.0, fov_deg=60.0, range_m=2500.0),
-                TowerMount("tower-2", 72.011778, -94.804721, heading=0.0, fov_deg=60.0, range_m=2500.0),
+                TowerMount("tower-1", 71.980671, -94.853711, heading=0.0, fov_deg=60.0, range_m=1500.0),
+                TowerMount("tower-2", 72.011778, -94.804721, heading=0.0, fov_deg=60.0, range_m=1500.0),
             ],
         )
         self._spec = _fleet_spec()
@@ -120,7 +147,14 @@ class WhiteoutAdapter:
         self._poses: dict[str, VehicleState] = {}
         self._attitude: dict[str, tuple[float, float]] = {}
         self._dets: list[Detection] = []
+        self._det_gen = 0
+        self._polled_gen = -1
         self._cam_task: asyncio.Task[None] | None = None
+        self._look: dict[str, tuple[float, float]] = {}
+        self._tower_cmd_at: dict[str, float] = {}
+        self._tower_manual: set[str] = set()
+        self._taps = MjpegTap()
+        self._reconnecting: set[str] = set()
 
     async def connect(self) -> None:
         import geo as geo_mod
@@ -145,6 +179,9 @@ class WhiteoutAdapter:
             home_lat, home_lon = self._homes[vid]
             snap: dict[str, Any] = {}
             mav_ok = bool(bridge and bridge.is_connected())
+            if not mav_ok and vid not in self._reconnecting:
+                self._reconnecting.add(vid)
+                asyncio.create_task(self._reconnect(spec))
             if mav_ok:
                 await self._drain(bridge)
                 snap = bridge.snapshot()
@@ -152,6 +189,13 @@ class WhiteoutAdapter:
             lat = snap.get("lat") if snap.get("lat") is not None else home_lat
             lon = snap.get("lon") if snap.get("lon") is not None else home_lon
             vclass: VehicleClass = spec["vehicle_class"]
+            look = self._look.get(vid)
+            if vclass == "tower":
+                alt = CAM_ALT_MSL.get(vid, 120.0)
+                heading = look[0] if look else float(snap.get("heading") or 0.0)
+            else:
+                alt = float(snap.get("alt") or 0.0)
+                heading = float(snap.get("heading") or 0.0)
             out.append(
                 VehicleState(
                     vehicle_id=vid,
@@ -159,8 +203,8 @@ class WhiteoutAdapter:
                     vehicle_class=vclass,
                     lat=float(lat),
                     lon=float(lon),
-                    alt=float(snap.get("alt") or (12.0 if vclass == "tower" else 0.0)),
-                    heading=float(snap.get("heading") or 0.0),
+                    alt=alt,
+                    heading=heading,
                     groundspeed=float(snap.get("groundspeed") or 0.0),
                     battery_remaining=float(snap.get("battery_remaining") or 100.0),
                     armed=bool(snap.get("armed")),
@@ -179,8 +223,12 @@ class WhiteoutAdapter:
         return out
 
     async def poll_detections(self) -> list[Detection]:
-        now = time.time()
-        return [d for d in self._dets if now - d.timestamp < 4.0]
+        # One emit per camera scan. Repeating the same JPEG as a new hit
+        # inflates tracker hits — Person 3 asked this lifecycle be honest.
+        if self._det_gen == self._polled_gen:
+            return []
+        self._polled_gen = self._det_gen
+        return list(self._dets)
 
     def camera_catalog(self) -> list[dict[str, Any]]:
         return [c.as_dict() for c in FLEET_CAMERAS]
@@ -193,8 +241,8 @@ class WhiteoutAdapter:
         ready = await self._advance(spec, bridge)
         vclass: str = spec["vehicle_class"]
         if vclass == "tower":
-            if command.type == "look_at" and command.lat is not None and command.lon is not None:
-                await bridge.set_roi(command.lat, command.lon, command.alt or 0.0)
+            if command.lat is not None and command.lon is not None:
+                await self._slew_tower(command.vehicle_id, bridge, command.lat, command.lon, command.alt or 0.0)
             elif command.type in {"search_sector", "hold"}:
                 await bridge.set_mode("SCAN")
             return
@@ -224,14 +272,53 @@ class WhiteoutAdapter:
                 self._bridges[vid] = bridge
                 self._last_ok[vid] = True
                 logger.info("MAVLink %s via %s", vid, conn_str)
+                if spec["vehicle_class"] in {"copter", "plane"}:
+                    await bridge.set_param("ARMING_CHECK", 0)
+                    if spec["vehicle_class"] == "copter":
+                        await bridge.set_param("FS_CRASH_CHECK", 0)
                 return
             except ConnectionError as exc:
                 logger.warning("MAVLink %s %s failed: %s", vid, conn_str, exc)
         logger.error("MAVLink %s unreachable — asset will idle", vid)
 
+    async def _reconnect(self, spec: dict[str, Any]) -> None:
+        try:
+            await self._connect_one(spec)
+        finally:
+            self._reconnecting.discard(spec["vehicle_id"])
+
+    async def _slew_tower(self, vid: str, bridge: MavlinkBridge, lat: float, lon: float, alt: float) -> None:
+        """Open-loop pan/tilt. EKF heading is the mast, not the moving head."""
+        now = time.monotonic()
+        if now - self._tower_cmd_at.get(vid, 0.0) < 0.70:
+            return
+        self._tower_cmd_at[vid] = now
+        pose = self._poses.get(vid)
+        if pose is None:
+            return
+        if vid not in self._tower_manual:
+            await bridge.set_mode("MANUAL")
+            self._tower_manual.add(vid)
+        want = bearing_deg(pose.lat, pose.lon, lat, lon)
+        rng = max(40.0, min(CAM_FAR_M, haversine_m(pose.lat, pose.lon, lat, lon)))
+        cam_alt = CAM_ALT_MSL.get(vid, max(float(pose.alt or 0.0), 80.0))
+        want_pitch = math.degrees(math.atan2((alt or 0.0) - cam_alt, rng))
+        yaw = _yaw_pwm(want)
+        pitch = _pitch_pwm(want_pitch)
+        self._look[vid] = (want, want_pitch)
+        # MANUAL writes RC every frame; a one-shot DO_SET_SERVO is overwritten.
+        await bridge.rc_override(yaw, pitch)
+        await bridge.set_servo(1, yaw)
+        await bridge.set_servo(2, pitch)
+        logger.info(
+            "tower slew %s want=%.0f pitch=%.1f yaw_pwm=%s pitch_pwm=%s rng=%.0f",
+            vid, want, want_pitch, yaw, pitch, rng,
+        )
+
     async def _camera_loop(self) -> None:
         import httpx
 
+        self._taps.start(FLEET_CAMERAS)
         timeout = httpx.Timeout(1.6, connect=0.6)
         async with httpx.AsyncClient(timeout=timeout) as client:
             while True:
@@ -246,7 +333,12 @@ class WhiteoutAdapter:
     async def _scan_cameras(self, client: Any) -> None:
         now = time.time()
         found: list[Detection] = []
-        frames = await asyncio.gather(*(grab_jpeg(spec, client) for spec in FLEET_CAMERAS))
+        frames = []
+        for spec in FLEET_CAMERAS:
+            jpeg = self._taps.get(spec.vehicle_id)
+            if jpeg is None:
+                jpeg = await grab_jpeg(spec, client)
+            frames.append(jpeg)
         for spec, jpeg in zip(FLEET_CAMERAS, frames, strict=True):
             if not jpeg:
                 continue
@@ -256,7 +348,20 @@ class WhiteoutAdapter:
             pose = self._poses.get(spec.vehicle_id)
             if pose is None:
                 continue
-            roll, pitch = self._attitude.get(spec.vehicle_id, (0.0, 0.0))
+            look = self._look.get(spec.vehicle_id)
+            if look:
+                pose = VehicleState(
+                    vehicle_id=pose.vehicle_id,
+                    sysid=pose.sysid,
+                    vehicle_class=pose.vehicle_class,
+                    lat=pose.lat,
+                    lon=pose.lon,
+                    alt=pose.alt,
+                    heading=look[0],
+                )
+                roll, pitch = 0.0, math.radians(look[1])
+            else:
+                roll, pitch = self._attitude.get(spec.vehicle_id, (0.0, 0.0))
             det = project_hit(hit, spec, pose, now, roll_rad=roll, pitch_rad=pitch)
             if det:
                 found.append(det)
@@ -268,8 +373,8 @@ class WhiteoutAdapter:
                     det.lat,
                     det.lon,
                 )
-        if found:
-            self._dets = found
+        self._dets = found
+        self._det_gen += 1
 
     async def _drain(self, bridge: MavlinkBridge) -> None:
         for _ in range(16):
@@ -319,7 +424,7 @@ class WhiteoutAdapter:
                 return False
             if not armed:
                 air.arm_tries += 1
-                await bridge.arm(True, force=air.arm_tries >= 2)
+                await bridge.arm(True, force=True)
                 air.last_cmd_at = now
                 return False
             if alt < need_alt and not air.takeoff_sent:
@@ -342,15 +447,15 @@ class WhiteoutAdapter:
             return False
         if not armed:
             air.arm_tries += 1
-            await bridge.arm(True, force=air.arm_tries >= 2)
+            await bridge.arm(True, force=True)
             air.last_cmd_at = now
             return False
-        if alt < need_alt and not air.takeoff_sent:
-            await bridge.takeoff(CRUISE_ALT["copter"])
-            air.takeoff_sent = True
-            air.last_cmd_at = now
+        if alt < need_alt:
+            if not air.takeoff_sent or (now - air.last_takeoff_at) >= 4.0:
+                await bridge.takeoff(CRUISE_ALT["copter"])
+                air.takeoff_sent = True
+                air.last_takeoff_at = now
+                air.last_cmd_at = now
             return False
-        if alt >= need_alt:
-            air.phase = "ready"
-            return True
-        return False
+        air.phase = "ready"
+        return True
