@@ -41,6 +41,9 @@ CAM_ALT_MSL = {"tower-1": 119.5, "tower-2": 229.3}
 PITCH_MIN_DEG = -30.0
 PITCH_MAX_DEG = 45.0
 CAM_FAR_M = 1480.0
+# Fort Ross: vessel is ~5° down from either hilltop. Steeper than this
+# is the near slope (tower-2 sits 229 m over rock that fills a 60° EO).
+SEA_MAX_DOWN_DEG = 8.5
 
 
 def _wrap180(deg: float) -> float:
@@ -300,9 +303,18 @@ class WhiteoutAdapter:
             await bridge.set_mode("MANUAL")
             self._tower_manual.add(vid)
         want = bearing_deg(pose.lat, pose.lon, lat, lon)
-        rng = max(40.0, min(CAM_FAR_M, haversine_m(pose.lat, pose.lon, lat, lon)))
+        true_rng = max(40.0, haversine_m(pose.lat, pose.lon, lat, lon))
         cam_alt = CAM_ALT_MSL.get(vid, max(float(pose.alt or 0.0), 80.0))
-        want_pitch = math.degrees(math.atan2((alt or 0.0) - cam_alt, rng))
+        want_pitch = math.degrees(math.atan2((alt or 0.0) - cam_alt, true_rng))
+        if (alt or 0.0) < 2.0:
+            want_pitch = max(want_pitch, -SEA_MAX_DOWN_DEG)
+        if vid == "tower-2":
+            # Origin/west bearings hit the pad. Ship lane is the south gap
+            # (pan ≈ −70°, true ≈ 110°) with the head 8° above the crest.
+            if 150.0 <= want <= 260.0:
+                want = 110.0
+            want_pitch = 8.0
+        rng = min(CAM_FAR_M, true_rng)
         yaw = _yaw_pwm(want)
         pitch = _pitch_pwm(want_pitch)
         self._look[vid] = (want, want_pitch)

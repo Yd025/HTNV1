@@ -53,11 +53,16 @@ def water_stare(sector: int, observer: VehicleState | None = None) -> tuple[floa
         dist, bearing = rings[int(sector) % len(rings)]
         n, e = heading_to_ne(bearing)
         return ne_to_ll(n * dist, e * dist)
-    # Channel through the arena origin — Fort Ross water — stepped range + sweep.
-    brg = bearing_deg(observer.lat, observer.lon, geo.ORIGIN_LAT, geo.ORIGIN_LON)
-    # Stay on the strait. Wide sweeps put the 60° EO on hills and lose the hull.
-    sweep = (-8.0, 0.0, 8.0, -8.0, 0.0, 8.0)[int(sector) % 6]
-    dist = (800.0, 1050.0, 1300.0, 800.0, 1050.0, 1300.0)[int(sector) % 6]
+    # Tower-1: channel through the origin. Tower-2: south gap over the
+    # crest — origin bearing stares into the hill; the ship lane is ~110° true.
+    if "2" in observer.vehicle_id:
+        brg = 110.0
+        sweep = (-8.0, -4.0, 0.0, 4.0, 8.0, 2.0)[int(sector) % 6]
+        dist = 1800.0
+    else:
+        brg = bearing_deg(observer.lat, observer.lon, geo.ORIGIN_LAT, geo.ORIGIN_LON)
+        sweep = (-6.0, 0.0, 6.0, -6.0, 0.0, 6.0)[int(sector) % 6]
+        dist = 2200.0
     n, e = heading_to_ne(brg + sweep)
     return ne_to_ll(n * dist, e * dist, observer.lat, observer.lon)
 

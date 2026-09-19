@@ -52,4 +52,4 @@ def _slew(me: VehicleState, lat: float, lon: float) -> Command | None:
     delta = abs(((want - me.heading + 180.0) % 360.0) - 180.0)
     if delta <= 8.0:
         return None
-    return Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=me.alt)
+    return Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=0.0)
