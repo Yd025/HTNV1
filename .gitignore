@@ -1,0 +1,27 @@
+# Local credentials and environments.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Frontend builds/dependencies.
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# Independent simulator checkout and downloaded/generated data.
+/arctic-sim/
+/models/
+/datasets/
+/runs/
+*.pt
+*.onnx

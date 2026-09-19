@@ -1,6 +1,8 @@
 # Operation: Overwatch — teammate start
 
-Hack the North WHITEOUT base. Competition has not started. This repo is the shared intelligence loop so you can split work on day one instead of scaffolding Docker.
+Hack the North WHITEOUT base. This repo already contains the shared intelligence loop, simulator adapter, and HUD.
+
+**Four-person team: start with [docs/team/README.md](docs/team/README.md).** The shared setup is on `dev`; each person works on their assigned branch and opens small PRs into `dev`. Tracking research and the proposed predictive handoff are in [docs/research/TRACKING_RESEARCH.md](docs/research/TRACKING_RESEARCH.md).
 
 **Agents (Cursor/Codex/etc.): read [AGENTS.md](AGENTS.md) first** — architecture, file map, invariants, arctic-sim adapter. Humans: this README is the 10-minute bring-up.
 
@@ -23,7 +25,7 @@ docker compose up --build
 | --- | --- |
 | Scoreboard HUD | http://localhost:3000 |
 | Health / deploy flag | http://localhost:8000/health |
-| Headless agent | `docker compose exec backend python -m agent --adapter local` |
+| Headless agent | Separate controller; use the exclusive headless example below |
 | Four-score eval | `docker compose exec backend python eval.py --seconds 15` |
 
 Kinematic twins (plane, copter, rover) + virtual towers + a weaving target run **without waiting on ArduPilot**. Optional SITL:
@@ -35,12 +37,14 @@ docker compose --profile sitl up --build
 
 ## Who owns what
 
-| Person | Files | Job |
-| --- | --- | --- |
-| A — fleet / adapter | `backend/sim/`, `mavlink_connection.py` | Saturday `WhiteoutAdapter`. Attend the 10:30 workshop. Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md) |
-| B — tracker / scores | `tracker.py`, `metrics.py`, `eval.py` | Coverage FOV, track error, `eval.py` profiles |
-| C — behaviors | `agents/`, `behaviors/trees.py`, `allocator.py` | Mission command + platform agents. Do not put LLM in this loop |
-| D — HUD / demo | `frontend/`, `agent.py` | Four numbers, heatmap, roles, 90s talk |
+| Person | Branch | Main files | Handoff |
+| --- | --- | --- | --- |
+| 1 — UI | `codex/ui` | `frontend/` | [UI setup](docs/team/01-ui.md) |
+| 2 — backend / integration | `codex/backend` | `main.py`, `brain.py`, `world.py`, `db.py`, shared contracts/config | [Backend setup](docs/team/02-backend.md) |
+| 3 — vision / tracking | `codex/vision-tracking` | `tracker.py`, `metrics.py`, `eval.py`, `sim/detector.py`, optional `backend/vision/` | [Vision setup](docs/team/03-vision-tracking.md) |
+| 4 — simulator / autonomy | `codex/simulator-autonomy` | adapter/camera files under `backend/sim/`, `mavlink_connection.py`, `agents/`, `allocator.py`, `behaviors/` | [Simulator setup](docs/team/04-simulator-autonomy.md) |
+
+Backend filenames above are relative to `backend/`. Shared-file coordination and exact ownership are in the [team contract](docs/team/CONTRACT.md). Everyone starts from the same foundation; [branch and merge instructions](docs/team/GIT_WORKFLOW.md) explain the flow to `dev`, then `main`.
 
 ## Non-negotiables (WHITEOUT scoring)
 
@@ -57,8 +61,15 @@ Live metrics: **coverage, collaboration, efficiency, tracking accuracy**, plus *
 
 ```bash
 ADAPTER=whiteout docker compose up -d --no-deps --force-recreate backend
-# or headless
-docker compose exec -e ADAPTER=whiteout backend python -m agent --adapter whiteout
 ```
 
-Detections and `POST :8010/api/tracks` are still open. Keep `ADAPTER=local` for kinematic eval. Do not start compose profile `sitl` alongside arctic-sim (host 5760 collides). Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
+For a headless controller **instead of** the API backend, stop that backend first and run one separate process using its built image:
+
+```bash
+docker compose stop backend
+docker compose run --rm --no-deps -e ADAPTER=whiteout backend python -m agent --adapter whiteout
+```
+
+Do not run the API controller and the headless controller against the same fleet simultaneously.
+
+The baseline hull detector, projection, background camera polling and HUD camera panels are present. Validate their accuracy, timing and repeated-observation handling before claiming reliable tracking. Confirm the current competition's submission interface before implementing an assumed track-upload endpoint. Keep `ADAPTER=local` for kinematic eval. Do not start compose profile `sitl` alongside arctic-sim (host 5760 collides). Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).

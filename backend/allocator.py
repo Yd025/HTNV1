@@ -26,7 +26,7 @@ def assign_roles(
     advisor: dict | None = None,
 ) -> dict[str, Role]:
     roles: dict[str, Role] = {}
-    have_track = bool(track and track.confidence >= 0.35 and track.hits >= 2)
+    have_track = bool(track and track.confidence >= 0.25 and track.hits >= 1)
     bias = (advisor or {}).get("role_bias") or {}
 
     for v in vehicles:
