@@ -217,11 +217,11 @@ export default function CommandCenter() {
   );
 }
 
-function ScoreTile({ label, value, hint }: { label: string; value: number; hint: string }) {
+function ScoreTile({ label, value, hint }: { label: string; value: number | null; hint: string }) {
   return (
     <div className="bg-ice-950 px-4 py-3">
       <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">{label}</div>
-      <div className="font-mono text-2xl text-teal-300">{(value * 100).toFixed(0)}</div>
+      <div className="font-mono text-2xl text-teal-300">{value == null ? "—" : (value * 100).toFixed(0)}</div>
       <div className="text-[11px] text-slate-500">{hint}</div>
     </div>
   );

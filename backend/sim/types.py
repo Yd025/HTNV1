@@ -81,6 +81,11 @@ class Detection:
     timestamp: float
     bearing: float | None = None
     range_m: float | None = None
+    observation_id: str | None = None
+    frame_id: str | None = None
+    timestamp_basis: str = "receipt_unix"
+    coordinate_frame: str = "wgs84"
+    provenance: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +97,11 @@ class Detection:
             "timestamp": self.timestamp,
             "bearing": self.bearing,
             "range_m": self.range_m,
+            "observation_id": self.observation_id,
+            "frame_id": self.frame_id,
+            "timestamp_basis": self.timestamp_basis,
+            "coordinate_frame": self.coordinate_frame,
+            "provenance": self.provenance,
         }
 
 
@@ -103,6 +113,7 @@ class Command:
     lon: float | None = None
     alt: float | None = None
     sector: int | None = None
+    command_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +123,7 @@ class Command:
             "lon": self.lon,
             "alt": self.alt,
             "sector": self.sector,
+            "command_id": self.command_id,
         }
 
 
@@ -119,6 +131,7 @@ class SimAdapter(Protocol):
     name: str
 
     async def connect(self) -> None: ...
+    async def close(self) -> None: ...
     def arena(self) -> Arena: ...
     async def list_vehicles(self) -> list[VehicleState]: ...
     async def poll_detections(self) -> list[Detection]: ...

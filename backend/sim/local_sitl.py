@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -130,9 +131,16 @@ class LocalSitlAdapter:
         self._comms = {vid: True for vid in self._kin}
         for tw in self._arena.towers:
             self._comms[tw.vehicle_id] = True
-        self._force_kinematic = os.getenv("FORCE_KINEMATIC", "0") == "1"
+        self._force_kinematic = os.getenv("FORCE_KINEMATIC", "1") == "1"
+
+    @property
+    def mode(self) -> str:
+        # Even with real own-vehicle telemetry, target detections are synthetic.
+        return "synthetic" if self._force_kinematic else "hybrid"
 
     async def connect(self) -> None:
+        for vid in self._comms:
+            self._comms[vid] = True
         if self._force_kinematic:
             logger.info("LocalSitlAdapter kinematic-only (FORCE_KINEMATIC=1)")
             return
@@ -145,6 +153,17 @@ class LocalSitlAdapter:
                 await bridge.connect(timeout=8.0)
             except ConnectionError:
                 logger.warning("SITL %s not up yet; using kinematic twin", spec["vehicle_id"])
+
+    async def close(self) -> None:
+        bridges, self._bridges = self._bridges, {}
+        for vid in self._comms:
+            self._comms[vid] = False
+        for craft in self._kin.values():
+            craft.cmd = None
+        results = await asyncio.gather(*(bridge.close() for bridge in bridges.values()), return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("SITL bridge cleanup failed: %s", result)
 
     def arena(self) -> Arena:
         return self._arena

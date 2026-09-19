@@ -37,7 +37,7 @@ export type Scorecard = {
   coverage: number;
   collaboration: number;
   efficiency: number;
-  tracking: number;
+  tracking: number | null;
   time_to_detect_s?: number | null;
   meters_flown?: number;
   commands_issued?: number;
@@ -54,9 +54,13 @@ export type SwarmState = {
   deployed?: boolean;
   heartbeat?: number;
   tick_hz?: number;
+  run?: { run_id: string; mode: "synthetic" | "hybrid" | "live" | "replay"; source: string; sequence: number; clock: string; evaluation_truth_available: boolean; source_run_id?: string | null };
+  observations?: { received: number; forwarded: number; rejected: { observation_id: string; source_id: string; reason: string }[]; latest_age_s: number | null; basis: string };
+  command_outcomes?: { command_id: string; vehicle_id: string; status: "suppressed" | "dispatched" | "dispatch_error"; error?: string }[];
+  recording?: { enabled: boolean; state?: string; dropped_records?: number; complete?: boolean; error?: string | null };
   scores?: Scorecard;
   fleet?: Record<string, TelemetrySample>;
-  detections?: { source_id: string; lat: number; lon: number; class_hint: string; confidence: number; range_m?: number | null }[];
+  detections?: { source_id: string; lat: number; lon: number; class_hint: string; confidence: number; range_m?: number | null; timestamp?: number; observation_id?: string | null; frame_id?: string | null; timestamp_basis?: string; coordinate_frame?: string; provenance?: string | null }[];
   track?: TrackState | null;
   truth?: { lat: number; lon: number } | null;
   heatmap?: HeatCell[];

@@ -23,5 +23,6 @@ dist/
 /models/
 /datasets/
 /runs/
+/backend/runs/
 *.pt
 *.onnx

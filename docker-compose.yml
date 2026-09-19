@@ -115,7 +115,8 @@ services:
       - ./backend:/app
     depends_on:
       postgres:
-        condition: service_healthy
+        # The backend retries storage independently; it can serve while DB warms.
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
       interval: 10s

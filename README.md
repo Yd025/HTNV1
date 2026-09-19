@@ -35,6 +35,53 @@ docker compose --profile sitl up --build
 # then set FORCE_KINEMATIC=0 in .env
 ```
 
+## Backend development, recording and replay
+
+For native Windows development, run the following from the repository root with Python 3.12. The API can run without Postgres; `DATABASE_ENABLED=0` disables database storage. Leave it enabled and configure `DATABASE_URL` when using TimescaleDB.
+
+```powershell
+cd backend
+python -m venv ../.venv
+../.venv/Scripts/Activate.ps1
+python -m pip install -r requirements.txt
+$env:ADAPTER = "local"
+$env:FORCE_KINEMATIC = "1"
+$env:DATABASE_ENABLED = "0"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Health, current state and the existing stream remain `/health`, `/telemetry/latest` and `/ws/telemetry`. Use one API worker: each process owns a brain. Local kinematic mode creates synthetic target observations; optional local SITL is labeled `hybrid`, and WHITEOUT is `live`.
+
+After stopping the API, record a short local headless run from `backend/`:
+
+```powershell
+python -m agent --adapter local --record-dir ../runs --seconds 3
+python -m agent --replay ../runs/RUN_ID
+```
+
+Replace `RUN_ID` with the generated run directory name. Each directory contains a settings/provenance manifest and bounded tick evidence: adapter inputs, forwarded observations, estimates, decisions and dispatch outcomes. Queue or size limits, write failures and interrupted ticks make the evidence incomplete; replay rejects incomplete, truncated or integrity-invalid runs. Set `RUN_LOG_DIR` to enable the same recording in the API.
+
+To inspect replay through the existing API and HUD instead of the headless command:
+
+```powershell
+$env:ADAPTER = "replay"
+$env:REPLAY_PATH = "../runs/RUN_ID"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Replay reprocesses recorded inputs through the existing brain and captures commands without transmitting them. It does not recreate physical simulation or promise bitwise-identical results. Never run the live API and a headless controller against the same fleet simultaneously.
+
+The state stream adds run mode/provenance, observation IDs and freshness/rejection details, command IDs and dispatch outcomes. Observation timestamps use Unix receipt time unless explicitly marked as capture time; receipt time is an approximation, and a camera poll does not prove a new captured frame. Dispatch reports a send attempt, not vehicle acknowledgement or visual acquisition. Without evaluation truth, `scores.tracking` and `scores.track_error_m` are `null`; confidence and sigma remain estimator outputs. Local `truth` is evaluation-only and excluded from advisor inputs.
+
+A labeled synthetic example is in [the local kinematic recording](backend/tests/fixtures/local-kinematic/), with [a state snapshot](backend/tests/fixtures/local-state.json). Validate from `backend/`:
+
+```powershell
+python -B -m unittest discover -s tests -v
+python -B eval.py --seconds 30 --profile all
+```
+
+These local checks do not validate ArcticSim camera calibration or the live fleet; those still require the simulator integration pass.
+
 ## Who owns what
 
 | Person | Branch | Main files | Handoff |

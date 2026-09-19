@@ -9,7 +9,7 @@ from Compose). Does not invent HTTP /vehicles — that path is not in arctic-sim
   tower-2     tcp:5800 / udpout:14590
 
 Arm/takeoff is a per-tick state machine so the 10 Hz loop never blocks.
-Cameras run on a background grabber; poll_detections() only reads the cache.
+Cameras run on a background grabber; poll_detections() drains each scan once.
 """
 
 from __future__ import annotations
@@ -100,6 +100,7 @@ class WhiteoutAdapter:
     """Arctic-sim MAVLink swap. Same Command contract as LocalSitlAdapter."""
 
     name = "whiteout"
+    mode = "live"
 
     def __init__(self) -> None:
         self._arena = Arena(
@@ -133,6 +134,23 @@ class WhiteoutAdapter:
         await asyncio.gather(*(self._connect_one(s) for s in self._spec))
         await asyncio.sleep(0.4)
         logger.info("WhiteoutAdapter MAVLink fleet host=%s cameras=%s", _host(), len(FLEET_CAMERAS))
+
+    async def close(self) -> None:
+        task, self._cam_task = self._cam_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        bridges, self._bridges = self._bridges, {}
+        self._dets = []
+        self._poses.clear()
+        self._attitude.clear()
+        for vid in self._last_ok:
+            self._last_ok[vid] = False
+        self._air = {s["vehicle_id"]: _Air() for s in self._spec}
+        results = await asyncio.gather(*(bridge.close() for bridge in bridges.values()), return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("WHITEOUT bridge cleanup failed: %s", result)
 
     def arena(self) -> Arena:
         return self._arena
@@ -180,7 +198,8 @@ class WhiteoutAdapter:
 
     async def poll_detections(self) -> list[Detection]:
         now = time.time()
-        return [d for d in self._dets if now - d.timestamp < 4.0]
+        detections, self._dets = self._dets, []
+        return [d for d in detections if 0.0 <= now - d.timestamp < 4.0]
 
     def camera_catalog(self) -> list[dict[str, Any]]:
         return [c.as_dict() for c in FLEET_CAMERAS]
@@ -226,7 +245,11 @@ class WhiteoutAdapter:
                 logger.info("MAVLink %s via %s", vid, conn_str)
                 return
             except ConnectionError as exc:
+                await bridge.close()
                 logger.warning("MAVLink %s %s failed: %s", vid, conn_str, exc)
+            except BaseException:
+                await bridge.close()
+                raise
         logger.error("MAVLink %s unreachable — asset will idle", vid)
 
     async def _camera_loop(self) -> None:
@@ -268,8 +291,7 @@ class WhiteoutAdapter:
                     det.lat,
                     det.lon,
                 )
-        if found:
-            self._dets = found
+        self._dets = found
 
     async def _drain(self, bridge: MavlinkBridge) -> None:
         for _ in range(16):

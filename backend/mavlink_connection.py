@@ -67,13 +67,39 @@ class MavlinkBridge:
     def snapshot(self) -> dict[str, Any]:
         return dict(self._state)
 
+    async def close(self) -> None:
+        """Stop the receive worker and release its transport; safe to repeat."""
+        self.connected = False
+        task, self._pump_task = self._pump_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with self._io_lock:
+            conn, self.conn = self.conn, None
+            if conn is not None:
+                await asyncio.to_thread(conn.close)
+        self.last_heartbeat_at = None
+        self._last_gcs_hb = 0.0
+
     async def connect(self, timeout: float = 30.0) -> None:
         """Retry until SITL accepts the TCP GCS connection."""
         deadline = time.monotonic() + timeout
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                self.conn = await asyncio.to_thread(self._connect_blocking)
+                # The underlying thread cannot be cancelled. Retain its result
+                # so cancellation during startup cannot orphan a transport.
+                connecting = asyncio.create_task(asyncio.to_thread(self._connect_blocking))
+                try:
+                    self.conn = await asyncio.shield(connecting)
+                except asyncio.CancelledError:
+                    try:
+                        conn = await connecting
+                    except Exception:
+                        pass
+                    else:
+                        await asyncio.to_thread(conn.close)
+                    raise
                 self.connected = True
                 if int(getattr(self.conn, "target_component", 0) or 0) == 0:
                     self.conn.target_component = 1
