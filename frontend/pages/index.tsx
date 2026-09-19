@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
 import MissionObservability from "../components/MissionObservability";
+import { useTickWindow } from "../hooks/useTickWindow";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
 import { useMissionTelemetry } from "../hooks/useMissionTelemetry";
@@ -76,6 +77,7 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
   const telemetry = useMissionTelemetry();
   const { state, strategy, isFresh, hasReceived, lastReceived, connection } =
     telemetry;
+  const tickSummary = useTickWindow(state, isFresh);
   const [section, setSection] = useState<Section>(initialSection);
   const [view, setView] = useState<"3d" | "2d">("3d");
   const [themeId, setThemeId] = useState<ThemeId>("ink");
@@ -752,7 +754,7 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
               </div>
             )}
             {section === "system" && <TelemetryMonitor telemetry={telemetry} />}
-            {section === "sentry" && <SentryPanel telemetry={telemetry} />}
+            {section === "sentry" && <SentryPanel telemetry={telemetry} tickSummary={tickSummary} />}
           </div>
           <footer className="mission-footer">
             <span>

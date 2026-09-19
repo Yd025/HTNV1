@@ -5,6 +5,8 @@ import { browserDsn, SENTRY_ORG, SENTRY_PROJECT, sentryLink } from "../lib/sentr
 import { Icon } from "./ui/Icons";
 import SimulatorWorld from "./SimulatorWorld";
 import { themes } from "../lib/theme";
+import type { TickSummary } from "../lib/tickWindow";
+import TickPerformance from "./TickPerformance";
 import s from "../styles/SentryPanel.module.css";
 
 type Exporter = { enabled?: boolean; closed?: boolean; processed_ticks?: number; dropped_ticks?: number; export_errors?: number; queue_depth?: number };
@@ -13,7 +15,7 @@ type ServerStatus = { configured: boolean; environment: string; release: string 
 type Verification = { message: string; eventId?: string; accepted?: boolean };
 const metric = (value: number | undefined, digits = 0) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : "Unavailable";
 
-export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry }) {
+export default function SentryPanel({ telemetry, tickSummary }: { telemetry: MissionTelemetry; tickSummary: TickSummary }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [server, setServer] = useState<ServerStatus | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -26,11 +28,8 @@ export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry
   const mounted = useRef(true);
   const { state, isFresh, hasReceived } = telemetry;
   const runId = state.run?.run_id;
-  const diagnostics = state.diagnostics;
   const exporter = healthError ? undefined : health?.observability;
   const logsQuery = runId ? `run.id:${runId}` : undefined;
-  const stages = diagnostics?.stages?.filter(stage => Number.isFinite(stage.duration_ms)) ?? [];
-  const longest = Math.max(1, ...stages.map(stage => stage.duration_ms));
 
   useEffect(() => {
     mounted.current = true;
@@ -121,6 +120,7 @@ export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry
     <section className={s.card} aria-labelledby="ship-camera-title">
       <div className={s.cardHeading}><div><h3 id="ship-camera-title">Ship follow &amp; Replay</h3><p>Keep the ship in view as it moves through the native simulator. Use Record this view to retain a session for inspection.</p></div><button className={s.primary} onClick={() => setShowCamera(value => !value)}>{showCamera ? "Close ship camera" : "Open ship camera"}</button></div>
       {showCamera && <div className={s.shipCamera}><SimulatorWorld state={state} isFresh={isFresh} selected={selected} onSelect={setSelected} colors={themes.ink.colors} /></div>}
+      {showCamera && state.adapter && state.adapter !== "whiteout" && <p className={s.notice}>The performance summary belongs to the {state.adapter} backend run. This camera shows a separate native simulator session.</p>}
       <p className={s.caption}>The observer camera follows the simulator’s ship position. Mission tracking still uses detector estimates. Replay captures only this native canvas, up to two frames per second; other media stays blocked.</p>
     </section>
 
@@ -143,12 +143,7 @@ export default function SentryPanel({ telemetry }: { telemetry: MissionTelemetry
       </section>
     </div>
 
-    <section className={s.card} aria-labelledby="stages-title">
-      <div className={s.cardHeading}><div><h3 id="stages-title">Inside the control tick</h3><p>{isFresh ? "Latest" : "Last received"} measured stage durations · {metric(diagnostics?.duration_ms, 2)} ms total · {metric(diagnostics?.budget_ms)} ms budget</p></div><span className={s.badge}>{diagnostics ? diagnostics.over_budget ? "Over budget" : "Within budget" : "Awaiting timings"}</span></div>
-      {stages.length ? <div className={s.stages}>{stages.map((stage, i) => <div className={s.stage} key={`${stage.op}-${i}`}><div><strong>{stage.op}</strong><span>{stage.name !== stage.op ? stage.name : stage.status}</span></div><div className={s.bar} aria-hidden="true"><i style={{ width: `${Math.max(1, stage.duration_ms / longest * 100)}%` }} /></div><span>{metric(stage.duration_ms, 2)} ms</span></div>)}</div> : <p className={s.empty}>The active backend has not supplied tick timings yet. They appear here when its instrumented control loop publishes telemetry.</p>}
-      {diagnostics && <div className={s.traceFooter}><code>{diagnostics.trace_id}</code><a href={sentryLink("traces", `trace:${diagnostics.trace_id}`)} target="_blank" rel="noreferrer">Find this trace ↗</a></div>}
-      <p className={s.caption}>Timings come from mission telemetry. Cloud traces are sampled, so a local tick may have no stored Sentry trace. Full observations and positions remain in the run recording.</p>
-    </section>
+    <TickPerformance summary={tickSummary} isFresh={isFresh} />
   </div>;
 }
 
