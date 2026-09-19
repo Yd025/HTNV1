@@ -2,6 +2,12 @@
 
 Read this before editing. This file is the project scope for coding agents (Cursor, Codex, Claude, etc.). Humans: start with [README.md](README.md). Saturday sim contract: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
 
+## Current four-person team assignment
+
+The user has assigned four workstreams in [docs/team/README.md](docs/team/README.md): UI (`codex/ui`), backend/integration (`codex/backend`), vision/tracking (`codex/vision-tracking`), and simulator/autonomy (`codex/simulator-autonomy`). These file-ownership assignments supersede the historical A/B/C/D labels and earlier visual-only teammate assignment below. Runtime invariants still apply. Read your handoff and [shared contract](docs/team/CONTRACT.md), reuse the existing code, and open small PRs into `dev`.
+
+Do not scaffold the earlier standalone NORTHSTAR folder/API: this repository already has Next.js Pages Router on port 3000 and FastAPI with `/ws/telemetry` on port 8000. Person 2 coordinates shared dataclasses, wire types, dependencies and deployment files. The research is an improvement plan, not a second application or measured performance claim.
+
 ## What this repo is
 
 Hack the North 2026 team project. **Primary prize: Dominion Dynamics WHITEOUT.**
@@ -14,7 +20,7 @@ WHITEOUT is a live Arctic simulation. Teams deploy **shared intelligence** that 
 4. **Tracking accuracy** — fused **target** track vs truth (or residual if no truth)
 5. **Agent deploy** — one process they can launch against their sim (`python -m agent --adapter whiteout`)
 
-The **hackathon has not started**. Dominion’s live binary/API is unknown until the **Saturday 10:30 AM workshop (PSE 2324/2328)**. This repo is a complete local stand-in plus a Saturday swap layer so teammates can work in parallel now.
+The repo has a local stand-in plus an ArcticSim MAVLink adapter so teammates can work in parallel. Camera detections, calibrated target localization and the exact competition submission/scoring contract still require verification. Some workshop notes below record earlier assumptions; current source and the team contract take precedence for implementation.
 
 Secondary prizes (OpenAI, Huawei openJiuwen, Sentry, Tiger Data, Gemini, ElevenLabs) are **overlays**. They must not steal the 10 Hz control loop. If a change helps a side prize but hurts WHITEOUT scores, reject it.
 
@@ -163,7 +169,7 @@ Python imports assume **cwd = `backend/`** (Docker `WORKDIR /app`). Do not use `
 
 **HUD / Astra** — prettier ice, lights, craft meshes in `TacticalScene.tsx` only. Do not invent a second telemetry path.
 
-**Saturday** — `ADAPTER=whiteout` against arctic-sim `udpout`. Freeze BT gains unless their metric definition differs. Camera detector and `POST :8010/api/tracks` are still open. Swap HUD terrain only if they publish a real mesh.
+**Saturday** — `ADAPTER=whiteout` against arctic-sim `udpout`. Freeze BT gains unless their metric definition differs. Camera detection is still open. Verify the competition's actual track-submission interface before implementing it; no upload endpoint is established here. Swap HUD terrain only after validating the supplied mesh and coordinate convention.
 
 **SITL** — unique TCP per vehicle via env `MAVLINK_PLANE/COPTER/ROVER`. Image `radarku/ardupilot-sitl` may ignore `VEHICLE`; kinematic fallback is expected.
 
