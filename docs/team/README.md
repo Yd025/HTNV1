@@ -8,10 +8,12 @@ This setup extends the existing **Operation Overwatch** implementation. The NORT
 |---|---|---|---|
 | 1 | [UI / mission control](01-ui.md) | `codex/ui` | `frontend/**` |
 | 2 | [Backend / API / integration](02-backend.md) | `codex/backend` | `backend/main.py`, `brain.py`, `world.py`, `db.py`, deployment and shared contracts |
-| 3 | [Vision / target tracking / evaluation](03-vision-tracking.md) | `codex/vision-tracking` | `backend/tracker.py`, `metrics.py`, `eval.py`, new `backend/vision/**` |
-| 4 | [Simulator / geometry / autonomy](04-simulator-autonomy.md) | `codex/simulator-autonomy` | `backend/sim/**` except shared types, `mavlink_connection.py`, `allocator.py`, `agents/**`, `behaviors/**` |
+| 3 | [Vision / target tracking / evaluation](03-vision-tracking.md) | `codex/vision-tracking` | `backend/tracker.py`, `metrics.py`, `eval.py`, `sim/detector.py`, optional `backend/vision/**` |
+| 4 | [Simulator / geometry / autonomy](04-simulator-autonomy.md) | `codex/simulator-autonomy` | `backend/sim/**` except shared types and detector, `mavlink_connection.py`, `allocator.py`, `agents/**`, `behaviors/**` |
 
 Assign a teammate to each row. Person 2 is the integrator and coordinates `backend/sim/types.py`, `backend/geo.py`, `frontend/lib/types.ts`, the single Python requirements file, shared Docker/configuration and the wire format. Functional owners propose shared changes; one owner lands them so concurrent branches stay compatible.
+
+The current `sim/detector.py` mixes image detection and projection. Person 3 is its single editing owner; Person 4 supplies geometry corrections through Person 3 until a coordinated extraction is justified. The camera/HUD work from main commit `4372c07` is included in this foundation.
 
 ## First steps
 
@@ -47,4 +49,4 @@ Keep one deterministic brain. Detection workers may process frames outside the f
 | Evidence | Reactive versus predictive policy runs, reported failures, measured recovery and location error when truth exists |
 | Demo | A tested `dev` commit is merged to `main` |
 
-The current local adapter is a stand-in, not a real detector benchmark. The WHITEOUT camera detection path still needs implementation. See [research](../research/TRACKING_RESEARCH.md) and [evaluation protocol](../research/EVALUATION.md).
+The current local adapter is a stand-in, not a real detector benchmark. The WHITEOUT camera path has a baseline hull/blob detector and sea-plane projection; its calibration, accuracy and freshness still need validation. See [research](../research/TRACKING_RESEARCH.md) and [evaluation protocol](../research/EVALUATION.md).

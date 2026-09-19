@@ -4,17 +4,17 @@
 
 ## Ownership
 
-Own `backend/sim/**` except the coordinated `types.py`, `backend/mavlink_connection.py`, `allocator.py`, `agents/**`, and `behaviors/**`. Put camera/calibration/projection helpers under `backend/sim/`. Coordinate common geo/types changes with Person 2. Person 3 owns detector and target filter; do not add another world tracker.
+Own `backend/sim/**` except the coordinated `types.py` and Person 3's `detector.py`, plus `backend/mavlink_connection.py`, `allocator.py`, `agents/**`, and `behaviors/**`. Coordinate common geo/types changes with Person 2. The existing detector file contains projection as well; supply geometry fixes through Person 3 to keep one editing owner. If extraction becomes useful, agree the move first. Do not add another world tracker.
 
-The current `WhiteoutAdapter` connects to quadcopter/fixed-wing/towers and can command flight. Its `poll_detections()` still returns an empty list. This is the key integration gap. Existing code is a starting point, not proof that head-pose calibration or optical tracking works.
+The current `WhiteoutAdapter` connects to quadcopter/fixed-wing/towers and can command flight. It now has a background JPEG grabber and hull/blob detector with sea-plane projection. `poll_detections()` returns cached observations, which can repeat on multiple ticks for up to four seconds. Verify/deduplicate this lifecycle with Person 3. Existing code is a starting point, not proof that head-pose calibration or optical tracking works.
 
 ## First 90–120 minutes
 
 1. Inspect real camera JPEGs and own-sensor telemetry without starting another controller. Initial tower and copter views may not contain a useful vessel view.
-2. Add a persistent latest-frame camera reader, sensor/frame IDs, receipt-time provenance and buffered pose. Bound queues and keep inference out of the adapter's fast poll path.
+2. Inspect and improve the existing background reader: add actual observation IDs, receipt-time provenance and buffered pose as needed. Bound queues and keep inference out of the adapter's fast poll path.
 3. Verify tower head angle/control against actual image movement. Distinguish base orientation from moving head orientation.
 4. Validate pixel-to-water geometry with known reference points at multiple headings/ranges. Manual pixel clicks are a development check, not autonomous detections.
-5. Agree the raw-detection interface with Person 3. Call their detector worker and convert accepted raw pixels into existing `Detection` objects returned by `poll_detections()`.
+5. Agree extensions to the current `PixelHit`/`Detection` interface with Person 3. Preserve the existing detector/projection call path, and ensure only new accepted observations are returned for fusion.
 
 Camera URLs on the simulator host:
 
@@ -55,4 +55,4 @@ Done when a real camera-backed target measurement enters the existing tracker an
 
 ## Kickoff prompt
 
-> Work on codex/simulator-autonomy in Yd025/HTNV1. Read AGENTS.md, docs/team/04-simulator-autonomy.md and CONTRACT.md. Extend existing SimAdapter/WhiteoutAdapter and owned agents/allocator/behaviors; preserve one controller and the local default. First implement verified camera/own-pose input and calibrated projection, connecting Person 3's raw detector observations to poll_detections(). Coordinate shared dataclasses/geo with Person 2. Then add reactive versus predictive two-sensor handoff with bounded commands and receiver visual confirmation. Keep hidden target truth out of runtime perception/planning, verify pure geometry and live effects separately, and prepare small PRs into dev.
+> Work on codex/simulator-autonomy in Yd025/HTNV1. Read AGENTS.md, docs/team/04-simulator-autonomy.md and CONTRACT.md. Extend existing SimAdapter/WhiteoutAdapter and owned agents/allocator/behaviors; preserve one controller and the local default. Validate the existing background camera path, pose/projection and repeated-cache behavior, coordinating detector.py geometry edits through Person 3. Coordinate shared dataclasses/geo with Person 2. Then add reactive versus predictive two-sensor handoff with bounded commands and receiver visual confirmation. Keep hidden target truth out of runtime perception/planning, verify pure geometry and live effects separately, and prepare small PRs into dev.

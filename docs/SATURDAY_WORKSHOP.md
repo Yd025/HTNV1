@@ -25,4 +25,4 @@ ADAPTER=whiteout docker compose up --build backend
 docker compose exec -e ADAPTER=whiteout backend python -m agent --adapter whiteout
 ```
 
-`WhiteoutAdapter` already speaks those ports. `poll_detections()` is empty until the camera tracker lands. Keep `ADAPTER=local` for kinematic eval.
+`WhiteoutAdapter` already speaks those ports. Cameras: `http://<host>:8600/snapshot.jpg` (quad), 8610 (plane), 8630/8640 (towers). HUD proxies them at `/cameras/<id>/snapshot.jpg`. Keep `ADAPTER=local` for kinematic eval.

@@ -9,7 +9,7 @@ from Compose). Does not invent HTTP /vehicles — that path is not in arctic-sim
   tower-2     tcp:5800 / udpout:14590
 
 Arm/takeoff is a per-tick state machine so the 10 Hz loop never blocks.
-Detections stay empty until the camera tracker lands. truth_target() is None.
+Cameras run on a background grabber; poll_detections() only reads the cache.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import time
 from typing import Any
 
 from mavlink_connection import MavlinkBridge
+from sim.cameras import FLEET_CAMERAS, grab_jpeg
+from sim.detector import detect_jpeg, project_hit
 from sim.types import Arena, Command, Detection, TowerMount, VehicleClass, VehicleState
 
 logger = logging.getLogger("overwatch.whiteout")
@@ -45,28 +47,28 @@ def _fleet_spec() -> list[dict[str, Any]]:
             "vehicle_id": "quadcopter",
             "vehicle_class": "copter",
             "conn": os.getenv("ARCTIC_QUAD", f"udpout:{h}:14550"),
-            "fallback": f"tcp:{h}:5760",
+            "fallback": "",
             "home": (71.995807, -94.839300),
         },
         {
             "vehicle_id": "fixed-wing",
             "vehicle_class": "plane",
             "conn": os.getenv("ARCTIC_PLANE", f"udpout:{h}:14560"),
-            "fallback": f"tcp:{h}:5770",
+            "fallback": "",
             "home": (71.998195, -94.841967),
         },
         {
             "vehicle_id": "tower-1",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER1", f"udpout:{h}:14580"),
-            "fallback": f"tcp:{h}:5790",
+            "fallback": "",
             "home": (71.980671, -94.853711),
         },
         {
             "vehicle_id": "tower-2",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER2", f"udpout:{h}:14590"),
-            "fallback": f"tcp:{h}:5800",
+            "fallback": "",
             "home": (72.011778, -94.804721),
         },
     ]
@@ -115,6 +117,10 @@ class WhiteoutAdapter:
         self._air: dict[str, _Air] = {s["vehicle_id"]: _Air() for s in self._spec}
         self._last_ok: dict[str, bool] = {s["vehicle_id"]: False for s in self._spec}
         self._homes = {s["vehicle_id"]: s["home"] for s in self._spec}
+        self._poses: dict[str, VehicleState] = {}
+        self._attitude: dict[str, tuple[float, float]] = {}
+        self._dets: list[Detection] = []
+        self._cam_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         import geo as geo_mod
@@ -122,9 +128,11 @@ class WhiteoutAdapter:
         geo_mod.ORIGIN_LAT = FORT_ROSS_LAT
         geo_mod.ORIGIN_LON = FORT_ROSS_LON
         geo_mod.ARENA_HALF_M = FORT_ROSS_HALF_M
+        if self._cam_task is None or self._cam_task.done():
+            self._cam_task = asyncio.create_task(self._camera_loop(), name="whiteout-cameras")
         await asyncio.gather(*(self._connect_one(s) for s in self._spec))
         await asyncio.sleep(0.4)
-        logger.info("WhiteoutAdapter MAVLink fleet host=%s", _host())
+        logger.info("WhiteoutAdapter MAVLink fleet host=%s cameras=%s", _host(), len(FLEET_CAMERAS))
 
     def arena(self) -> Arena:
         return self._arena
@@ -162,11 +170,20 @@ class WhiteoutAdapter:
                     role="cue" if vclass == "tower" else None,
                 )
             )
+            self._poses[vid] = out[-1]
+            if mav_ok:
+                self._attitude[vid] = (
+                    float(snap.get("roll") or 0.0),
+                    float(snap.get("pitch") or 0.0),
+                )
         return out
 
     async def poll_detections(self) -> list[Detection]:
-        # Camera → lat/lon is the next piece. Do not fake FOV hits here.
-        return []
+        now = time.time()
+        return [d for d in self._dets if now - d.timestamp < 4.0]
+
+    def camera_catalog(self) -> list[dict[str, Any]]:
+        return [c.as_dict() for c in FLEET_CAMERAS]
 
     async def send_command(self, command: Command) -> None:
         spec = next((s for s in self._spec if s["vehicle_id"] == command.vehicle_id), None)
@@ -211,6 +228,48 @@ class WhiteoutAdapter:
             except ConnectionError as exc:
                 logger.warning("MAVLink %s %s failed: %s", vid, conn_str, exc)
         logger.error("MAVLink %s unreachable — asset will idle", vid)
+
+    async def _camera_loop(self) -> None:
+        import httpx
+
+        timeout = httpx.Timeout(1.6, connect=0.6)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while True:
+                try:
+                    await self._scan_cameras(client)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("camera scan failed")
+                await asyncio.sleep(0.7)
+
+    async def _scan_cameras(self, client: Any) -> None:
+        now = time.time()
+        found: list[Detection] = []
+        frames = await asyncio.gather(*(grab_jpeg(spec, client) for spec in FLEET_CAMERAS))
+        for spec, jpeg in zip(FLEET_CAMERAS, frames, strict=True):
+            if not jpeg:
+                continue
+            hit = await asyncio.to_thread(detect_jpeg, jpeg)
+            if hit is None:
+                continue
+            pose = self._poses.get(spec.vehicle_id)
+            if pose is None:
+                continue
+            roll, pitch = self._attitude.get(spec.vehicle_id, (0.0, 0.0))
+            det = project_hit(hit, spec, pose, now, roll_rad=roll, pitch_rad=pitch)
+            if det:
+                found.append(det)
+                logger.info(
+                    "camera hit %s conf=%.2f rng=%.0fm lat=%.5f lon=%.5f",
+                    spec.vehicle_id,
+                    det.confidence,
+                    det.range_m or 0.0,
+                    det.lat,
+                    det.lon,
+                )
+        if found:
+            self._dets = found
 
     async def _drain(self, bridge: MavlinkBridge) -> None:
         for _ in range(16):

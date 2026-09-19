@@ -12,6 +12,7 @@
 | Browser `SwarmState`, `TrackState`, `TelemetrySample` | `frontend/lib/types.ts` | Person 1 with Person 2 |
 | WGS84 / local north-east conversion | `backend/geo.py`, `frontend/lib/geo.ts` | Persons 2/4 coordinate with Person 1 |
 | Actual adapter I/O | `backend/sim/whiteout.py`, `mavlink_connection.py` | Person 4 |
+| Existing combined detector/projection | `backend/sim/detector.py` | Person 3 edits; Person 4 supplies geometry corrections |
 
 Python runs with **cwd `backend/`**, so current imports use `from sim.types import Detection`, not `from backend.sim.types ...`.
 
@@ -22,10 +23,12 @@ Backend defaults to port 8000; Next.js frontend defaults to 3000.
 - `GET /health`: deployed/adapter/heartbeat/scores and service health.
 - `GET /telemetry/latest`: latest state or `{status:"warming"}`.
 - `GET /strategy/latest`: advisor output or `{status:"none"}`.
+- `GET /cameras`: current adapter's camera catalog (empty for adapters without it).
+- `GET /cameras/{cam_id}/snapshot.jpg`: JPEG, 204 for unavailable image, or 404 for unknown camera.
 - `POST /strategy/run`: invokes the existing slow advisor; it may call a configured model provider.
 - `WS /ws/telemetry`: existing state stream plus strategy messages.
 
-Preserve this stream. There is no new `/api/state` or required polling service in this plan. Camera/image endpoints, recording/replay APIs and added status fields are future coordinated extensions. UI must not assume they already exist.
+Preserve this stream and the current camera endpoints. There is no new `/api/state` or required polling service in this plan. Recording/replay APIs and added status fields are future coordinated extensions. UI must not assume proposed fields already exist.
 
 The current state contains `adapter`, `deployed`, `heartbeat`, `tick_hz`, `scores`, `fleet`, nullable `track`, `detections`, `truth`, `heatmap`, `blackboard`, `advisor`, `c2`, `intents`, `commands`, and `arena`. Consult `SwarmBrain.snapshot()` for actual JSON and `frontend/lib/types.ts` for browser types. Several browser fields are optional; handle missing/warming state.
 
@@ -42,11 +45,11 @@ Person 4 camera reader + own-sensor pose
   -> existing brain snapshot and WebSocket
 ```
 
-Person 3 puts new image processing under `backend/vision/`. Person 4 owns camera access, calibration, projection and adapter integration. They agree a small raw-observation record with sensor/frame/observation IDs, raw box, water-contact estimate, timestamp provenance, and detector score. The raw record has no fabricated target lat/lon. This seam is still to be implemented; freeze its fields together in the first hour.
+The baseline already has `sim/cameras.py`, `sim/detector.py` (`PixelHit`, `detect_jpeg`, `project_hit`) and the WHITEOUT background grabber. Evaluate and extend this path. Person 3 is the single editing owner for the currently combined detector/projection file; Person 4 provides calibrated geometry corrections through Person 3. Optional new image modules go under `backend/vision/`. Person 4 owns acquisition/pose and adapter integration. Extend the raw-observation record with agreed frame/observation IDs, water-contact estimate and timestamp provenance. Do not create a parallel detection path.
 
 Current `Detection` requires `source_id`, `lat`, `lon`, `class_hint`, `confidence`, and `timestamp`, with optional `bearing` and `range_m`. These are target observations, not own-vehicle positions. It currently lacks unique observation IDs, clock metadata, covariance, and calibration provenance. Add these compatibly with defaults through Person 2, updating `as_dict`, consumers and fixtures together.
 
-Only actual detector observations become world measurements. A per-camera tracker prediction or smoothed box is not a new independent observation. The image tracker ID is local to its camera; the shared vessel filter owns world identity. Deduplicate actual frame/observation IDs and reject stale or incompatible data.
+Only actual detector observations become world measurements. A per-camera tracker prediction or smoothed box is not a new independent observation. The image tracker ID is local to its camera; the shared vessel filter owns world identity. Deduplicate actual frame/observation IDs and reject stale or incompatible data. In the included baseline, `poll_detections()` can return the same cached observation on successive ticks for up to four seconds; Persons 3/4 must fix that lifecycle together rather than treat each poll as fresh evidence.
 
 ## Coordinates, time and uncertainty
 

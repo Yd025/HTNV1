@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
@@ -33,9 +35,14 @@ class TowerAgent(PlatformAgent):
             self.intent = "stare"
             return AgentDecision(command=_slew(me, track.lat, track.lon), calls=[], intent=self.intent)
 
-        self.intent = "overwatch"
+        self.intent = "scan"
         call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1)})
-        return AgentDecision(command=None, calls=self.calls_of(call), intent=self.intent)
+        sector = (int(time.monotonic() / 12.0) + (0 if "1" in me.vehicle_id else 3)) % 6
+        return AgentDecision(
+            command=Command(vehicle_id=me.vehicle_id, type="search_sector", sector=sector),
+            calls=self.calls_of(call),
+            intent=self.intent,
+        )
 
 
 def _slew(me: VehicleState, lat: float, lon: float) -> Command | None:
