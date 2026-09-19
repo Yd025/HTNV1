@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "mode": "synthetic",
+  "algorithm": "lawnmower",
+  "observation_period_s": 1.0,
+  "arena": {
+    "origin_lat": 74.6973,
+    "origin_lon": -94.8297,
+    "half_m": 1500.0,
+    "towers": [
+      {
+        "vehicle_id": "tower-ne",
+        "lat": 74.69520192965771,
+        "lon": -94.81395545383386,
+        "heading": 304.7521365101545,
+        "fov_deg": 40.0,
+        "range_m": 600.0
+      },
+      {
+        "vehicle_id": "tower-sw",
+        "lat": 74.70295189952621,
+        "lon": -94.85057634902833,
+        "heading": 279.4952063721711,
+        "fov_deg": 40.0,
+        "range_m": 600.0
+      }
+    ],
+    "no_fly": [],
+    "heading_offset_deg": 0.0
+  },
+  "planner": {
+    "grid_size": 8,
+    "scan_period_s": 60.0,
+    "detection_probability": 0.9
+  }
+}

@@ -175,4 +175,44 @@ These are validation requirements arising from the known model gap, not evidence
 
 ## Measured results
 
-Pending the implementation's reproducible benchmark report. No speedup, final tower coordinates, detection success percentage, or global-optimality claim is asserted by this research document. Record the actual command/configuration, split sizes, baseline and candidate metrics, seed manifest, and output artifact here after the run is verified. Keep synthetic findings and camera-backed ArcticSim findings in separate rows.
+Verified local run: September 19, 2026, source commit `f6ddaadfbe092f5434f10eb260e9b6941d276d79`. The experiment fingerprints its source before evaluation and refuses to save if those files change during the run. A repeat run reproduced the same placements and episode outcomes.
+
+```powershell
+# From backend/, no external model or simulator required.
+python -B train_search.py --candidates 32 --train 32 --validation 48 --test 160 --horizon 180 --output ../runs/tower-search-verified
+```
+
+Seed `2026`; 32 training scenarios, 48 validation scenarios, and 160 untouched test scenarios; three boat-motion profiles, random starts/headings/speeds, 0–20 second spawn delay. One-second observation/integration interval, 180-second deadline after spawn, 0.9 independent detection probability per in-FOV source/sample. Two towers use 600 m range, 40-degree horizontal FOV and 60-second full rotations. The mobile fleet includes the local plane, copter and rover; the documented live four-asset ArcticSim roster has no rover. There are 32 new candidates per algorithm plus its initial placement, totaling 3,056 evaluated episodes including validation, test and sensor ablations.
+
+Validation selected **optimized systematic sweep** before test evaluation. The probability-guided heuristic did not win this experiment. The baseline is the newly defined systematic sweep at the old tower locations, not a claim about the unmodified live controller.
+
+| Policy, all on identical 160 test scenarios | Restricted mean detection time | Detected by 180 s | Miss rate | Mean fleet distance to detection/deadline |
+| --- | ---: | ---: | ---: | ---: |
+| Original tower locations + systematic sweep | 121.45 s | 48.75% | 51.25% | 5,380.93 m |
+| Optimized locations + systematic sweep — selected on validation | **98.82 s** | **62.50%** | **37.50%** | **4,456.02 m** |
+| Optimized locations + probability-guided search | 117.83 s | 54.38% | 45.63% | 5,235.75 m |
+| Selected layout, towers only | 106.82 s | 56.25% | 43.75% | 0 m |
+| Selected layout, vehicles only | 160.83 s | 19.38% | 80.63% | 6,988.27 m |
+
+The selected pair saves **22.63 s (18.63%)** in restricted mean detection time. The paired episode-bootstrap 95% interval for seconds saved is **4.84–39.28 s**. Detection success increases by **13.75 percentage points**, with a paired 95% interval of **1.25–26.25 points**. These intervals are conditional on this synthetic scenario and sensor model. The selected policy still misses 60 of 160 boats; its capped P90 equals the deadline, and uncensored P90 detection time cannot be established. This is a useful measured local improvement, not a reliable real-world detection system or a global optimum.
+
+Selected tower positions in **metres north/east of the local stand-in origin** (`74.6973, -94.8297`):
+
+| Preserved tower ID | North | East | Initial scan heading |
+| --- | ---: | ---: | ---: |
+| `tower-ne` | -233.12 m | +461.70 m | 304.75 degrees |
+| `tower-sw` | +627.99 m | -612.18 m | 279.50 degrees |
+
+The IDs preserve compatibility and no longer describe the positions. Do not transfer these metre offsets or geographic coordinates into Fort Ross without the terrain/visibility validation above.
+
+The [complete benchmark evidence](tower-search-benchmark.json) includes all candidate policies, scenario seeds, per-episode results, uncertainty and source fingerprint. The [saved local policy](example-search-policy.json) is directly usable through `SEARCH_POLICY_FILE=../docs/research/example-search-policy.json` from `backend/`. [README instructions](../../README.md#learn-two-tower-placement-and-search) cover further training, resuming and local preview. `--resume` uses the selected policy embedded in the canonical latest report, reevaluates candidates, preserves round reports, and chooses a fresh test seed range.
+
+Camera-backed ArcticSim improvement: **not measured**. Live relocation/reset/training has not been enabled, and no language-model weights were trained. The small optimizer improves a configuration through simulation; an LLM adviser remains an optional future interface to this evidence.
+
+## Branch comparison and integration
+
+At fetch time, `origin/main` was `ad8e302` and `codex/backend` was `79d9147`, with common ancestor `bf5b64a`. Main had five unique commits covering live flight behavior, tower scanning/camera streams and tower-to-copter handoff. Backend had four unique commits covering the dashboard, telemetry reliability, bounded recording/replay and simulator integration.
+
+The local `main` reference was fast-forwarded. Both histories were combined on **`codex/tower-search`**, in the separate `HTNV1-tower-search` worktree. Merge commit `a063bb8` resolves the WHITEOUT adapter conflict by preserving backend observation draining/lifecycle and main flight/camera behavior, including cleanup for streaming/reconnect workers. Existing uncommitted backend arena/nonblocking fixes were carried forward where applicable; the original backend and UI worktrees retain their unfinished edits. Nothing was pushed.
+
+Validation: **95 backend tests and 21 frontend checks passed**. Three 30-second legacy local evaluation profiles also completed as an integration smoke check; their default target starts in coverage, so they are not the randomized placement benchmark. Generated bytecode was excluded from the new changes.
