@@ -15,6 +15,22 @@
 .cameraStatus { display:flex; flex-wrap:wrap; gap:6px 20px; padding:8px 14px; color:var(--text-muted); font-size:11px; line-height:1.5; border-bottom:1px solid var(--line); }
 .toolbar button[aria-pressed=true] { color:var(--accent-text); border-color:var(--accent); background:var(--accent-soft); }
 .toolbar a { color:var(--accent-text); }
+.options { position:relative; }
+.options summary { cursor:pointer; padding:8px 0; color:var(--text-muted); }
+.options[open]>div { position:absolute; z-index:30; top:100%; right:0; width:180px; display:grid; gap:12px; padding:14px; background:var(--surface); border:1px solid var(--line-strong); box-shadow:0 6px 20px #0003; }
+.assets { padding:10px 14px; border-bottom:1px solid var(--line); background:var(--surface); }
+.assetHeading { display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; margin-bottom:8px; font-size:11px; }
+.assetHeading span { color:var(--text-muted); font-size:10px; }
+.assetList { display:flex; gap:7px; overflow-x:auto; padding-bottom:3px; }
+.assetList button { display:flex; align-items:center; gap:8px; text-align:left; flex:0 0 auto; padding:7px 10px; border:1px solid var(--line); border-left:3px solid var(--text-muted); border-radius:4px; background:var(--surface-muted); color:var(--text); }
+.assetList button[data-role=search] { border-left-color:#72b8dd; }
+.assetList button[data-role=cue] { border-left-color:#c3a0e5; }
+.assetList button[data-role=track] { border-left-color:#e7ad9f; }
+.assetList button[data-role=confirm] { border-left-color:#8bcbb2; }
+.assetList button[aria-pressed=true] { background:var(--accent-soft); outline:1px solid var(--accent); }
+.assetList svg { width:20px; height:20px; flex:none; }
+.assetList strong,.assetList small { display:block; font-size:11px; line-height:1.5; }
+.assetList small,.assetList p { font-size:10px; color:var(--text-muted); }
 .viewport { position:relative; flex:1; min-height:0; }
 .viewport iframe { display:block; border:0; width:100%; height:100%; background:var(--canvas); }
 .loading { position:absolute; inset:0; display:grid; place-items:center; background:var(--canvas); color:var(--text-muted); pointer-events:none; }

@@ -145,7 +145,7 @@ test("telemetry creates safe text labels, selected state, and bounded valid them
   const tag = h.tags[0];
   assert.deepEqual(tag.children.map(child => child.tagName), ["strong", "span", "span"]);
   assert.equal(tag.children[0].textContent, id);
-  assert.equal(tag.children[1].textContent, role + " · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · " + role);
   assert.equal(tag.children[2].textContent, "— · 12.3 m/s");
   assert.equal(tag.attributes["aria-label"], "Inspect " + id);
   assert.equal(tag.attributes["aria-pressed"], "true");
@@ -154,7 +154,7 @@ test("telemetry creates safe text labels, selected state, and bounded valid them
   assert.equal(h.layer.style["--tag-accent"], undefined);
   h.telemetry([asset(id, { role: "Confirm" })]);
   assert.equal(h.tags.length, 1);
-  assert.equal(tag.children[1].textContent, "Confirm · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Confirm");
   assert.equal(tag.attributes["aria-pressed"], "false");
 });
 
@@ -253,15 +253,41 @@ test("metadata becomes stale after a telemetry timeout and recovers with fresh t
   h.advance(5600);
   h.scene.render();
   assert.equal(tag.dataset.stale, "true");
-  assert.equal(tag.children[1].textContent, "Track · telemetry stale");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Track");
+  assert.equal(tag.children[2].textContent, "Telemetry stale");
   h.telemetry([asset()]);
   assert.equal(tag.dataset.stale, "false");
-  assert.equal(tag.children[1].textContent, "Track · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Track");
   h.telemetry([asset()], { fresh: false });
   assert.equal(tag.dataset.stale, "true");
   h.telemetry([asset("copter-1", { linked: false })]);
   assert.equal(tag.dataset.stale, "true");
-  assert.equal(tag.children[1].textContent, "Track · link unavailable");
+  assert.equal(tag.children[2].textContent, "Link unavailable");
+});
+
+test("native towers can be located without borrowing assignments from another simulation", () => {
+  const h = harness();
+  h.model("tower-1", 20, 10, 0);
+  h.model("terrain_fort_ross");
+  h.scene.render();
+  assert.equal(h.tags.length, 1, "terrain is not a fleet asset");
+  const tag = h.tags[0];
+  assert.equal(tag.children[1].textContent, "Sensor tower · Assignment unavailable");
+  const status = h.messages.find(({ message }) => message.type === "overwatch:status").message;
+  assert.equal(status.assets[0].id, "tower-1");
+  assert.equal(status.matched.length, 0, "native presence is not linked mission telemetry");
+  h.send({ type: "overwatch:focus", version: 1, id: "tower-1" });
+  assertVector(h.scene.controls.target, { x: 20, y: 10, z: 0 });
+  h.telemetry([asset("tower-1", { vehicleClass: "tower", role: "cue" })]);
+  assert.equal(tag.children[1].textContent, "Sensor tower · Cue sensors");
+  assert.equal(tag.dataset.role, "cue");
+  h.telemetry([]);
+  assert.equal(tag.children[1].textContent, "Sensor tower · Assignment unavailable");
+  assert.equal(tag.dataset.role, "");
+  h.models.delete("tower-1");
+  h.advance(1100);
+  h.scene.render();
+  assert.equal(h.tags.length, 0, "removed native assets are no longer selectable");
 });
 
 test("overlapping native anchors receive separate nonoverlapping labels with accurate leaders", () => {
@@ -313,9 +339,12 @@ test("focus changes only the local camera and ignores untrusted or unknown reque
 test("ship follow tracks native movement in the paint call and preserves orbit and zoom", () => {
   const h = harness();
   const ship = h.model("target_vessel", 20, 30, 0);
+  h.scene.camera.position.set(0, 0, -100);
   h.send({ type: "overwatch:follow-ship", version: 1, enabled: true });
   h.scene.render();
   assert.deepEqual(h.scene.controls.target, ship.position);
+  assert.ok(h.scene.camera.position.z > ship.position.z, "demo camera begins above the ship even after an underwater view");
+  assertVector(h.cameraLookTarget, ship.position);
   assert.equal(h.scene.controls.enablePan, false);
   h.scene.camera.position.copy(ship.position).add(new Vector3(30, -60, 40));
   ship.position.set(25, 35, 0);

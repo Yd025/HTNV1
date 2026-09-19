@@ -7,6 +7,7 @@
   var selected = null, enabled = true, fresh = false, receivedAt = 0;
   var scene, layer, lastStatus = 0;
   var point, projected, offset;
+  var nativeClasses = { quadcopter: 'copter', 'fixed-wing': 'plane', 'tower-1': 'tower', 'tower-2': 'tower', rover: 'rover' };
   // make_world.py names the ship target_vessel. This is a viewer camera only;
   // native truth never enters mission telemetry, detections or vehicle commands.
   // Start free until the trusted parent explicitly requests a view.
@@ -30,8 +31,9 @@
   style.textContent = '#ow-tags{position:fixed;inset:0;pointer-events:none;z-index:110;font:12px system-ui,sans-serif;--tag-bg:#182232;--tag-text:#e2e7ea;--tag-muted:#a4b0b7;--tag-accent:#e7ad9f;--tag-line:#5b6670}' +
     '.ow-tag{position:absolute;left:0;top:0;pointer-events:auto;display:block;min-width:116px;max-width:180px;padding:7px 10px;text-align:left;background:var(--tag-bg);color:var(--tag-text);border:1px solid var(--tag-line);border-radius:3px;box-shadow:0 3px 10px #0004;cursor:pointer;font:inherit;line-height:1.35;white-space:nowrap}' +
     '.ow-tag[hidden],.ow-line[hidden],.ow-dot[hidden]{display:none}.ow-line{position:absolute;left:0;top:0;height:1px;background:var(--tag-text);transform-origin:0 0;opacity:.8}.ow-dot{position:absolute;left:0;top:0;width:5px;height:5px;border:1px solid var(--tag-text);border-radius:50%;background:var(--tag-bg)}' +
+    '.ow-tag[data-role=search]{border-left:3px solid #72b8dd}.ow-tag[data-role=cue]{border-left:3px solid #c3a0e5}.ow-tag[data-role=track]{border-left:3px solid #e7ad9f}.ow-tag[data-role=confirm]{border-left:3px solid #8bcbb2}' +
     '.ow-tag strong,.ow-tag span{display:block;overflow:hidden;text-overflow:ellipsis}.ow-tag strong{font-size:12px;font-weight:600}.ow-tag span{font-size:10px;color:var(--tag-muted);font-variant-numeric:tabular-nums}.ow-tag[aria-pressed=true]{border-color:var(--tag-accent);z-index:2}.ow-tag[aria-pressed=true] strong{color:var(--tag-accent)}.ow-tag:focus-visible{outline:2px solid var(--tag-accent);outline-offset:3px}.ow-tag[data-stale=true]{border-style:dashed}' +
-    '#as-assets{display:none!important}#clock-mouse{font-size:10px!important}' +
+    '#as-assets,#as-bar,#as-pick,#as-env,#as-console,#play-header-fieldset,#clock-header-fieldset,#clock-mouse{display:none!important}' +
     '@media(max-width:500px){.ow-tag{min-width:98px;padding:5px 7px}.ow-tag strong{font-size:11px}.ow-tag span{font-size:9px}}';
   document.head.appendChild(style);
 
@@ -42,11 +44,46 @@
   function isStale() { return !fresh || Date.now() - receivedAt > 5500; }
   function updateLabel(entry) {
     var stale = isStale();
+    var roles = { search: 'Search area', cue: 'Cue sensors', track: 'Track ship', confirm: 'Confirm contact', reserve: 'Stand by' };
+    var classes = { tower: 'Sensor tower', plane: 'Search plane', copter: 'Quadcopter', rover: 'Ground rover' };
+    var role = Object.prototype.hasOwnProperty.call(roles, entry.data.role) ? roles[entry.data.role] : text(entry.data.role, 'Unassigned');
+    var kind = Object.prototype.hasOwnProperty.call(classes, entry.data.vehicleClass) ? classes[entry.data.vehicleClass] : text(entry.data.vehicleClass, 'asset');
     entry.button.dataset.stale = String(stale || !entry.data.linked);
+    entry.button.dataset.role = Object.prototype.hasOwnProperty.call(roles, entry.data.role) ? entry.data.role : '';
     entry.button.setAttribute('aria-pressed', String(entry.data.id === selected));
     entry.name.textContent = entry.data.id;
-    entry.role.textContent = text(entry.data.role, 'Unassigned') + ' · ' + (stale ? 'telemetry stale' : entry.data.linked ? text(entry.data.vehicleClass, 'asset') : 'link unavailable');
-    entry.readings.textContent = number(entry.data.alt, ' m') + ' · ' + number(entry.data.speed, ' m/s');
+    entry.role.textContent = kind + ' · ' + (entry.nativeOnly ? 'Assignment unavailable' : role);
+    entry.readings.textContent = entry.nativeOnly ? 'Native object · no mission telemetry' : stale ? 'Telemetry stale' : !entry.data.linked ? 'Link unavailable' : number(entry.data.alt, ' m') + ' · ' + number(entry.data.speed, ' m/s');
+  }
+  function upsert(data, nativeOnly) {
+    var entry = entries.get(data.id);
+    if (!entry) {
+      var button = document.createElement('button'); button.type = 'button'; button.className = 'ow-tag';
+      var name = document.createElement('strong'), role = document.createElement('span'), readings = document.createElement('span');
+      button.appendChild(name); button.appendChild(role); button.appendChild(readings);
+      button.setAttribute('aria-label', 'Inspect ' + data.id);
+      button.addEventListener('click', function(event) { event.stopPropagation(); post('overwatch:select', { id: data.id }); });
+      ['pointerdown', 'mousedown', 'touchstart', 'wheel'].forEach(function(type) { button.addEventListener(type, function(event) { event.stopPropagation(); }); });
+      var leader = document.createElement('div'), dot = document.createElement('div');
+      leader.className = 'ow-line'; dot.className = 'ow-dot';
+      leader.setAttribute('aria-hidden', 'true'); dot.setAttribute('aria-hidden', 'true');
+      layer.appendChild(leader); layer.appendChild(dot); layer.appendChild(button);
+      entry = { button: button, leader: leader, dot: dot, name: name, role: role, readings: readings };
+      entries.set(data.id, entry);
+    }
+    entry.data = data; entry.nativeOnly = nativeOnly; updateLabel(entry);
+  }
+  function removeEntry(entry, id) { entry.button.remove(); entry.leader.remove(); entry.dot.remove(); entries.delete(id); }
+  function discoverAssets() {
+    var assets = [];
+    Object.keys(nativeClasses).forEach(function(id) {
+      var object = model(id);
+      if (!object || object.visible === false) return;
+      assets.push({ id: id, vehicleClass: nativeClasses[id] });
+      if (!entries.has(id)) upsert({ id: id, vehicleClass: nativeClasses[id] }, true);
+    });
+    entries.forEach(function(entry, id) { if (entry.nativeOnly && !assets.some(function(asset) { return asset.id === id; })) removeEntry(entry, id); });
+    return assets;
   }
   function receive(event) {
     if (event.origin !== origin || event.source !== window.parent || typeof event.data !== 'string') return;
@@ -78,24 +115,13 @@
     message.fleet.slice(0, 128).forEach(function(data) {
       if (!data || typeof data.id !== 'string' || !data.id || data.id.length > 100) return;
       ids.add(data.id);
-      var entry = entries.get(data.id);
-      if (!entry) {
-        var button = document.createElement('button'); button.type = 'button'; button.className = 'ow-tag';
-        var name = document.createElement('strong'), role = document.createElement('span'), readings = document.createElement('span');
-        button.appendChild(name); button.appendChild(role); button.appendChild(readings);
-        button.setAttribute('aria-label', 'Inspect ' + data.id);
-        button.addEventListener('click', function(event) { event.stopPropagation(); post('overwatch:select', { id: data.id }); });
-        ['pointerdown', 'mousedown', 'touchstart', 'wheel'].forEach(function(type) { button.addEventListener(type, function(event) { event.stopPropagation(); }); });
-        var leader = document.createElement('div'), dot = document.createElement('div');
-        leader.className = 'ow-line'; dot.className = 'ow-dot';
-        leader.setAttribute('aria-hidden', 'true'); dot.setAttribute('aria-hidden', 'true');
-        layer.appendChild(leader); layer.appendChild(dot); layer.appendChild(button);
-        entry = { button: button, leader: leader, dot: dot, name: name, role: role, readings: readings, data: data };
-        entries.set(data.id, entry);
-      }
-      entry.data = data; updateLabel(entry);
+      upsert(data, false);
     });
-    entries.forEach(function(entry, id) { if (!ids.has(id)) { entry.button.remove(); entry.leader.remove(); entry.dot.remove(); entries.delete(id); } });
+    entries.forEach(function(entry, id) {
+      if (ids.has(id)) return;
+      if (Object.prototype.hasOwnProperty.call(nativeClasses, id) && model(id)) upsert({ id: id, vehicleClass: nativeClasses[id] }, true);
+      else removeEntry(entry, id);
+    });
   }
   function focus(id) {
     var object = model(id);
@@ -104,10 +130,19 @@
     // Keep the camera's viewing angle, then place the orbit centre at the asset.
     offset.subVectors(scene.camera.position, scene.controls.target);
     if (offset.length() < 1) offset.set(1, -1, 1);
-    offset.normalize().multiplyScalar(160);
+    var distance = 160;
+    if (window.THREE.Box3) {
+      try {
+        new window.THREE.Box3().setFromObject(object).getSize(boundsSize);
+        var extent = Math.max(boundsSize.x, boundsSize.y, boundsSize.z);
+        if (Number.isFinite(extent) && extent > 0) distance = Math.max(20, Math.min(500, extent * 2.5));
+      } catch (_) { /* Keep a usable focus distance while geometry loads. */ }
+    }
+    offset.normalize().multiplyScalar(distance);
     scene.camera.position.copy(point).add(offset);
     scene.controls.target.copy(point);
     scene.controls.update();
+    if (typeof scene.camera.lookAt === 'function') scene.camera.lookAt(scene.controls.target);
   }
   function releaseFollow() {
     if (savedControls && scene && scene.controls) Object.keys(savedControls).forEach(function(key) {
@@ -136,9 +171,10 @@
       } catch (_) { /* Mesh bounds can be incomplete while the native model loads. */ }
     }
     if (cameraMode === 'orbit') {
-      offset.subVectors(scene.camera.position, scene.controls.target);
-      if (offset.length() < 1) offset.set(1, -1, 1);
-      offset.normalize().multiplyScalar(Math.max(30, Math.min(500, shipScale * 3)));
+      // Start the single demo view above the water, independent of whichever
+      // native camera angle was active before following or locating an asset.
+      scene.camera.position.copy(worldPoint(object, [-1.15, -0.9, 0.72], cameraPoint));
+      scene.controls.target.copy(point);
     }
     framedShip = object; framedMode = cameraMode;
   }
@@ -178,8 +214,8 @@
     }
     scene.controls.update();
     // gzweb's legacy OrbitControls intentionally comments out lookAt() when
-    // only target/position change. Locked presets must aim the native camera.
-    if (preset && typeof scene.camera.lookAt === 'function') scene.camera.lookAt(scene.controls.target);
+    // only target/position change. Following must also aim the native camera.
+    if (typeof scene.camera.lookAt === 'function') scene.camera.lookAt(scene.controls.target);
     following = true;
   }
   function captureReplay() {
@@ -193,11 +229,12 @@
     if (!scene.camera || !layer) return;
     var canvas = scene.getDomElement(), rect = canvas.getBoundingClientRect();
     var matched = [], placed = [], now = Date.now(), updateStatus = now - lastStatus >= 1000;
+    var assets = updateStatus ? discoverAssets() : [];
     Array.from(entries.values()).sort(function(a, b) { return a.data.id === selected ? -1 : b.data.id === selected ? 1 : a.data.id.localeCompare(b.data.id); }).forEach(function(entry) {
       var id = entry.data.id;
       var object = model(id);
       if (!object) { entry.button.hidden = entry.leader.hidden = entry.dot.hidden = true; return; }
-      matched.push(id);
+      if (!entry.nativeOnly) matched.push(id);
       if (updateStatus) updateLabel(entry);
       if (!enabled) return;
       object.getWorldPosition(point);
@@ -229,7 +266,7 @@
       entry.leader.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) rotate(' + Math.atan2(dy,dx) + 'rad)';
       entry.dot.style.transform = 'translate(' + (x-3).toFixed(1) + 'px,' + (y-3).toFixed(1) + 'px)';
     });
-    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, connected: !!(window.iface && window.iface.isConnected), shipAvailable: !!model('target_vessel'), followingShip: following, cameraMode: cameraMode }); }
+    if (updateStatus) { lastStatus = now; post('overwatch:status', { matched: matched, assets: assets, connected: !!(window.iface && window.iface.isConnected), shipAvailable: !!model('target_vessel'), followingShip: following, cameraMode: cameraMode }); }
   }
   function attach() {
     scene = window.scene;

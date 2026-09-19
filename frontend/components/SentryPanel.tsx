@@ -121,7 +121,7 @@ export default function SentryPanel({ telemetry, tickSummary }: { telemetry: Mis
       <div className={s.cardHeading}><div><h3 id="ship-camera-title">Ship follow &amp; Replay</h3><p>Keep the ship in view as it moves through the native simulator. Use Record this view to retain a session for inspection.</p></div><button className={s.primary} onClick={() => setShowCamera(value => !value)}>{showCamera ? "Close ship camera" : "Open ship camera"}</button></div>
       {showCamera && <div className={s.shipCamera}><SimulatorWorld state={state} isFresh={isFresh} selected={selected} onSelect={setSelected} colors={themes.ink.colors} /></div>}
       {showCamera && state.adapter && state.adapter !== "whiteout" && <p className={s.notice}>The performance summary belongs to the {state.adapter} backend run. This camera shows a separate native simulator session.</p>}
-      <p className={s.caption}>The observer camera follows the simulator’s ship position. Mission tracking still uses detector estimates. Replay captures only this native canvas, up to two frames per second; other media stays blocked.</p>
+      <p className={s.caption}>The observer camera follows the simulator’s ship position. Mission tracking still uses detector estimates. Replay captures only this native canvas, up to two frames per second; other media stays blocked. <a className={s.textLink} href="/backend#sentry-guide">Demo walkthrough &amp; when to use Sentry ↗</a></p>
     </section>
 
     <div className={s.columns}>
