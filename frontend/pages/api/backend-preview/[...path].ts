@@ -16,7 +16,7 @@ export default async function handler(request: NextApiRequest, response: NextApi
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), simulatorRoute ? 6000 : 2500);
   try {
-    const base = simulatorRoute ? process.env.SIM_CONTROL_URL ?? "http://127.0.0.1:8090" : process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+    const base = simulatorRoute ? process.env.SIM_CONTROL_URL ?? "http://127.0.0.1:8090" : process.env.BACKEND_INTERNAL_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
     const upstreamPath = simulatorRoute ? `api/${segments[1]}` : route;
     const upstream = await fetch(`${base.replace(/\/$/, "")}/${upstreamPath}`, { signal: controller.signal, cache: "no-store" });
     response.setHeader("Cache-Control", "no-store");
