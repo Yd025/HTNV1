@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from behaviors.trees import CRUISE_ALT, box_search_wp, hold_wp, intercept_wp
+from behaviors.trees import CRUISE_ALT, box_search_wp, cue_ll, hold_wp
 from geo import haversine_m
 from sim.types import Command, VehicleState
 from world import WorldModel
@@ -17,22 +17,25 @@ class CopterAgent(PlatformAgent):
         role = me.role or "reserve"
         track = world.track
         plane = self.peer(world, "plane")
+        aim = cue_ll(world)
 
-        if role == "track" and track:
-            lat, lon = intercept_wp(track)
+        # FIX/TRACK: any vision cue is enough to leave the box and prosecute.
+        if aim and (role == "track" or track or world.detections):
+            lat, lon = aim
             cmd = Command(vehicle_id=me.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-            dist = haversine_m(me.lat, me.lon, track.lat, track.lon)
+            dist = haversine_m(me.lat, me.lon, lat, lon)
+            src = "track" if track and track.confidence >= 0.20 else "detection"
             if dist <= CUSTODY_M:
                 self.intent = "custody"
                 call = self.radio(
                     "custody",
                     "c2",
-                    {"range_m": round(dist, 1), "class_hint": track.class_hint},
+                    {"range_m": round(dist, 1), "source": src, "class_hint": getattr(track, "class_hint", "vessel")},
                 )
             else:
                 self.intent = "commit"
-                call = self.radio("commit", "c2", {"lead_s": 4.0})
-            return AgentDecision(command=self.hold_setpoint(cmd, min_m=22.0), calls=self.calls_of(call), intent=self.intent)
+                call = self.radio("commit", "c2", {"source": src, "lead_s": 4.0, "range_m": round(dist, 1)})
+            return AgentDecision(command=self.hold_setpoint(cmd, min_m=12.0), calls=self.calls_of(call), intent=self.intent)
 
         if role == "search":
             lat, lon = box_search_wp(me, avoid=plane)

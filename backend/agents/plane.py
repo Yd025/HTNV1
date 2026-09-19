@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from behaviors.trees import CRUISE_ALT, lawnmower_wp
+from behaviors.trees import CRUISE_ALT, cue_ll, lawnmower_wp
 from sim.types import Command, VehicleState
 from world import WorldModel
 
@@ -11,7 +11,8 @@ from agents.base import AgentDecision, PlatformAgent
 
 class PlaneAgent(PlatformAgent):
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        lat, lon = lawnmower_wp(me)
+        cue = cue_ll(world)
+        lat, lon = lawnmower_wp(me, bias=cue)
         cmd = Command(
             vehicle_id=me.vehicle_id,
             type="search_sector",
@@ -31,9 +32,9 @@ class PlaneAgent(PlatformAgent):
                     "range_m": own[0].range_m,
                 },
             )
-        elif world.track and world.track.confidence >= 0.35:
+        elif cue:
             self.intent = "keep_search"
-            call = self.radio("keep_search", "c2", {"note": "ISR continues coverage; copter has custody"})
+            call = self.radio("keep_search", "c2", {"note": "ISR on cued lane; copter prosecutes"})
         else:
             self.intent = "search"
             call = self.radio("searching", "c2", {"pattern": "lawnmower"})

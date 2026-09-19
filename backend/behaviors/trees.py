@@ -18,12 +18,12 @@ def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
     track = world.track
     role = v.role or "reserve"
     if v.vehicle_class == "plane":
-        lat, lon = lawnmower_wp(v)
+        lat, lon = lawnmower_wp(v, bias=cue_ll(world))
         return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["plane"])
     if v.vehicle_class == "copter":
-        if role == "track" and track:
-            lat, lon = intercept_wp(track)
-            return Command(vehicle_id=v.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
+        aim = cue_ll(world)
+        if aim and (role == "track" or track or world.detections):
+            return Command(vehicle_id=v.vehicle_id, type="goto", lat=aim[0], lon=aim[1], alt=CRUISE_ALT["copter"])
         if role == "search":
             plane = next((x for x in world.vehicles.values() if x.vehicle_class == "plane"), None)
             lat, lon = box_search_wp(v, avoid=plane)
@@ -38,11 +38,27 @@ def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
     return Command(vehicle_id=v.vehicle_id, type="hold", lat=v.lat, lon=v.lon, alt=v.alt)
 
 
-def lawnmower_wp(v: VehicleState) -> tuple[float, float]:
-    """North-south lanes across the arena."""
+def cue_ll(world: WorldModel) -> tuple[float, float] | None:
+    """Where air should point given vision: predicted track, else loudest detection."""
+    track = world.track
+    if track and track.confidence >= 0.20:
+        return intercept_wp(track)
+    dets = list(world.detections or [])
+    if not dets:
+        return None
+    best = max(dets, key=lambda d: d.confidence)
+    return best.lat, best.lon
+
+
+def lawnmower_wp(v: VehicleState, bias: tuple[float, float] | None = None) -> tuple[float, float]:
+    """North-south lanes. Optional bias steers ISR onto the cued lane — not an intercept."""
     n, e = ll_to_ne(v.lat, v.lon)
     lane_w = 280.0
-    lane = round((e + ARENA_HALF_M) / lane_w)
+    if bias is not None:
+        _, be = ll_to_ne(bias[0], bias[1])
+        lane = round((be + ARENA_HALF_M) / lane_w)
+    else:
+        lane = round((e + ARENA_HALF_M) / lane_w)
     lane = int(max(0, min(int(2 * ARENA_HALF_M / lane_w) - 1, lane)))
     target_e = -ARENA_HALF_M + (lane + 0.5) * lane_w
     going_north = lane % 2 == 0
