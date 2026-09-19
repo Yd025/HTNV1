@@ -12,6 +12,7 @@ import logging
 import os
 
 from brain import SwarmBrain
+from observability import configure_sentry, flush_sentry
 from sim.adapter import build_adapter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -42,6 +43,7 @@ async def _run(adapter_name: str, seconds: float | None = None) -> None:
                 pass
     finally:
         await brain.close()
+        await flush_sentry()
 
 
 def main() -> None:
@@ -63,6 +65,7 @@ def main() -> None:
     if args.replay:
         args.adapter = "replay"
         os.environ["REPLAY_PATH"] = args.replay
+    configure_sentry()
     if args.dump:
         async def once() -> None:
             brain = SwarmBrain(build_adapter(args.adapter))
@@ -71,6 +74,7 @@ def main() -> None:
                 print(json.dumps(await brain.tick(), default=str, indent=2, allow_nan=False))
             finally:
                 await brain.close()
+                await flush_sentry()
 
         asyncio.run(once())
         return
