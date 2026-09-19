@@ -328,7 +328,7 @@ class MavlinkBridge:
             await asyncio.to_thread(_arm)
         logger.info("Arm=%s force=%s on %s", armed, force, self.vehicle_id)
 
-    async def takeoff(self, alt: float) -> None:
+    async def takeoff(self, alt: float, pitch_deg: float = 0.0) -> None:
         if self.conn is None:
             return
 
@@ -339,13 +339,14 @@ class MavlinkBridge:
                 self.conn.target_component,
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0,
-                0, 0, 0, 0, 0, 0,
+                float(pitch_deg),
+                0, 0, 0, 0, 0,
                 float(alt),
             )
 
         async with self._io_lock:
             await asyncio.to_thread(_to)
-        logger.info("Takeoff %.0fm on %s", alt, self.vehicle_id)
+        logger.info("Takeoff %.0fm pitch=%.0f on %s", alt, pitch_deg, self.vehicle_id)
 
     async def set_servo(self, channel: int, pwm: int) -> None:
         if self.conn is None:

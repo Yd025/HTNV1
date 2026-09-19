@@ -81,27 +81,34 @@ def cue_ll(world: WorldModel) -> tuple[float, float] | None:
     return None
 
 
+def _search_half() -> float:
+    """Fort Ross arena is 3.25 km; ISR stays on the inner strait, not the hills."""
+    half = geo.ARENA_HALF_M
+    return 1100.0 if half > 2000.0 else half
+
+
 def lawnmower_wp(v: VehicleState, bias: tuple[float, float] | None = None) -> tuple[float, float]:
     """North-south lanes. Optional bias steers ISR onto the cued lane — not an intercept."""
     n, e = ll_to_ne(v.lat, v.lon)
+    half = _search_half()
     lane_w = 280.0
     if bias is not None:
         _, be = ll_to_ne(bias[0], bias[1])
-        lane = round((be + geo.ARENA_HALF_M) / lane_w)
+        lane = round((be + half) / lane_w)
     else:
-        lane = round((e + geo.ARENA_HALF_M) / lane_w)
-    lane = int(max(0, min(int(2 * geo.ARENA_HALF_M / lane_w) - 1, lane)))
-    target_e = -geo.ARENA_HALF_M + (lane + 0.5) * lane_w
+        lane = round((e + half) / lane_w)
+    lane = int(max(0, min(int(2 * half / lane_w) - 1, lane)))
+    target_e = -half + (lane + 0.5) * lane_w
     going_north = lane % 2 == 0
-    if going_north and n > geo.ARENA_HALF_M * 0.75:
-        target_e = -geo.ARENA_HALF_M + (lane + 1.5) * lane_w
-        target_n = geo.ARENA_HALF_M * 0.75
-    elif (not going_north) and n < -geo.ARENA_HALF_M * 0.75:
-        target_e = -geo.ARENA_HALF_M + (lane + 1.5) * lane_w
-        target_n = -geo.ARENA_HALF_M * 0.75
+    if going_north and n > half * 0.75:
+        target_e = -half + (lane + 1.5) * lane_w
+        target_n = half * 0.75
+    elif (not going_north) and n < -half * 0.75:
+        target_e = -half + (lane + 1.5) * lane_w
+        target_n = -half * 0.75
     else:
-        target_n = geo.ARENA_HALF_M * 0.8 if going_north else -geo.ARENA_HALF_M * 0.8
-    target_e = max(-geo.ARENA_HALF_M * 0.9, min(geo.ARENA_HALF_M * 0.9, target_e))
+        target_n = half * 0.8 if going_north else -half * 0.8
+    target_e = max(-half * 0.9, min(half * 0.9, target_e))
     return ne_to_ll(target_n, target_e)
 
 

@@ -85,6 +85,8 @@ def _fleet_spec() -> list[dict[str, Any]]:
             "conn": os.getenv("ARCTIC_PLANE", f"udpout:{h}:14560"),
             "fallback": f"udpout:{h}:14561",
             "home": (71.998195, -94.841967),
+            # Strip heading from arctic-sim ASSET_3 `>lat,lon`.
+            "takeoff_aim": (71.997790, -94.846245),
         },
         {
             "vehicle_id": "tower-1",
@@ -279,6 +281,9 @@ class WhiteoutAdapter:
                     await bridge.set_param("ARMING_CHECK", 0)
                     if spec["vehicle_class"] == "copter":
                         await bridge.set_param("FS_CRASH_CHECK", 0)
+                    if spec["vehicle_class"] == "plane":
+                        await bridge.set_param("TERRAIN_ENABLE", 0)
+                        await bridge.set_param("TKOFF_THR_MINACC", 0)
                 return
             except ConnectionError as exc:
                 logger.warning("MAVLink %s %s failed: %s", vid, conn_str, exc)
@@ -401,13 +406,21 @@ class WhiteoutAdapter:
             return True
         air = self._air[spec["vehicle_id"]]
         now = time.monotonic()
-        if now - air.last_cmd_at < 1.8:
-            return air.phase == "ready"
         await self._drain(bridge)
         snap = bridge.snapshot()
+        alt_now = float(snap.get("alt") or 0.0)
+        # Belly X8: RC override expires in ~3 s. Keep the pusher lit
+        # every tick of the ground roll or TAKEOFF/NAV_TAKEOFF never moves.
+        if vclass == "plane" and alt_now < AIRBORNE_ALT["plane"] and snap.get("armed"):
+            # GUIDED ignores RC throttle (NAV_TAKEOFF ACK 4). FBWA uses the sticks.
+            gs_now = float(snap.get("groundspeed") or 0.0)
+            pitch_stick = 1620 if gs_now >= 9.0 else 1500
+            await bridge.rc_override(1500, pitch_stick, 1900, 1500)
+        if now - air.last_cmd_at < 1.8:
+            return air.phase == "ready"
         mode = str(snap.get("mode") or "").upper()
         armed = bool(snap.get("armed"))
-        alt = float(snap.get("alt") or 0.0)
+        alt = alt_now
         need_alt = AIRBORNE_ALT[vclass]
 
         logger.info(
@@ -430,27 +443,36 @@ class WhiteoutAdapter:
             return True
 
         if vclass == "plane":
-            if not any(tag in mode for tag in ("GUIDED", "TAKEOFF", "AUTO", "FBWA")):
-                await bridge.set_mode("GUIDED")
-                air.last_cmd_at = now
-                return False
+            gs = float(snap.get("groundspeed") or 0.0)
             if not armed:
+                await bridge.set_mode("FBWA")
                 air.arm_tries += 1
                 await bridge.arm(True, force=True)
                 air.last_cmd_at = now
                 return False
-            if alt < need_alt and not air.takeoff_sent:
-                await bridge.set_mode("TAKEOFF")
+            if alt < need_alt:
+                # FBWA rolls the belly; once it has energy, GUIDED holds the climb.
+                if alt >= 6.0 and gs >= 8.0:
+                    await bridge.rc_override(0, 0, 0, 0)
+                    await bridge.set_mode("GUIDED")
+                    aim = spec.get("takeoff_aim") or spec.get("home")
+                    if aim:
+                        await bridge.send_goto(aim[0], aim[1], 60.0)
+                    air.last_cmd_at = now
+                    return False
+                if "FBWA" not in mode:
+                    await bridge.set_mode("FBWA")
+                    air.last_cmd_at = now
+                    return False
                 air.takeoff_sent = True
                 air.last_cmd_at = now
                 return False
-            if alt >= need_alt:
-                if "GUIDED" not in mode:
-                    await bridge.set_mode("GUIDED")
-                    air.last_cmd_at = now
-                air.phase = "ready"
-                return True
-            return False
+            await bridge.rc_override(0, 0, 0, 0)
+            if "GUIDED" not in mode:
+                await bridge.set_mode("GUIDED")
+                air.last_cmd_at = now
+            air.phase = "ready"
+            return True
 
         # copter
         if "GUIDED" not in mode:
