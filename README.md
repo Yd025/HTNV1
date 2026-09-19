@@ -7,7 +7,7 @@ Hack the North WHITEOUT base. Competition has not started. This repo is the shar
 ```
 Adapter (local SITL / kinematic, or Saturday WHITEOUT)
     → World model + coverage grid + target tracker
-    → Role allocator + per-class behavior trees (10 Hz)  ← flies the fleet
+    → C2 roles + per-class platform agents (10 Hz)      ← flies the fleet
     → Slow DAG advisor (15 s, optional LLM)             ← does not send gotos
     → TimescaleDB + WebSocket scoreboard HUD
 ```
@@ -39,7 +39,7 @@ docker compose --profile sitl up --build
 | --- | --- | --- |
 | A — fleet / adapter | `backend/sim/`, `mavlink_connection.py` | Saturday `WhiteoutAdapter`. Attend the 10:30 workshop. Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md) |
 | B — tracker / scores | `tracker.py`, `metrics.py`, `eval.py` | Coverage FOV, track error, `eval.py` profiles |
-| C — behaviors | `behaviors/trees.py`, `allocator.py` | Lawnmower / hover-track / rover confirm. Do not put LLM in this loop |
+| C — behaviors | `agents/`, `behaviors/trees.py`, `allocator.py` | Mission command + platform agents. Do not put LLM in this loop |
 | D — HUD / demo | `frontend/`, `agent.py` | Four numbers, heatmap, roles, 90s talk |
 
 ## Non-negotiables (WHITEOUT scoring)

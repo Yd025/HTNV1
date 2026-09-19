@@ -2,6 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   output: "standalone",
+  transpilePackages: ["three", "@react-three/fiber", "@react-three/drei"],
 };
 
 module.exports = nextConfig;

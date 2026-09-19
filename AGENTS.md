@@ -34,7 +34,7 @@ docker compose up --build
 ```
 
 - **Backend** FastAPI `:8000` runs `SwarmBrain` at `BRAIN_HZ` (10) and WebSockets `/ws/telemetry`
-- **Frontend** Next.js Pages Router + Tailwind + react-leaflet `:3000` scoreboard
+- **Frontend** Next.js Pages Router + Tailwind `:3000` scoreboard. Default **3D fake ice arena** (`TacticalScene.tsx`); **2D** Leaflet toggle still there.
 - **TimescaleDB** `:5432` hypertables `mavlink_telemetry`, `whiteout_scores`
 - **Fleet**: kinematic `plane-1`, `copter-1`, `rover-1` + virtual `tower-ne`, `tower-sw`
 - **Target**: `backend/sim/target.py` weaving contact; towers/vehicles emit FOV detections
@@ -53,8 +53,8 @@ WHITEOUT sim or LocalSitlAdapter
    SwarmBrain.tick()          10 Hz, deterministic
         ├─ tracker.update     target-only CV / gated filter
         ├─ metrics.update     four live scores + heatmap
-        ├─ assign_roles       greedy roles; optional advisor bias
-        ├─ tick_vehicle BT    plane / copter / rover / tower
+        ├─ C2.assign          find/fix/track/PID roles; optional advisor bias
+        ├─ squad.tick         plane / copter / rover / tower agents
         └─ adapter.send_command
         │
         ├─ WebSocket state → HUD
@@ -76,14 +76,39 @@ Implementations: `LocalSitlAdapter` (`sim/local_sitl.py`), `WhiteoutAdapter` (`s
 
 ## Roles the swarm must show
 
-| Class | Default role | Behavior (`behaviors/trees.py`) |
+| Class | Default role | Agent (`agents/`) |
 | --- | --- | --- |
-| plane | search, then standoff trail | lawnmower; never hover |
-| copter | search until cue, then track | hold/box search → sprint/hover-track |
-| rover | reserve then confirm | alt=0; ignore air intercepts until confirm |
-| tower | cue | no actuation; FOV detections only |
+| plane | search (always) | lawnmower ISR; reports contact; never prosecutes |
+| copter | search until cue, then track | opposite-sector QRF → lead intercept / custody |
+| rover | reserve then confirm | alt=0; PID only after C2 tasks confirm |
+| tower | cue | slews stare; posts cue; no transit |
 
 Allocator: `backend/allocator.py`. Collaboration score drops if two searchers sit on the same coverage cell.
+
+## Terrain and HUD (stand-in only)
+
+Dominion has **not** published a 3D map, DEM, or Unreal/AuraSim viewer. Official world facts are only: Arctic, contested, mixed fleet, moving target, four live scores. Arena size, elevation, occlusion, and whether scoring is 2D or 3D are **unknown until the Saturday 10:30 workshop**.
+
+What you see locally is **ours**, not theirs:
+
+- Flat **3 km × 3 km** square, origin ≈ Resolute Bay `74.6973, -94.8297` (`ARENA_HALF_M=1500`)
+- Planning in north/east meters plus a cruise **altitude** (2.5D). No hills. `Arena.no_fly` is empty
+- Coverage and FOV are **2D** stand-ins
+- HUD 3D view is a **fake ice sheet** with live WebSocket poses on it
+
+Do **not** treat generated ice, mountains, or satellite tiles as WHITEOUT terrain. ChatGPT **Astra** (GPT-6) may restyle the HUD for the OpenAI/demo WOW. It cannot invent their world.
+
+**Astra / visual teammate — restyle only** `frontend/components/TacticalScene.tsx` (`ARENA_LOOK` and meshes). Do not change:
+
+- `frontend/lib/geo.ts` (lat/lon → scene; matches `backend/geo.py`)
+- the WebSocket in `frontend/pages/index.tsx`
+- anything under `backend/`
+
+If Astra rebuilds a page from scratch, it must still consume `/ws/telemetry`. A pretty scene with invented contacts is a disconnected demo and fails WHITEOUT.
+
+The canvas is labeled **“Stand-in arena · not Dominion terrain.”** Keep that until they hand us a real mesh. Saturday, ask: elevation? FOV occlusion? 2D vs 3D occupancy? Target altitude? `no_fly`?
+
+If host **8000** or **5432** are taken, compose accepts `BACKEND_PORT` / `POSTGRES_PORT`. Point `NEXT_PUBLIC_WS_URL` / `NEXT_PUBLIC_API_URL` at the backend host port (browser is not on Docker DNS).
 
 ## File map
 
@@ -102,13 +127,16 @@ Allocator: `backend/allocator.py`. Collaboration score drops if two searchers si
 | `backend/metrics.py` | B | Coverage grid, four scores |
 | `backend/geo.py` | shared | WGS84 ↔ local north/east meters |
 | `backend/world.py` | C | Fleet + track + blackboard |
-| `backend/allocator.py` | C | Roles |
-| `backend/behaviors/trees.py` | C | Actual controller |
+| `backend/allocator.py` | C | C2 roles (plane always search) |
+| `backend/agents/` | C | Platform agents + MissionCommand; observe/decide/report |
+| `backend/behaviors/trees.py` | C | Maneuver primitives the agents call |
 | `backend/ai_orchestrator.py` | C/OpenAI | `advise()` only; Huawei DAG story |
 | `backend/db.py` | Tiger Data | asyncpg hypertables |
 | `backend/radio.py` | garnish | ElevenLabs; never on scoring path |
-| `frontend/pages/index.tsx` | D | HUD, four tiles, AGENT DEPLOYED |
-| `frontend/components/TacticalMap.tsx` | D | Heatmap, role colors, track + truth |
+| `frontend/pages/index.tsx` | D | HUD, four tiles, 3D/2D toggle, AGENT DEPLOYED |
+| `frontend/lib/geo.ts` | D | Lat/lon → Three.js; keep in sync with `backend/geo.py` |
+| `frontend/components/TacticalMap.tsx` | D | 2D Leaflet heatmap |
+| `frontend/components/TacticalScene.tsx` | D | Fake 3D ice arena (not WHITEOUT terrain); **Astra restyle target** |
 | `docker-compose.yml` | A | `postgres`, `backend`, `frontend`; SITL behind profile `sitl` |
 | `docs/SATURDAY_WORKSHOP.md` | A | Capture checklist |
 
@@ -116,13 +144,14 @@ Python imports assume **cwd = `backend/`** (Docker `WORKDIR /app`). Do not use `
 
 ## Invariants (fail the PR if broken)
 
-1. Inner loop stays deterministic and cheap. No OpenAI/Gemini/httpx inside `tick_vehicle`, `TargetTracker.update`, or `MetricsEngine.update`.
+1. Inner loop stays deterministic and cheap. No OpenAI/Gemini/httpx inside platform agents, `TargetTracker.update`, or `MetricsEngine.update`.
 2. `advise()` may set `world.advisor["role_bias"]`. It must not be the only source of lat/lon actuation.
 3. Do not add a Kalman filter for plane/copter/rover own-ship.
 4. New sim transports belong in an adapter, not in the BT.
-5. Frontend `NEXT_PUBLIC_WS_URL` is `ws://localhost:8000/...` (browser is not on Docker DNS).
+5. Frontend `NEXT_PUBLIC_WS_URL` is `ws://localhost:<backend-host-port>/ws/telemetry` (browser is not on Docker DNS). Default port 8000.
 6. Keep `FORCE_KINEMATIC=1` as the default so `eval.py` and the HUD work offline.
 7. Do not edit files under `.cursor/plans/`.
+8. HUD 3D ice is a **local fake**. Do not present it as Dominion terrain. Astra restyles `TacticalScene.tsx` only.
 
 ## How to extend (typical teammate tasks)
 
@@ -132,7 +161,9 @@ Python imports assume **cwd = `backend/`** (Docker `WORKDIR /app`). Do not use `
 
 **Better collaboration** — `allocator.py` costs; ensure one tracker when `track.confidence` is high.
 
-**Saturday** — fill `WhiteoutAdapter` methods from workshop notes. Point `ADAPTER=whiteout`. Freeze BT gains unless their metric definition differs.
+**HUD / Astra** — prettier ice, lights, craft meshes in `TacticalScene.tsx` only. Do not invent a second telemetry path.
+
+**Saturday** — fill `WhiteoutAdapter` methods from workshop notes. Point `ADAPTER=whiteout`. Freeze BT gains unless their metric definition differs. Swap HUD terrain only if they publish a real mesh.
 
 **SITL** — unique TCP per vehicle via env `MAVLINK_PLANE/COPTER/ROVER`. Image `radarku/ardupilot-sitl` may ignore `VEHICLE`; kinematic fallback is expected.
 
@@ -164,5 +195,5 @@ Eval profiles: `straight`, `weave`, `stop_and_go`. Prefer improving **tracking**
 
 - Python 3.12, type hints, stdlib-first in the inner loop.
 - FastAPI async; pymavlink in `asyncio.to_thread` with a lock (already in `MavlinkBridge`).
-- Next.js 14 **Pages Router** (`pages/`), not App Router. Leaflet via `dynamic(..., { ssr: false })`.
+- Next.js 14 **Pages Router** (`pages/`), not App Router. Leaflet and R3F (`TacticalScene`) via `dynamic(..., { ssr: false })`.
 - Do not add READMEs or markdown the user did not ask for except updating this file and `README.md` when scope changes.

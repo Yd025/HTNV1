@@ -1,4 +1,11 @@
-"""Greedy role assignment. LLM may bias costs; it does not emit lat/lon."""
+"""Mission-command roles. LLM may bias copter/rover; it does not emit lat/lon.
+
+Doctrine (find / fix / track / PID):
+  plane  — ISR hunter, always search, never prosecute
+  tower  — fixed OP, always cue
+  copter — QRF, search until a qualified track, then custody
+  rover  — reserve until track is solid, then confirm / PID
+"""
 
 from __future__ import annotations
 
@@ -28,18 +35,18 @@ def assign_roles(
             continue
         preferred = bias.get(v.vehicle_id) or bias.get(v.vehicle_class)
         if v.vehicle_class == "plane":
-            roles[v.vehicle_id] = preferred if preferred in {"search", "track"} else ("search" if not have_track else "track")
+            roles[v.vehicle_id] = "search"
         elif v.vehicle_class == "copter":
             if have_track:
                 roles[v.vehicle_id] = "track"
             else:
-                roles[v.vehicle_id] = preferred if preferred == "search" else "search"
+                roles[v.vehicle_id] = preferred if preferred in {"search", "reserve"} else "search"
         elif v.vehicle_class == "rover":
             roles[v.vehicle_id] = "confirm" if have_track and track and track.confidence >= 0.45 else "reserve"
         else:
             roles[v.vehicle_id] = DEFAULT_ROLE.get(v.vehicle_class, "reserve")
 
-    # Collaboration: never two searchers if a tracker exists and a plane is already searching.
+    # One searcher after custody exists: extra air searchers become the tracker.
     searchers = [vid for vid, r in roles.items() if r == "search"]
     if have_track and len(searchers) > 1:
         for vid in searchers:

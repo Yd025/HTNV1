@@ -196,6 +196,11 @@ class LocalSitlAdapter:
         return self._target.detections_for(vehicles, self._arena.towers, time.time())
 
     async def send_command(self, command: Command) -> None:
+        if command.type == "look_at" and command.lat is not None and command.lon is not None:
+            for tw in self._arena.towers:
+                if tw.vehicle_id == command.vehicle_id:
+                    tw.heading = wrap_heading(bearing_deg(tw.lat, tw.lon, command.lat, command.lon))
+                    return
         kin = self._kin.get(command.vehicle_id)
         if kin:
             kin.apply(command)

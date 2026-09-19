@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-overwatch}
       POSTGRES_DB: ${POSTGRES_DB:-overwatch}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -107,7 +107,7 @@ services:
       BRAIN_HZ: ${BRAIN_HZ:-10}
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
     depends_on:

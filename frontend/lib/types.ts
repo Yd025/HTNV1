@@ -61,7 +61,10 @@ export type SwarmState = {
   heatmap?: HeatCell[];
   blackboard?: { sender: string; recipient: string; kind: string; body: Record<string, unknown> }[];
   advisor?: StrategyPlan | null;
+  c2?: { phase?: string; intent?: string };
+  intents?: Record<string, string>;
   commands?: { vehicle_id: string; type: string; lat?: number; lon?: number }[];
+  arena?: { origin_lat: number; origin_lon: number; half_m: number };
 };
 
 export type StrategyPlan = {

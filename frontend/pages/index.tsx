@@ -10,6 +10,13 @@ const TacticalMap = dynamic(() => import("../components/TacticalMap"), {
   ),
 });
 
+const TacticalScene = dynamic(() => import("../components/TacticalScene"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center text-sm text-slate-400">Building stand-in arena…</div>
+  ),
+});
+
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws/telemetry";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -26,6 +33,7 @@ export default function CommandCenter() {
   const [conn, setConn] = useState<ConnState>("connecting");
   const [state, setState] = useState<SwarmState>({});
   const [strategy, setStrategy] = useState<StrategyPlan | null>(null);
+  const [view, setView] = useState<"3d" | "2d">("3d");
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -89,7 +97,24 @@ export default function CommandCenter() {
             </span>
             <StatusDot state={conn} />
             <span>{state.adapter ?? "—"}</span>
+            <span className="uppercase text-amber-200">C2 {state.c2?.phase ?? "find"}</span>
             <span>{(state.tick_hz ?? 0).toFixed(1)} Hz</span>
+            <span className="inline-flex overflow-hidden rounded border border-slate-600">
+              <button
+                type="button"
+                onClick={() => setView("3d")}
+                className={`px-2 py-1 ${view === "3d" ? "bg-slate-700 text-teal-200" : "text-slate-400"}`}
+              >
+                3D
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("2d")}
+                className={`px-2 py-1 ${view === "2d" ? "bg-slate-700 text-teal-200" : "text-slate-400"}`}
+              >
+                2D
+              </button>
+            </span>
             <button
               type="button"
               onClick={() => fetch(`${API_URL}/strategy/run`, { method: "POST" }).catch(() => undefined)}
@@ -109,16 +134,28 @@ export default function CommandCenter() {
 
         <section className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="relative min-h-[420px]">
-            <TacticalMap
-              fleet={fleet}
-              track={track}
-              truth={state.truth ?? null}
-              heatmap={state.heatmap ?? []}
-              strategy={strategy}
-            />
+            {view === "3d" ? (
+              <TacticalScene
+                fleet={fleet}
+                track={track}
+                truth={state.truth ?? null}
+                heatmap={state.heatmap ?? []}
+                strategy={strategy}
+                arena={state.arena}
+              />
+            ) : (
+              <TacticalMap
+                fleet={fleet}
+                track={track}
+                truth={state.truth ?? null}
+                heatmap={state.heatmap ?? []}
+                strategy={strategy}
+              />
+            )}
           </div>
           <aside className="flex flex-col gap-4 overflow-y-auto border-l border-slate-800 bg-ice-900 p-4 text-sm">
             <Panel title="Fleet / roles">
+              {state.c2?.intent && <p className="mb-3 text-xs text-amber-200/90">{state.c2.intent}</p>}
               {vehicles.length === 0 ? (
                 <p className="text-slate-500">Waiting on adapter…</p>
               ) : (
@@ -127,6 +164,7 @@ export default function CommandCenter() {
                     <div className="text-teal-300">
                       {v.vehicle_id} · {v.role ?? "—"} · {v.vehicle_class}
                     </div>
+                    <div className="text-slate-400">{state.intents?.[v.vehicle_id] ?? "—"}</div>
                     <div>
                       lat {fmt(v.lat)} lon {fmt(v.lon)}
                     </div>

@@ -22,11 +22,10 @@ except ImportError:  # local eval without Docker deps
         def capture_exception(_exc=None):
             return None
 
-from allocator import assign_roles
-from behaviors.trees import tick_vehicle
+from agents import MissionCommand, Squad
 from metrics import MetricsEngine, Scorecard
 from sim.adapter import build_adapter
-from sim.types import Command, SimAdapter, VehicleState
+from sim.types import Command, SimAdapter
 from tracker import TargetTracker
 from world import WorldModel
 
@@ -41,6 +40,8 @@ class SwarmBrain:
         self.adapter = adapter or build_adapter()
         self.world = WorldModel()
         self.tracker = TargetTracker()
+        self.squad = Squad()
+        self.c2 = MissionCommand()
         self.metrics: MetricsEngine | None = None
         self.score = Scorecard()
         self.connected = False
@@ -68,7 +69,7 @@ class SwarmBrain:
             with sentry_sdk.start_span(op="track.update", name="target_track"):
                 self.world.track = self.tracker.update(detections)
 
-            roles = assign_roles(vehicles, self.world.track, self.world.advisor)
+            roles = self.c2.tick(vehicles, self.world.track, self.world.advisor, self.world)
             self.world.set_roles(roles)
             for v in vehicles:
                 v.role = roles.get(v.vehicle_id, v.role)
@@ -78,7 +79,10 @@ class SwarmBrain:
             for v in vehicles:
                 if not self.adapter.comms_ok(v.vehicle_id):
                     continue
-                cmd = tick_vehicle(v, self.world)
+                decision = self.squad.tick(v, self.world)
+                for call in decision.calls:
+                    self.world.post(v.vehicle_id, call.recipient, call.kind, call.body)
+                cmd = decision.command
                 if cmd:
                     cmds.append(cmd)
                     prev = prev_by_id.get(v.vehicle_id)
@@ -127,6 +131,8 @@ class SwarmBrain:
             "heatmap": sorted(heatmap, key=lambda c: -c.get("heat", 0))[:80],
             "blackboard": self.world.blackboard[-12:],
             "advisor": self.world.advisor,
+            "c2": self.c2.snapshot(),
+            "intents": self.squad.intents(),
             "commands": [c.as_dict() for c in self.commands_last],
             "arena": {
                 "origin_lat": self.adapter.arena().origin_lat,

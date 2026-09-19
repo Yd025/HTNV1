@@ -288,7 +288,7 @@ class OverwatchDAG:
             fused = await self.fusion.fuse(board)
             return {
                 "role_bias": {
-                    "plane": "search" if not track else "track",
+                    "plane": "search",
                     "copter": "track" if track else "search",
                     "rover": "confirm" if track else "reserve",
                 },

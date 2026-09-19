@@ -1,4 +1,4 @@
-"""Doctrine behavior trees. Tick from world state; never call an LLM in here."""
+"""Maneuver primitives the platform agents call. Never call an LLM in here."""
 
 from __future__ import annotations
 
@@ -8,62 +8,44 @@ from tracker import Track
 from world import WorldModel
 
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
+HOLD = {"copter": (-80.0, 40.0), "rover": (-250.0, -80.0), "plane": (200.0, -300.0)}
 
 
 def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
+    """Fallback dispatcher. SwarmBrain ticks PlatformAgents; this stays for eval/debug."""
     if v.vehicle_class == "tower":
         return None
     track = world.track
     role = v.role or "reserve"
     if v.vehicle_class == "plane":
-        return _plane(v, role, track)
+        lat, lon = lawnmower_wp(v)
+        return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["plane"])
     if v.vehicle_class == "copter":
-        return _copter(v, role, track)
+        if role == "track" and track:
+            lat, lon = intercept_wp(track)
+            return Command(vehicle_id=v.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
+        if role == "search":
+            plane = next((x for x in world.vehicles.values() if x.vehicle_class == "plane"), None)
+            lat, lon = box_search_wp(v, avoid=plane)
+            return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
+        lat, lon = hold_wp("copter")
+        return Command(vehicle_id=v.vehicle_id, type="hold", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
     if v.vehicle_class == "rover":
-        return _rover(v, role, track)
+        if role == "confirm" and track:
+            return Command(vehicle_id=v.vehicle_id, type="goto", lat=track.lat, lon=track.lon, alt=0.0)
+        lat, lon = hold_wp("rover")
+        return Command(vehicle_id=v.vehicle_id, type="hold", lat=lat, lon=lon, alt=0.0)
     return Command(vehicle_id=v.vehicle_id, type="hold", lat=v.lat, lon=v.lon, alt=v.alt)
 
 
-def _plane(v: VehicleState, role: str, track: Track | None) -> Command:
-    if role == "track" and track:
-        # Stand-off trail: offset north-east of the contact, never hover.
-        n, e = ll_to_ne(track.lat, track.lon)
-        lat, lon = ne_to_ll(n + 180.0, e - 80.0)
-        return Command(vehicle_id=v.vehicle_id, type="loiter", lat=lat, lon=lon, alt=CRUISE_ALT["plane"])
-    lat, lon = _lawnmower(v)
-    return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["plane"])
-
-
-def _copter(v: VehicleState, role: str, track: Track | None) -> Command:
-    if role == "track" and track:
-        n, e = ll_to_ne(track.lat, track.lon)
-        # lead the contact by ~4s of velocity
-        lat, lon = ne_to_ll(n + track.vn * 4.0, e + track.ve * 4.0)
-        return Command(vehicle_id=v.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-    if role == "search":
-        lat, lon = _box_search(v)
-        return Command(vehicle_id=v.vehicle_id, type="search_sector", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-    # Hold reserve near origin
-    lat, lon = ne_to_ll(-80.0, 40.0)
-    return Command(vehicle_id=v.vehicle_id, type="hold", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-
-
-def _rover(v: VehicleState, role: str, track: Track | None) -> Command:
-    if role == "confirm" and track:
-        return Command(vehicle_id=v.vehicle_id, type="goto", lat=track.lat, lon=track.lon, alt=0.0)
-    lat, lon = ne_to_ll(-250.0, -80.0)
-    return Command(vehicle_id=v.vehicle_id, type="hold", lat=lat, lon=lon, alt=0.0)
-
-
-def _lawnmower(v: VehicleState) -> tuple[float, float]:
-    """North-south lanes across the arena, indexed by hashed vehicle id + time buckets via position."""
+def lawnmower_wp(v: VehicleState) -> tuple[float, float]:
+    """North-south lanes across the arena."""
     n, e = ll_to_ne(v.lat, v.lon)
     lane_w = 280.0
     lane = round((e + ARENA_HALF_M) / lane_w)
     lane = int(max(0, min(int(2 * ARENA_HALF_M / lane_w) - 1, lane)))
     target_e = -ARENA_HALF_M + (lane + 0.5) * lane_w
-    going_north = (lane % 2 == 0)
-    # If near the end, hop to next lane
+    going_north = lane % 2 == 0
     if going_north and n > ARENA_HALF_M * 0.75:
         target_e = -ARENA_HALF_M + (lane + 1.5) * lane_w
         target_n = ARENA_HALF_M * 0.75
@@ -76,11 +58,50 @@ def _lawnmower(v: VehicleState) -> tuple[float, float]:
     return ne_to_ll(target_n, target_e, ORIGIN_LAT, ORIGIN_LON)
 
 
+def box_search_wp(v: VehicleState, avoid: VehicleState | None = None) -> tuple[float, float]:
+    if avoid is not None:
+        return _box_search_away(v, avoid)
+    return _box_search(v)
+
+
+def intercept_wp(track: Track, lead_s: float = 4.0) -> tuple[float, float]:
+    n, e = ll_to_ne(track.lat, track.lon)
+    return ne_to_ll(n + track.vn * lead_s, e + track.ve * lead_s)
+
+
+def standoff_wp(track: Track) -> tuple[float, float]:
+    n, e = ll_to_ne(track.lat, track.lon)
+    return ne_to_ll(n + 180.0, e - 80.0)
+
+
+def hold_wp(kind: str) -> tuple[float, float]:
+    n, e = HOLD.get(kind, (0.0, 0.0))
+    return ne_to_ll(n, e)
+
+
 def _box_search(v: VehicleState) -> tuple[float, float]:
     n, e = ll_to_ne(v.lat, v.lon)
     box = 350.0
     corners = [(box, box), (box, -box), (-box, -box), (-box, box)]
-    # pick next corner by nearest + 1
+    dists = [((n - c[0]) ** 2 + (e - c[1]) ** 2, i) for i, c in enumerate(corners)]
+    i = min(dists)[1]
+    nxt = corners[(i + 1) % 4]
+    return ne_to_ll(nxt[0], nxt[1])
+
+
+def _box_search_away(v: VehicleState, avoid: VehicleState) -> tuple[float, float]:
+    """Opposite quadrant from a searcher so two searchers do not stack cells."""
+    an, ae = ll_to_ne(avoid.lat, avoid.lon)
+    qn = -1.0 if an >= 0 else 1.0
+    qe = -1.0 if ae >= 0 else 1.0
+    box = 420.0
+    corners = [
+        (qn * box, qe * box),
+        (qn * box, qe * 80.0),
+        (qn * 80.0, qe * box),
+        (qn * box * 0.5, qe * box * 0.5),
+    ]
+    n, e = ll_to_ne(v.lat, v.lon)
     dists = [((n - c[0]) ** 2 + (e - c[1]) ** 2, i) for i, c in enumerate(corners)]
     i = min(dists)[1]
     nxt = corners[(i + 1) % 4]
