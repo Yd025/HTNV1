@@ -2,6 +2,7 @@ import Head from "next/head";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import BackendEvidence from "../components/BackendEvidence";
+import MissionObservability from "../components/MissionObservability";
 import CameraRail from "../components/CameraRail";
 import SimulatorWorld from "../components/SimulatorWorld";
 import { BrandMark, Icon } from "../components/ui/Icons";
@@ -118,11 +119,12 @@ export default function BackendPreview() {
   }
 
   return <>
+    <MissionObservability telemetry={telemetry} />
     <Head><title>Overwatch | Backend live preview</title><meta name="description" content="Overwatch mission telemetry, sensor cameras, and the connected ArcticSim world." /></Head>
     <main className={s.page} style={themeStyle(theme)}>
       <header className={s.header}>
         <a href="/" className={s.brand}><BrandMark /><span>OVERWATCH</span></a>
-        <nav aria-label="Preview sections"><a href="#arena">World</a><a href="#cameras">Cameras</a><a href="#fleet">Fleet</a><a href="#evidence">Evidence</a><a href="#services">System</a></nav>
+        <nav aria-label="Preview sections"><a href="#arena">World</a><a href="#cameras">Cameras</a><a href="#fleet">Fleet</a><a href="#evidence">Evidence</a><a href="#services">System</a><a href="/sentry">Sentry</a></nav>
         <label className={s.theme}>Appearance<select value={theme} onChange={e => setTheme(e.target.value as ThemeId)}>{Object.values(themes).map(t => <option value={t.id} key={t.id}>{t.name}</option>)}</select></label>
       </header>
 

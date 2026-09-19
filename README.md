@@ -84,6 +84,35 @@ python -B eval.py --seconds 30 --profile all
 
 These local checks do not validate ArcticSim camera calibration or the live fleet; those still require the simulator integration pass.
 
+## Sentry tracking evidence
+
+Open **Sentry** in the dashboard sidebar, visit [localhost:3000/sentry](http://localhost:3000/sentry), or use the Sentry link in the backend preview. The tab shows browser/server/backend SDK status, exporter counters, the current run ID and measured stage timings. It links to Issues, Traces, Logs and Replays in `hackthenorth-nt / htn`. `/sentry-example-page` opens the same verification view. **Send test event** captures a labeled error, structured log and sampled trace while keeping the dashboard usable; the result distinguishes Sentry accepting the envelope from the SDK merely flushing its queue.
+
+The Next.js 14 Pages Router SDK initializes through `sentry.client.config.ts` and the server/edge instrumentation files. It records navigation and telemetry state changes, with 10% trace/session sampling and masked replay retention on errors. Text is masked and media is blocked. Native Next.js reads `frontend/.env.local`; use `frontend/.env.example` as the template. Docker Compose receives `NEXT_PUBLIC_SENTRY_DSN` and the other public Sentry settings from the root environment. The wizard-generated `.env.sentry-build-plugin` is ignored; set its `SENTRY_AUTH_TOKEN` as a build-time environment variable to enable source-map uploads. Never use a `NEXT_PUBLIC_` name for this token.
+
+The API and headless agent use **Sentry Logs and Tracing** alongside error monitoring. Set `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, and optionally `SENTRY_RELEASE`. `SENTRY_TRACES_SAMPLE_RATE` defaults to `0.1`; use `1.0` for a short demo run. Python requires `sentry-sdk>=2.35.0,<3`. Without a DSN, local tracking and recording still work.
+
+The controller measures adapter reads, observation validation, target fusion, role allocation, platform decisions, command dispatch, metrics and snapshot generation. A bounded worker exports `swarm_tick` transactions using those measured timestamps. SDK work runs outside the control loop. These are application spans; they do not include internal MAVLink/network subspans or CPU profiles. The core tick duration excludes recording serialization, publishing and export. `/health` includes exporter queue depth, dropped ticks and failures; enabled means configured, not confirmed cloud delivery.
+
+Structured `mission.window` logs aggregate roughly one second of ticks, with early flushes when an estimate appears/disappears and a final flush at shutdown. Attributes include `run.id`, `run.mode`, `run.scenario`, `tick.sequence`, `tick.trace_id`, latest estimated position/velocity/age/uncertainty, available scores, and window counts for received/forwarded observations, rejection reasons, command outcomes and ticks exceeding the configured budget. An estimate appearing is not proof of visual custody. Forwarded observations passed input validation; the target filter may still decline to associate them. Missing ground truth means measured tracking error remains unavailable. Queue overflow is reported explicitly; Sentry is sampled diagnostic evidence.
+
+Use the existing `--record-dir` / `RUN_LOG_DIR` recording for the later optimization algorithm. Its `manifest.json` and `ticks.jsonl` retain original detections, vehicle positions, estimated target positions, commands, outcomes, evaluation truth, settings and source hash. Each tick now also has `diagnostics` with stage timings and a trace ID. This joins the full evidence to Sentry without depending on Sentry retention, quotas or sampling. Recording limits and completeness checks still apply.
+
+After stopping any controller for the same fleet, run from `backend/` (native Python does not automatically load `.env`; export these variables in the shell):
+
+```powershell
+$env:ADAPTER = "local"
+$env:FORCE_KINEMATIC = "1"
+$env:SENTRY_DSN = "<your project DSN>"
+$env:SENTRY_TRACES_SAMPLE_RATE = "1.0"
+$env:RUN_SCENARIO = "local-weave-baseline"
+python -B -m agent --adapter local --record-dir ../runs --seconds 30
+```
+
+For the prize demo, filter Sentry Logs by `event.name:mission.window run.id:<run-id>`. Inspect `window.rejected.duplicate`, `window.rejected.stale`, `window.commands.dispatch_error`, and `window.over_budget`. Open the `swarm_tick` trace from `window.slowest_trace_id` or `window.last_error_trace_id` to locate the expensive/failing stage, then inspect that tick in the recording. `tick.trace_id` identifies the latest tick in the window; earlier anomalies retain their own trace links. Re-run the same scenario after a targeted change and compare measured latency, rejection counts and truth-based error where available. Preserve both runs and actual Sentry links/screenshots as evidence of what changed; the integration alone is not a measured improvement.
+
+Offline tests use Sentry's real SDK with an in-memory transport to verify Logs and Tracing, timestamp accuracy, recording correlation, no-truth semantics and continued control during exporter failure/backpressure. They do not verify ingestion by a live Sentry project. References: [Sentry Python Logs](https://docs.sentry.io/platforms/python/logs/) and [custom tracing](https://docs.sentry.io/platforms/python/tracing/instrumentation/custom-instrumentation/).
+
 ## Who owns what
 
 | Person | Branch | Main files | Handoff |

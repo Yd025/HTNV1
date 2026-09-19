@@ -1,0 +1,53 @@
+.panel { display: grid; gap: 24px; color: var(--text); min-width: 0; }
+.hero { display: flex; justify-content: space-between; align-items: center; gap: 32px; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--surface-raised); padding: 32px; }
+.eyebrow { color: var(--accent-text); text-transform: uppercase; letter-spacing: .13em; font-size: 10px; font-weight: 600; }
+.hero h2 { font-size: clamp(23px, 3vw, 32px); font-weight: 500; margin: 12px 0; letter-spacing: -.025em; }
+.hero p { color: var(--text-muted); max-width: 580px; line-height: 1.8; }
+.heroActions { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; flex-shrink: 0; }
+.heroActions > span { font-size: 10px; color: var(--text-muted); }
+.primary { display: inline-flex; align-items: center; justify-content: space-between; gap: 24px; padding: 12px 18px; background: var(--accent); color: var(--accent-contrast); border: 1px solid var(--accent); font-weight: 500; border-radius: 3px; min-height: 44px; }
+.primary:hover { filter: brightness(1.1); }
+.statusGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); }
+.status { padding: 23px; }
+.status + .status { border-left: 1px solid var(--line); }
+.status > span, .readings dt, .run > span { font-size: 10px; text-transform: uppercase; color: var(--text-muted); letter-spacing: .07em; }
+.status strong { display: flex; align-items: center; gap: 9px; font-size: 19px; font-weight: 500; margin: 12px 0 6px; }
+.status strong i { width: 6px; height: 6px; background: var(--text-subtle); border-radius: 50%; flex-shrink: 0; }
+.status strong i[data-ready="true"] { background: var(--status); }
+.status p { font-size: 11px; color: var(--text-muted); line-height: 1.6; }
+.caption { font-size: 11px; line-height: 1.8; color: var(--text-muted); }
+.statusGrid + .caption { margin-top: -14px; }
+.products { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.product { border: 1px solid var(--line); background: var(--surface-raised); padding: 24px; transition: border-color .15s; }
+.product:hover { border-color: var(--accent-text); }
+.productLabel { display: flex; gap: 10px; align-items: center; color: var(--accent-text); font-size: 11px; }
+.productLabel span:last-child { margin-left: auto; }
+.product h3 { font-size: 18px; font-weight: 500; margin: 22px 0 9px; }
+.product p { font-size: 12px; color: var(--text-muted); line-height: 1.8; }
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.card { padding: 26px; border: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 19px; }
+.cardHeading { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; width: 100%; }
+.cardHeading h3 { font-size: 16px; font-weight: 500; }
+.cardHeading p { color: var(--text-muted); font-size: 11px; margin-top: 9px; line-height: 1.6; }
+.card > p:not(.caption) { font-size: 12px; line-height: 1.8; color: var(--text-muted); }
+.badge { color: var(--text-muted); padding: 5px 8px; border: 1px solid var(--line); border-radius: 2px; font-size: 10px; white-space: nowrap; }
+.notice { background: var(--accent-soft); padding: 12px; width: 100%; }
+.result { display: grid; gap: 10px; padding: 16px; background: var(--surface-muted); border-left: 2px solid var(--warning); font-size: 12px; line-height: 1.7; width: 100%; }
+.result[data-accepted="true"] { border-left-color: var(--status); }
+.result code, .run code, .traceFooter code { font-size: 11px; overflow-wrap: anywhere; }
+.result a, .textLink, .traceFooter a { color: var(--accent-text); font-size: 12px; }
+.readings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; width: 100%; }
+.readings dd { margin: 10px 0 0; font-size: 21px; font-weight: 500; overflow-wrap: anywhere; }
+.run { display: grid; gap: 9px; padding-top: 16px; border-top: 1px solid var(--line); width: 100%; }
+.stages { display: grid; width: 100%; gap: 15px; }
+.stage { display: grid; grid-template-columns: 190px 1fr 80px; gap: 18px; align-items: center; }
+.stage > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.stage strong { font-size: 12px; font-weight: 500; }
+.stage span { font-size: 10px; color: var(--text-muted); }
+.stage > span { text-align: right; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: var(--surface-raised); }
+.bar i { display: block; height: 100%; background: var(--accent); min-width: 2px; }
+.traceFooter { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; width: 100%; padding-top: 18px; border-top: 1px solid var(--line); }
+.empty { padding: 24px 0; }
+@media (max-width: 1100px) { .columns { grid-template-columns: 1fr; } .hero { align-items: flex-start; } .heroActions { align-items: flex-start; } .readings { gap: 12px; } }
+@media (max-width: 700px) { .hero { flex-direction: column; padding: 23px; gap: 20px; } .products, .statusGrid { grid-template-columns: 1fr; } .status + .status { border-left: 0; border-top: 1px solid var(--line); } .status { padding: 20px; } .product { padding: 20px; } .product h3 { margin-top: 16px; } .card { padding: 20px; } .cardHeading { flex-wrap: wrap; gap: 12px; } .readings { grid-template-columns: 1fr 1fr; row-gap: 24px; } .stage { grid-template-columns: 130px 1fr 60px; gap: 12px; } .panel { gap: 20px; } }

@@ -55,6 +55,7 @@ export type SwarmState = {
   deployed?: boolean;
   heartbeat?: number;
   tick_hz?: number;
+  diagnostics?: { trace_id: string; started_at: number; duration_ms: number; budget_ms: number; over_budget: boolean; stages: { op: string; name: string; offset_ms: number; duration_ms: number; status: string }[] };
   run?: { run_id: string; mode: "synthetic" | "hybrid" | "live" | "replay"; source: string; sequence: number; clock: string; evaluation_truth_available: boolean; source_run_id?: string | null };
   observations?: { received: number; forwarded: number; rejected: { observation_id: string; source_id: string; reason: string }[]; latest_age_s: number | null; basis: string };
   command_outcomes?: { command_id: string; vehicle_id: string; status: "suppressed" | "dispatched" | "dispatch_error"; error?: string }[];
