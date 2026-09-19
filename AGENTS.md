@@ -42,7 +42,7 @@ docker compose up --build
 - Headless: `python -m agent --adapter local`
 - Tune: `python eval.py --seconds 15` (from `backend/`, stdlib-only for kinematic)
 
-`WhiteoutAdapter` is a **stub**. It no-ops unless `WHITEOUT_URL` is set. Do not pretend the Dominion sim is integrated.
+`WhiteoutAdapter` speaks arctic-sim MAVLink via **`udpout`** (14550/14560/14580/14590). `ADAPTER=whiteout` arms and flies the official fleet. `poll_detections()` is still empty (cameras are next). Do not run compose profile `sitl` at the same time — host 5760 collides. Keep `ADAPTER=local` for kinematic eval.
 
 ## Architecture (do not bypass)
 
@@ -121,7 +121,7 @@ If host **8000** or **5432** are taken, compose accepts `BACKEND_PORT` / `POSTGR
 | `backend/sim/types.py` | A | Shared dataclasses |
 | `backend/sim/local_sitl.py` | A | Kinematic + optional multi-SITL MAVLink |
 | `backend/sim/target.py` | A/B | Moving contact + FOV occupancy |
-| `backend/sim/whiteout.py` | A | Saturday fill |
+| `backend/sim/whiteout.py` | A | Arctic-sim MAVLink (5760/5770/5790/5800). Arm/takeoff SM. No fake detections. |
 | `backend/mavlink_connection.py` | A | pymavlink TCP; **routing only**, no estimators |
 | `backend/tracker.py` | B | Target track (n,e,vn,ve) |
 | `backend/metrics.py` | B | Coverage grid, four scores |
@@ -163,7 +163,7 @@ Python imports assume **cwd = `backend/`** (Docker `WORKDIR /app`). Do not use `
 
 **HUD / Astra** — prettier ice, lights, craft meshes in `TacticalScene.tsx` only. Do not invent a second telemetry path.
 
-**Saturday** — fill `WhiteoutAdapter` methods from workshop notes. Point `ADAPTER=whiteout`. Freeze BT gains unless their metric definition differs. Swap HUD terrain only if they publish a real mesh.
+**Saturday** — `ADAPTER=whiteout` against arctic-sim `udpout`. Freeze BT gains unless their metric definition differs. Camera detector and `POST :8010/api/tracks` are still open. Swap HUD terrain only if they publish a real mesh.
 
 **SITL** — unique TCP per vehicle via env `MAVLINK_PLANE/COPTER/ROVER`. Image `radarku/ardupilot-sitl` may ignore `VEHICLE`; kinematic fallback is expected.
 

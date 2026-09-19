@@ -58,6 +58,8 @@ class MavlinkBridge:
             "mode": None,
         }
         self._io_lock = asyncio.Lock()
+        self._last_gcs_hb = 0.0
+        self._pump_task: asyncio.Task[None] | None = None
 
     def is_connected(self) -> bool:
         return self.connected and self.conn is not None
@@ -73,6 +75,10 @@ class MavlinkBridge:
             try:
                 self.conn = await asyncio.to_thread(self._connect_blocking)
                 self.connected = True
+                if int(getattr(self.conn, "target_component", 0) or 0) == 0:
+                    self.conn.target_component = 1
+                if self._pump_task is None or self._pump_task.done():
+                    self._pump_task = asyncio.create_task(self._pump(), name=f"mav-pump-{self.vehicle_id}")
                 logger.info("MAVLink connected to %s sysid=%s", self.conn_str, self.conn.target_system)
                 return
             except Exception as exc:  # noqa: BLE001 — SITL boot is messy
@@ -83,15 +89,102 @@ class MavlinkBridge:
 
     def _connect_blocking(self) -> mavutil.mavfile:
         conn = mavutil.mavlink_connection(self.conn_str, autoreconnect=True)
-        conn.wait_heartbeat(timeout=10)
+        # Arctic-sim GCS ports are MAVProxy udpin — client must transmit first.
+        if self.conn_str.startswith("udpout"):
+            try:
+                conn.write(b"\x00")
+            except Exception:
+                pass
+        try:
+            conn.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_GCS,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0, 0, 0,
+            )
+        except Exception:
+            pass
+        hb = conn.wait_heartbeat(timeout=10)
+        if hb is None and int(getattr(conn, "target_system", 0) or 0) == 0:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise ConnectionError(f"no HEARTBEAT on {self.conn_str}")
+        self._seed_from_conn(conn)
+        try:
+            conn.mav.request_data_stream_send(
+                conn.target_system,
+                conn.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                4,
+                1,
+            )
+        except Exception:
+            logger.warning("request_data_stream failed on %s", self.conn_str)
+        # Prefer SET_MESSAGE_INTERVAL — request_data_stream is ignored by some SITL builds.
+        for msgid, hz in (
+            (mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT, 2),
+            (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 4),
+            (mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD, 4),
+            (mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS, 1),
+        ):
+            try:
+                conn.mav.command_long_send(
+                    conn.target_system,
+                    conn.target_component,
+                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    0,
+                    msgid,
+                    int(1_000_000 / hz),
+                    0, 0, 0, 0, 0,
+                )
+            except Exception:
+                break
         return conn
+
+    async def _pump(self) -> None:
+        while self.connected and self.conn is not None:
+            try:
+                await self.recv_sample(timeout=0.2)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.2)
+
+    def _maybe_gcs_heartbeat(self) -> None:
+        if self.conn is None:
+            return
+        now = time.monotonic()
+        if now - self._last_gcs_hb < 1.0:
+            return
+        try:
+            self.conn.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_GCS,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0, 0, 0,
+            )
+            self._last_gcs_hb = now
+        except Exception:
+            pass
+
+    def _seed_from_conn(self, conn: mavutil.mavfile) -> None:
+        self._state["sysid"] = conn.target_system
+        self._state["mode"] = getattr(conn, "flightmode", None) or self._state["mode"]
+        hb = getattr(conn, "messages", {}).get("HEARTBEAT")
+        if hb is not None:
+            self._state["armed"] = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            self._state["mode"] = self._decode_mode(conn, hb)
 
     async def recv_sample(self, timeout: float = 1.0) -> dict[str, Any] | None:
         """Pull the next interesting message and fold it into the routed sample."""
         if self.conn is None:
             return None
         async with self._io_lock:
-            msg = await asyncio.to_thread(self.conn.recv_match, blocking=True, timeout=timeout)
+            self._maybe_gcs_heartbeat()
+            if timeout <= 0:
+                msg = await asyncio.to_thread(self.conn.recv_match, blocking=False)
+            else:
+                msg = await asyncio.to_thread(self.conn.recv_match, blocking=True, timeout=timeout)
         if msg is None:
             return None
         msg_type = msg.get_type()
@@ -109,7 +202,18 @@ class MavlinkBridge:
             self.last_heartbeat_at = time.monotonic()
             self._state["sysid"] = getattr(self.conn, "target_system", None)
             self._state["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-            self._state["mode"] = getattr(self.conn, "flightmode", None) or str(msg.custom_mode)
+            self._state["mode"] = self._decode_mode(self.conn, msg) if self.conn else str(msg.custom_mode)
+        elif msg_type == "COMMAND_ACK":
+            logger.info(
+                "ACK %s result=%s on %s",
+                getattr(msg, "command", "?"),
+                getattr(msg, "result", "?"),
+                self.vehicle_id,
+            )
+        elif msg_type == "STATUSTEXT":
+            text = getattr(msg, "text", "") or ""
+            if text:
+                logger.info("STATUSTEXT %s: %s", self.vehicle_id, text)
         elif msg_type == "GLOBAL_POSITION_INT":
             self._state["lat"] = msg.lat / 1e7
             self._state["lon"] = msg.lon / 1e7
@@ -118,7 +222,8 @@ class MavlinkBridge:
         elif msg_type == "VFR_HUD":
             self._state["groundspeed"] = float(msg.groundspeed)
             self._state["heading"] = float(msg.heading)
-            if getattr(msg, "alt", None) is not None:
+            # VFR_HUD.alt is often AMSL. Prefer GLOBAL_POSITION_INT.relative_alt.
+            if self._state["alt"] is None and getattr(msg, "alt", None) is not None:
                 self._state["alt"] = float(msg.alt)
         elif msg_type == "ATTITUDE":
             self._state["roll"] = float(msg.roll)
@@ -172,6 +277,97 @@ class MavlinkBridge:
             await asyncio.to_thread(_send)
         logger.info("Actuation goto lat=%.6f lon=%.6f alt=%.1f", lat, lon, alt)
 
+    async def set_mode(self, mode: str) -> None:
+        if self.conn is None:
+            return
+
+        def _set() -> None:
+            assert self.conn is not None
+            mapping = self.conn.mode_mapping() or {}
+            key = next((k for k in mapping if k.upper() == mode.upper()), None)
+            if key is None:
+                self.conn.set_mode(mode)
+                return
+            mode_id = mapping[key]
+            try:
+                self.conn.set_mode(mode_id)
+            except Exception:
+                pass
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                float(mode_id),
+                0, 0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_set)
+        logger.info("Mode %s on %s", mode, self.vehicle_id)
+
+    async def arm(self, armed: bool = True, force: bool = False) -> None:
+        if self.conn is None:
+            return
+
+        def _arm() -> None:
+            assert self.conn is not None
+            # 21196 = ArduPilot magic force-arm. Gazebo EKF/mag often refuses otherwise.
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                1.0 if armed else 0.0,
+                21196.0 if (armed and force) else 0.0,
+                0, 0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_arm)
+        logger.info("Arm=%s on %s", armed, self.vehicle_id)
+
+    async def takeoff(self, alt: float) -> None:
+        if self.conn is None:
+            return
+
+        def _to() -> None:
+            assert self.conn is not None
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0,
+                0, 0, 0, 0, 0, 0,
+                float(alt),
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_to)
+        logger.info("Takeoff %.0fm on %s", alt, self.vehicle_id)
+
+    async def set_roi(self, lat: float, lon: float, alt: float = 0.0) -> None:
+        if self.conn is None:
+            return
+
+        def _roi() -> None:
+            assert self.conn is not None
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_ROI,
+                0,
+                mavutil.mavlink.MAV_ROI_LOCATION,
+                0, 0, 0,
+                float(lat),
+                float(lon),
+                float(alt),
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_roi)
+
     async def reconnect_forever(self, on_status: Callable[[bool], None] | None = None) -> None:
         while True:
             if self.is_connected():
@@ -185,6 +381,15 @@ class MavlinkBridge:
                 if on_status:
                     on_status(False)
                 await asyncio.sleep(CONNECT_RETRY_SEC)
+
+
+    def _decode_mode(self, conn: mavutil.mavfile | None, msg: Any) -> str:
+        flightmode = getattr(conn, "flightmode", None) if conn is not None else None
+        if flightmode and str(flightmode) not in {"", "None"}:
+            return str(flightmode)
+        mapping = (conn.mode_mapping() if conn is not None else None) or {}
+        inv = {int(v): k for k, v in mapping.items()}
+        return inv.get(int(getattr(msg, "custom_mode", 0)), str(getattr(msg, "custom_mode", "")))
 
 
 def _safe_to_dict(msg: Any) -> dict[str, Any]:

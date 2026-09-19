@@ -150,6 +150,7 @@ export default function CommandCenter() {
                 truth={state.truth ?? null}
                 heatmap={state.heatmap ?? []}
                 strategy={strategy}
+                arena={state.arena}
               />
             )}
           </div>

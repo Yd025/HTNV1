@@ -1,7 +1,6 @@
 import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, Tooltip } from "react-leaflet";
+import { DEFAULT_ARENA } from "../lib/geo";
 import type { HeatCell, StrategyPlan, TelemetrySample, TrackState } from "../lib/types";
-
-const ARENA: [number, number] = [74.6973, -94.8297];
 
 const ROLE_COLOR: Record<string, { color: string; fill: string }> = {
   search: { color: "#5eead4", fill: "#14b8a6" },
@@ -17,14 +16,19 @@ type Props = {
   truth: { lat: number; lon: number } | null;
   heatmap: HeatCell[];
   strategy: StrategyPlan | null;
+  arena?: { origin_lat: number; origin_lon: number };
 };
 
-export default function TacticalMap({ fleet, track, truth, heatmap, strategy }: Props) {
+export default function TacticalMap({ fleet, track, truth, heatmap, strategy, arena }: Props) {
   const vehicles = Object.values(fleet).filter((v) => v.lat != null && v.lon != null);
   const intercept = strategy?.intercept;
+  const origin: [number, number] = [
+    arena?.origin_lat ?? DEFAULT_ARENA.origin_lat,
+    arena?.origin_lon ?? DEFAULT_ARENA.origin_lon,
+  ];
 
   return (
-    <MapContainer center={ARENA} zoom={12} className="h-full w-full" zoomControl attributionControl={false}>
+    <MapContainer key={`${origin[0]},${origin[1]}`} center={origin} zoom={12} className="h-full w-full" zoomControl attributionControl={false}>
       <TileLayer
         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         attribution="&copy; OSM &copy; CARTO"
@@ -44,7 +48,7 @@ export default function TacticalMap({ fleet, track, truth, heatmap, strategy }: 
         />
       ))}
 
-      <CircleMarker center={ARENA} radius={4} pathOptions={{ color: "#4b5563", fillOpacity: 0.4 }}>
+      <CircleMarker center={origin} radius={4} pathOptions={{ color: "#4b5563", fillOpacity: 0.4 }}>
         <Tooltip permanent direction="right" offset={[8, 0]}>
           origin
         </Tooltip>

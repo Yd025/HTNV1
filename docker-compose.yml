@@ -94,6 +94,7 @@ services:
       MAVLINK_ROVER: ${MAVLINK_ROVER:-tcp:sitl-rover:5760}
       WHITEOUT_URL: ${WHITEOUT_URL:-}
       WHITEOUT_TOKEN: ${WHITEOUT_TOKEN:-}
+      ARCTIC_HOST: ${ARCTIC_HOST:-host.docker.internal}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-hackathon}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -108,6 +109,8 @@ services:
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
     depends_on:

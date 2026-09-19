@@ -1,42 +1,28 @@
-# Saturday 10:30 AM — WHITEOUT workshop capture
+# Saturday — WHITEOUT / arctic-sim
 
-Room: PSE 2324 / 2328 (Sponsor Event Rooms A and B). One teammate stays the whole session.
+Official repo: `https://github.com/Dominion-Dynamics/arctic-sim` (local clone: `../arctic-sim`).
 
-Fill [backend/sim/whiteout.py](../backend/sim/whiteout.py) from these answers. Do **not** refactor the HUD or behavior trees in the room — only the adapter.
+**Mission:** detect and track a 33.6 m shadow vessel (no AIS, random start, ~3 m/s, water only). Submit hits:
 
-## Ask Dominion (write their words)
+`POST http://<SIM-IP>:8010/api/tracks` `{"name":"Sierra One","lat":…,"lon":…}` — confirm host with DD. Local control is `:8090` (reset only).
 
-1. Connection: TCP / UDP / HTTP / Zenoh / other? Host, port, auth?
-2. Vehicle list: sysids, classes (plane / copter / rover / **towers**)?
-3. Detections: which MAVLink / API messages? Camera frames or already-classified contacts?
-4. Scoring: coverage window? Do towers count? Collaboration overlap penalty? Tracking RMSE vs truth?
-5. Deploy command they expect (`docker`, `python -m agent --adapter whiteout`, upload, …)
-6. Constraints: arena bounds, no-fly, battery, comms drop, max speed
-7. Is the agent uploaded to their box or is our laptop the GCS?
+**Site:** Fort Ross / Bellot Strait `71.991960, -94.822428`, 6.5 km ArcticDEM. World +Y is **−49.8°** from true north. GUIDED commands stay WGS84 lat/lon.
 
-## After the workshop (under one hour)
+**MAVLink (GCS must transmit first — `udpout` first; TCP 5760 accepts a socket but may never heartbeat):**
+
+| asset | host TCP | host UDP |
+| --- | --- | --- |
+| quadcopter | 5760 | 14550 |
+| fixed-wing | 5770 | 14560 |
+| tower-1 | 5790 | 14580 |
+| tower-2 | 5800 | 14590 |
+
+Copter: GUIDED → arm → `NAV_TAKEOFF`. Plane: GUIDED → arm → mode TAKEOFF → GUIDED. Towers: SCAN / `DO_SET_ROI`. Cameras are MJPEG on `8600+10*slot`. There are **no** sim-published detections.
 
 ```bash
-# .env
-ADAPTER=whiteout
-WHITEOUT_URL=http://...   # or leave blank and teach WhiteoutAdapter MAVLink
-WHITEOUT_TOKEN=
-
-docker compose up --build backend
-# or headless for judging
-docker compose exec backend python -m agent --adapter whiteout
+ADAPTER=whiteout docker compose up --build backend
+# or headless
+docker compose exec -e ADAPTER=whiteout backend python -m agent --adapter whiteout
 ```
 
-Then freeze BT gains. Tune only if a metric is obviously wrong vs their definition.
-
-## Adapter methods to implement
-
-See `WhiteoutAdapter` in `backend/sim/whiteout.py`:
-
-- `list_vehicles()`
-- `poll_detections()`
-- `send_command()`
-- `comms_ok()`
-- `truth_target()` only if they publish truth
-
-Local kinematic fleet stays as `ADAPTER=local` so the rest of the team can keep working if the live sim is late.
+`WhiteoutAdapter` already speaks those ports. `poll_detections()` is empty until the camera tracker lands. Keep `ADAPTER=local` for kinematic eval.

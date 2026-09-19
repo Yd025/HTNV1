@@ -25,6 +25,7 @@ class Arena:
     half_m: float
     towers: list[TowerMount] = field(default_factory=list)
     no_fly: list[dict[str, Any]] = field(default_factory=list)
+    heading_offset_deg: float = 0.0  # world +Y vs true north; Fort Ross ≈ -49.8
 
     def bounds_ll(self) -> dict[str, float]:
         from geo import ne_to_ll

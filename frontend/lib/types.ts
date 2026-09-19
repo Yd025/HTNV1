@@ -64,7 +64,7 @@ export type SwarmState = {
   c2?: { phase?: string; intent?: string };
   intents?: Record<string, string>;
   commands?: { vehicle_id: string; type: string; lat?: number; lon?: number }[];
-  arena?: { origin_lat: number; origin_lon: number; half_m: number };
+  arena?: { origin_lat: number; origin_lon: number; half_m: number; heading_offset_deg?: number };
 };
 
 export type StrategyPlan = {

@@ -138,6 +138,7 @@ class SwarmBrain:
                 "origin_lat": self.adapter.arena().origin_lat,
                 "origin_lon": self.adapter.arena().origin_lon,
                 "half_m": self.adapter.arena().half_m,
+                "heading_offset_deg": getattr(self.adapter.arena(), "heading_offset_deg", 0.0),
             },
         }
 

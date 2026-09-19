@@ -2,7 +2,7 @@
 
 Hack the North WHITEOUT base. Competition has not started. This repo is the shared intelligence loop so you can split work on day one instead of scaffolding Docker.
 
-**Agents (Cursor/Codex/etc.): read [AGENTS.md](AGENTS.md) first** — architecture, file map, invariants, Saturday stub. Humans: this README is the 10-minute bring-up.
+**Agents (Cursor/Codex/etc.): read [AGENTS.md](AGENTS.md) first** — architecture, file map, invariants, arctic-sim adapter. Humans: this README is the 10-minute bring-up.
 
 ```
 Adapter (local SITL / kinematic, or Saturday WHITEOUT)
@@ -51,10 +51,14 @@ Live metrics: **coverage, collaboration, efficiency, tracking accuracy**, plus *
 - No vehicle Kalman; ArduPilot owns own-ship. Tracker is **target-only**.
 - Do not scatter `tcp:sitl:5760` — go through `SimAdapter`.
 
-## Saturday
+## Saturday / local arctic-sim
 
-Workshop 10:30 AM, PSE 2324/2328. Capture the sim contract, fill `WhiteoutAdapter`, run:
+`WhiteoutAdapter` talks MAVLink `udpout` to the official four assets. With arctic-sim already up:
 
 ```bash
-ADAPTER=whiteout python -m agent --adapter whiteout
+ADAPTER=whiteout docker compose up -d --no-deps --force-recreate backend
+# or headless
+docker compose exec -e ADAPTER=whiteout backend python -m agent --adapter whiteout
 ```
+
+Detections and `POST :8010/api/tracks` are still open. Keep `ADAPTER=local` for kinematic eval. Do not start compose profile `sitl` alongside arctic-sim (host 5760 collides). Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
