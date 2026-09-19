@@ -86,6 +86,10 @@ These local checks do not validate ArcticSim camera calibration or the live flee
 
 ## Learn two-tower placement and search
 
+The main page's **Put the towers to the test** panel starts with the saved learned placement. Drag either tower, the boat start, or its destination; then choose **Run test** to see the moving boat, radial pulses, and rotating camera views. Compare **Learned placement**, **Original placement**, and your custom arrangement on the same route. Boat speed, playback speed, a time scrubber, numeric coordinates, and arrow-key placement are available. The first sighting is sampled once per second over 180 seconds; a boat holds at its destination.
+
+This panel runs locally in the browser and does not move the live fleet. It models ideal tower visibility on a flat arena, excluding terrain, camera misses, and mobile vehicle search. Its separate 18.6% benchmark caption refers to the saved **two towers plus vehicles** experiment below. The learned pair is the best tested configuration, not a proven global optimum or verified ArcticSim placement. Geometry and benchmark provenance checks run from `frontend/` with `node --test tests/placementDemo*.test.cjs`.
+
 The offline experiment repeatedly spawns a synthetic boat, tests two tower placements with the mobile fleet, and saves the best validated configuration. It compares a systematic sweep with probability-guided search; it does not train a language model. Read [the research and algorithm comparison](docs/research/TOWER_SEARCH_RESEARCH.md) for the objective, sensor assumptions, primary sources, and the separate ArcticSim validation steps.
 
 The [verified local benchmark](docs/research/TOWER_SEARCH_RESEARCH.md#measured-results) reduced capped mean detection time from 121.45 to 98.82 seconds on 160 unseen episodes, with detection success increasing from 48.75% to 62.50%. A [saved example policy](docs/research/example-search-policy.json) is included; use `SEARCH_POLICY_FILE=../docs/research/example-search-policy.json` from `backend/` to preview it without first retraining. These are synthetic results, not confirmed ArcticSim camera performance.

@@ -2,6 +2,7 @@ import dynamic from "next/dynamic";
 import Head from "next/head";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
+import PlacementDemo from "../components/PlacementDemo";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
@@ -33,7 +34,7 @@ const sections: {
     value: "overview",
     label: "Overview",
     icon: "arena",
-    description: "Fleet position, target estimates, and mission performance.",
+    description: "Test tower placements, then follow the live mission below.",
   },
   {
     value: "fleet",
@@ -138,7 +139,7 @@ export default function CommandCenter() {
         <title>{`Overwatch | ${activeSection.label}`}</title>
         <meta
           name="description"
-          content="Read-only Arctic simulation monitoring dashboard."
+          content="Arctic mission dashboard with an interactive tower placement demo."
         />
         <meta name="theme-color" content={theme.colors.surface} />
       </Head>
@@ -257,7 +258,7 @@ export default function CommandCenter() {
                 </span>
                 <span className="read-only-badge">
                   <Icon name="eye" />
-                  Read only
+                  Live fleet read only
                 </span>
               </div>
             </section>
@@ -282,6 +283,7 @@ export default function CommandCenter() {
             )}
             {section === "overview" && (
               <>
+                <PlacementDemo />
                 <section className="score-strip" aria-label="Mission scores">
                   <Score
                     label="Coverage"
