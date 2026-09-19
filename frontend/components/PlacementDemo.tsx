@@ -1,14 +1,18 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import data from "../lib/placementDemoData.json";
-import { boatPosition, clampPoint, evaluateRoute, inTowerView, towerHeading, type BoatRoute, type DemoTower, type Point } from "../lib/placementDemo";
+import randomEvidence from "../lib/placementRandomEvidence.json";
+import { boatPosition, clampPoint, evaluateRoute, towerHeading, type BoatRoute, type DemoTower, type Point } from "../lib/placementDemo";
+import { advanceExperiment, createExperiment, nearestTower, randomRoute, type Experiment } from "../lib/placementExperiments";
+import PlacementExperimentPanel from "./PlacementExperimentPanel";
 import { Icon } from "./ui/Icons";
 import styles from "./PlacementDemo.module.css";
 
 type EditMode = "start" | "end" | "tower0" | "tower1";
-type Layout = "learned" | "baseline" | "custom";
+type Layout = "learned" | "baseline" | "custom" | "candidate";
 const HALF = data.halfM;
 const HORIZON = data.benchmark.deadlineS;
-const DEFAULT_ROUTE: BoatRoute = { start: { north: -900, east: -150 }, end: { north: 900, east: 150 }, speedMps: 12 };
+const INITIAL_SEED = 190926;
+const DEFAULT_ROUTE = randomRoute(INITIAL_SEED, 1000);
 const project = (point: Point) => ({ x: 360 + point.east * 0.2, y: 340 - point.north * 0.2 });
 const toolLabels: Record<EditMode, string> = { start: "Boat start", end: "Destination", tower0: "Tower 1", tower1: "Tower 2" };
 
@@ -32,16 +36,28 @@ export default function PlacementDemo() {
   const [running, setRunning] = useState(false);
   const [playback, setPlayback] = useState(8);
   const [reducedMotion, setReducedMotion] = useState(false);
+  const [experiment, setExperiment] = useState<Experiment | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
+  const [spawnIndex, setSpawnIndex] = useState(0);
+  const [replayIndex, setReplayIndex] = useState<number | null>(null);
+  const [autoReplay, setAutoReplay] = useState(false);
+  const [experimentError, setExperimentError] = useState<string | null>(null);
   const dragging = useRef<{ mode: EditMode; offset: Point; clientX: number; clientY: number; moved: boolean } | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const result = useMemo(() => evaluateRoute(towers, route), [towers, route]);
   const original = useMemo(() => evaluateRoute(data.baseline.towers, route), [route]);
-  const learned = useMemo(() => evaluateRoute(data.learned.towers, route), [route]);
+  const recommended = experiment?.phase === "complete" ? experiment.bestTowers : data.learned.towers;
+  const learned = useMemo(() => evaluateRoute(recommended, route), [recommended, route]);
   const boat = boatPosition(route, elapsed);
   const acquired = result.detectedAt !== null && elapsed >= result.detectedAt;
-  const visible = towers.some((tower) => inTowerView(tower, boat, elapsed, data.scanPeriodS));
+  const sightLine = nearestTower(towers, boat, elapsed, true);
+  const nearest = sightLine ?? nearestTower(towers, boat, elapsed, false);
+  const visible = sightLine !== null;
   const activePoint = edit === "start" ? route.start : edit === "end" ? route.end : towers[edit === "tower0" ? 0 : 1];
   const firstTower = towers.find((tower) => tower.id === result.sourceId);
+  const replayStop = autoReplay && result.detectedAt !== null ? result.detectedAt : HORIZON;
+  const spawnCloud = useMemo(() => experiment?.testRoutes ?? (experiment ? Array.from({ length: 80 }, (_, i) => randomRoute(experiment.seed, i)) : []), [experiment?.seed, experiment?.testRoutes]);
 
   useEffect(() => {
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -58,31 +74,126 @@ export default function PlacementDemo() {
     const tick = (now: number) => {
       if (previous !== null) {
         const delta = document.hidden ? 0 : Math.min((now - previous) / 1000, 0.1) * playback;
-        setElapsed((value) => Math.min(HORIZON, value + delta));
+        setElapsed((value) => Math.min(replayStop, value + delta));
       }
       previous = now;
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [running, playback]);
+  }, [running, playback, replayStop]);
 
-  useEffect(() => { if (elapsed >= HORIZON) setRunning(false); }, [elapsed]);
+  useEffect(() => {
+    if (!running || elapsed < replayStop) return;
+    if (autoReplay && replayIndex !== null && experiment?.testRoutes && replayIndex + 1 < experiment.testRoutes.length) {
+      // Keep towers fixed across the unseen boats; only the boat changes.
+      // Hold the detection line (or the miss) long enough to read before spawning.
+      const timer = window.setTimeout(() => {
+        const next = replayIndex + 1;
+        setReplayIndex(next);
+        setRoute(experiment.testRoutes![next]);
+        setElapsed(0);
+      }, 1200);
+      return () => window.clearTimeout(timer);
+    } else { setRunning(false); setAutoReplay(false); }
+  }, [elapsed, running, replayStop, autoReplay, replayIndex, experiment]);
 
-  const resetTime = () => { setRunning(false); setElapsed(0); };
+  useEffect(() => {
+    if (!searching || !experiment || experiment.phase === "complete") return;
+    const timer = window.setTimeout(() => {
+      try {
+        const next = advanceExperiment(experiment);
+        setExperiment(next);
+        const candidate = next.phase === "complete" ? next.candidates[next.winnerIndex!] : next.candidates[next.candidates.length - 1];
+        setTowers(candidate.towers.map((tower) => ({ ...tower })));
+        setSelectedCandidate(candidate.index);
+        setLayout(next.phase === "complete" ? "learned" : "candidate");
+        setRoute(next.phase === "complete" ? next.testRoutes![0] : randomRoute(next.seed, candidate.index % 80));
+        setElapsed(0);
+        if (next.phase === "complete") { setSearching(false); setReplayIndex(0); setPlayback(32); setAutoReplay(true); setRunning(true); }
+      } catch (error) {
+        setSearching(false);
+        setExperimentError(error instanceof Error ? error.message : "The placement search could not finish.");
+      }
+    }, reducedMotion ? 0 : 180);
+    return () => window.clearTimeout(timer);
+  }, [searching, experiment, reducedMotion]);
+
+  const resetTime = () => { setRunning(false); setAutoReplay(false); setElapsed(0); };
+  const stopAutomation = () => { setSearching(false); setAutoReplay(false); setRunning(false); };
+  const revealMap = () => svg.current?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+  const startSearch = () => {
+    resetTime();
+    revealMap();
+    setExperimentError(null);
+    if (!experiment || experiment.phase === "complete") {
+      try {
+        const next = createExperiment(experiment ? experiment.seed + 1 : INITIAL_SEED, towers);
+        setExperiment(next);
+        setSelectedCandidate(0);
+        setLayout("candidate");
+        setReplayIndex(null);
+        setRoute(randomRoute(next.seed, 0));
+      } catch (error) { setExperimentError(error instanceof Error ? error.message : "Could not start the search."); return; }
+    }
+    setSearching(true);
+  };
+  const selectCandidate = (index: number) => {
+    const candidate = experiment?.candidates[index];
+    if (!candidate) return;
+    stopAutomation();
+    setSelectedCandidate(index);
+    setTowers(candidate.towers.map((tower) => ({ ...tower })));
+    setLayout(index === experiment?.winnerIndex ? "learned" : "candidate");
+    setElapsed(0);
+    revealMap();
+  };
+  const spawnBoat = () => {
+    stopAutomation();
+    setReplayIndex(null);
+    setSpawnIndex((index) => index + 1);
+    setRoute(randomRoute(experiment?.seed ?? INITIAL_SEED, 1001 + spawnIndex));
+    setElapsed(0);
+  };
+  const replayBoats = () => {
+    if (!experiment?.testRoutes?.length || experiment.phase !== "complete") return;
+    setSearching(false);
+    setTowers(experiment.bestTowers.map((tower) => ({ ...tower })));
+    setSelectedCandidate(experiment.winnerIndex!);
+    setLayout("learned");
+    setRoute(experiment.testRoutes[0]);
+    setReplayIndex(0);
+    setElapsed(0);
+    setPlayback(32);
+    setAutoReplay(true);
+    setRunning(true);
+    revealMap();
+  };
+  const selectTestBoat = (index: number) => {
+    const next = experiment?.testRoutes?.[index];
+    if (!next) return;
+    stopAutomation();
+    setReplayIndex(index);
+    setRoute(next);
+    setElapsed(0);
+  };
   const chooseLayout = (next: "learned" | "baseline") => {
+    stopAutomation();
     setLayout(next);
-    setTowers(data[next].towers.map((tower) => ({ ...tower })));
+    setTowers((next === "learned" ? recommended : data.baseline.towers).map((tower) => ({ ...tower })));
+    setSelectedCandidate(next === "learned" ? experiment?.winnerIndex ?? null : null);
     resetTime();
   };
   const movePoint = (mode: EditMode, next: Point) => {
     const point = clampPoint(next, HALF);
+    stopAutomation();
     resetTime();
-    if (mode === "start" || mode === "end") setRoute((value) => ({ ...value, [mode]: point }));
+    if (mode === "start" || mode === "end") { setReplayIndex(null); setRoute((value) => ({ ...value, [mode]: point })); }
     else {
       const index = mode === "tower0" ? 0 : 1;
       setTowers((value) => value.map((tower, i) => i === index ? { ...tower, ...point } : tower));
       setLayout("custom");
+      setSelectedCandidate(null);
     }
   };
   const mapPoint = (event: PointerEvent<SVGSVGElement>): Point | null => {
@@ -124,7 +235,7 @@ export default function PlacementDemo() {
       <header className={styles.heading}>
         <div>
           <h2 id="placement-demo-heading">Put the towers to the test.</h2>
-          <p>Move the boat. Watch the sweeps. Find the blind spots.</p>
+          <p>Random boats. Better placements. See which tower finds them.</p>
         </div>
         <span className={styles.modelLabel}><Icon name="arena" /> Local placement demo</span>
       </header>
@@ -132,15 +243,31 @@ export default function PlacementDemo() {
         <div className={styles.stage}>
           <div className={styles.stageToolbar}>
             <div className={styles.layoutButtons} role="group" aria-label="Tower placement">
-              <button type="button" aria-pressed={layout === "learned"} onClick={() => chooseLayout("learned")}>Learned placement</button>
+              <button type="button" aria-pressed={layout === "learned"} onClick={() => chooseLayout("learned")}>{experiment?.phase === "complete" ? "Best from round" : "Learned placement"}</button>
               <button type="button" aria-pressed={layout === "baseline"} onClick={() => chooseLayout("baseline")}>Original placement</button>
             </div>
             {layout === "custom" && <span className={styles.customLabel}>Custom placement</span>}
-            <button type="button" className={styles.playButton} onClick={() => { if (elapsed >= HORIZON) setElapsed(0); setRunning((value) => !value); }}>
+            {layout === "candidate" && <span className={styles.customLabel}>Placement {(selectedCandidate ?? 0) + 1}</span>}
+            <button type="button" className={styles.playButton} onClick={() => { setSearching(false); if (elapsed >= HORIZON) setElapsed(0); setRunning((value) => !value); }}>
               <svg viewBox="0 0 20 20" width="17" height="17" fill="currentColor" aria-hidden="true">{running ? <path d="M5 3h3v14H5zm7 0h3v14h-3z" /> : <path d="m5 2 12 8-12 8z" />}</svg>
               {running ? "Pause" : elapsed > 0 && elapsed < HORIZON ? "Resume test" : "Run test"}
             </button>
           </div>
+          <div className={styles.trialToolbar}>
+            <button type="button" onClick={spawnBoat}>Spawn random boat</button>
+            <button type="button" onClick={startSearch}>{searching ? `Testing ${experiment?.completed} / 48…` : "Improve tower placement"}</button>
+            {searching && <button type="button" onClick={() => setSearching(false)}>Pause search</button>}
+            <span>{replayIndex !== null ? `Test boat ${replayIndex + 1} / 200` : layout === "candidate" ? "Learning preview" : `Random scene ${spawnIndex + 1}`}</span>
+          </div>
+          {experiment?.phase === "complete" && <div className={styles.replayToolbar}>
+            <button type="button" onClick={replayBoats}>Watch random boats</button>
+            <label>Test boat <select aria-label="Test boat to replay" value={replayIndex ?? ""} onChange={(event) => selectTestBoat(Number(event.target.value))}>
+              <option value="" disabled>Choose a boat</option>
+              {experiment.testRoutes?.map((_, index) => <option key={index} value={index}>{index + 1}</option>)}
+            </select></label>
+            <button type="button" onClick={() => selectTestBoat(((replayIndex ?? -1) + 1) % 200)}>Next boat</button>
+            {autoReplay && <span>{running ? "Playing all 200" : "Replay paused"} · towers fixed</span>}
+          </div>}
           <div className={styles.mapWrap}>
             <div className={styles.mapTopline}><span>3 × 3 km test arena</span><span>North ↑</span></div>
             <svg ref={svg} className={styles.map} viewBox="0 0 720 680" role="group" tabIndex={0}
@@ -163,6 +290,7 @@ export default function PlacementDemo() {
               <path className={styles.axes} d="M360 40V640M60 340H660" />
               <rect className={styles.boundary} x="60" y="40" width="600" height="600" fill="none" />
               <g clipPath={`url(#${uniqueId}-bounds)`}>
+                <g className={styles.spawnCloud} aria-hidden="true">{spawnCloud.map((sample, index) => { const point = project(sample.start); return <circle key={index} cx={point.x} cy={point.y} r="2.5" />; })}</g>
                 {towers.map((tower, index) => {
                   const { x, y } = project(tower);
                   return <g key={tower.id} className={index === 0 ? styles.sensorOne : styles.sensorTwo}>
@@ -177,6 +305,13 @@ export default function PlacementDemo() {
                 })}
                 <path className={styles.route} d={`M${start.x} ${start.y}L${end.x} ${end.y}`} />
                 <path className={styles.traveled} d={`M${start.x} ${start.y}L${ship.x} ${ship.y}`} />
+                {nearest && (() => {
+                  const source = project(nearest.tower);
+                  return <g className={visible ? styles.trackingLink : styles.nearestLink} pointerEvents="none" data-testid="tower-boat-link">
+                    <path d={`M${source.x} ${source.y}L${ship.x} ${ship.y}`} />
+                    <text x={Math.max(110, Math.min(610, (source.x + ship.x) / 2))} y={(source.y + ship.y) / 2 - 10}>{`${nearest.tower.label} · ${Math.round(nearest.distanceM)} m`}</text>
+                  </g>;
+                })()}
                 <g data-edit="end" className={styles.destination} transform={`translate(${end.x} ${end.y})`}>
                   <circle r="24" fill="transparent" stroke="none" /><circle r="9" /><path d="M-18 0H18M0-18V18" />
                 </g>
@@ -203,11 +338,12 @@ export default function PlacementDemo() {
               </g>
             </svg>
             <div className={styles.mapLegend}><span><i className={styles.legendRange} />600 m range limit</span><span><i className={styles.legendView} />40° camera view</span><span><i className={styles.legendRoute} />Boat route</span></div>
+            <p className={styles.linkHelp}>{visible ? `Shortest visible link: ${sightLine!.tower.label}, ${Math.round(sightLine!.distanceM)} m.` : `Nearest tower: ${nearest?.tower.label}, ${Math.round(nearest?.distanceM ?? 0)} m. No camera view now.`} Solid line = visible contact. Dashed = distance guide.</p>
           </div>
           <div className={styles.transport}>
             <button type="button" className={styles.resetButton} onClick={resetTime} aria-label="Reset test"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6" /></svg></button>
-            <label className={styles.timeline}><span>Test time <strong>{elapsed.toFixed(0)} / {HORIZON} s</strong></span><input aria-label="Test time" type="range" min="0" max={HORIZON} step="1" value={elapsed} onChange={(event) => { setRunning(false); setElapsed(Number(event.target.value)); }} /></label>
-            <label className={styles.playback}><span>Playback</span><select aria-label="Playback speed" value={playback} onChange={(event) => setPlayback(Number(event.target.value))}><option value={1}>1×</option><option value={4}>4×</option><option value={8}>8×</option></select></label>
+            <label className={styles.timeline}><span>Test time <strong>{elapsed.toFixed(0)} / {HORIZON} s</strong></span><input aria-label="Test time" type="range" min="0" max={HORIZON} step="1" value={elapsed} onChange={(event) => { stopAutomation(); setElapsed(Number(event.target.value)); }} /></label>
+            <label className={styles.playback}><span>Playback</span><select aria-label="Playback speed" value={playback} onChange={(event) => setPlayback(Number(event.target.value))}><option value={1}>1×</option><option value={4}>4×</option><option value={8}>8×</option><option value={32}>32×</option></select></label>
           </div>
         </div>
         <aside className={styles.controls} aria-label="Placement test controls">
@@ -221,10 +357,10 @@ export default function PlacementDemo() {
               <label>North (m)<input aria-label={`${toolLabels[edit]} north position`} type="number" min={-HALF} max={HALF} step="50" value={Math.round(activePoint.north)} onChange={(event) => { const next = event.currentTarget.valueAsNumber; if (Number.isFinite(next)) movePoint(edit, { ...activePoint, north: next }); }} /></label>
               <label>East (m)<input aria-label={`${toolLabels[edit]} east position`} type="number" min={-HALF} max={HALF} step="50" value={Math.round(activePoint.east)} onChange={(event) => { const next = event.currentTarget.valueAsNumber; if (Number.isFinite(next)) movePoint(edit, { ...activePoint, east: next }); }} /></label>
             </div>
-            <label className={styles.speed}><span>Boat speed <strong>{route.speedMps} m/s</strong></span><input aria-label="Boat speed" type="range" min="0" max="20" step="1" value={route.speedMps} onChange={(event) => { setRoute((value) => ({ ...value, speedMps: Number(event.target.value) })); resetTime(); }} /></label>
+            <label className={styles.speed}><span>Boat speed <strong>{route.speedMps.toFixed(1)} m/s</strong></span><input aria-label="Boat speed" type="range" min="0" max="20" step="0.1" value={route.speedMps} onChange={(event) => { stopAutomation(); setReplayIndex(null); setRoute((value) => ({ ...value, speedMps: Number(event.target.value) })); resetTime(); }} /></label>
           </div>
           <div className={styles.liveResult} data-visible={visible}>
-            <div className={styles.signalLabel}><span className={styles.signalDot} />{visible ? "In camera view now" : acquired ? "Contact seen earlier" : "Searching for the boat"}</div>
+            <div className={styles.signalLabel}><span className={styles.signalDot} />{visible ? `${sightLine!.tower.label} has a view` : acquired ? "Contact seen earlier" : "Searching for the boat"}</div>
             <div className={styles.resultValue}>{acquired ? `${result.detectedAt!.toFixed(0)} s` : elapsed >= HORIZON ? "No sighting" : "—"}</div>
             <p aria-live="polite">{acquired ? `First sighting by ${firstTower?.label ?? "a tower"}, checked every second.` : elapsed >= HORIZON ? "No sighting at the 1-second checks within 180 seconds." : "Run or scrub the test. Sightings are checked every second."}</p>
           </div>
@@ -233,15 +369,17 @@ export default function PlacementDemo() {
             <p>First sighting, checked every second</p>
             <dl>
               <div><dt>Original</dt><dd>{timeLabel(original.detectedAt)}</dd></div>
-              <div className={styles.learnedResult}><dt>Learned</dt><dd>{timeLabel(learned.detectedAt)}</dd></div>
-              {layout === "custom" && <div><dt>Your placement</dt><dd>{timeLabel(result.detectedAt)}</dd></div>}
+              <div className={styles.learnedResult}><dt>{experiment?.phase === "complete" ? "Best from round" : "Learned"}</dt><dd>{timeLabel(learned.detectedAt)}</dd></div>
+              {(layout === "custom" || layout === "candidate") && <div><dt>{layout === "custom" ? "Your placement" : `Placement ${(selectedCandidate ?? 0) + 1}`}</dt><dd>{timeLabel(result.detectedAt)}</dd></div>}
             </dl>
             <span className={styles.deadline}>No sighting = no sample inside a tower view within 180 s.</span>
           </div>
         </aside>
       </div>
+      {experimentError && <p role="alert" className={styles.experimentError}>{experimentError} Pause the search and try again.</p>}
+      <PlacementExperimentPanel experiment={experiment} busy={searching} selectedCandidate={selectedCandidate} onStart={startSearch} onCancel={() => setSearching(false)} onSelectCandidate={selectCandidate} onReplay={replayBoats} />
       <footer className={styles.footer}>
-        <div><Icon name="check" /><p><strong>{data.benchmark.percentFaster.toFixed(1)}% lower capped detection time.</strong> Two towers + vehicles, {data.benchmark.episodes} unseen synthetic scenarios. Misses count as 180 s.</p></div>
+        <div><Icon name="check" /><p><strong>{randomEvidence.learned.detected} / {randomEvidence.learned.episodes.toLocaleString("en-US")} random boats found in five saved rounds.</strong> Saved pair: {randomEvidence.baseline.detected} found. Capped mean: {randomEvidence.baseline.meanCappedS.toFixed(1)} → {randomEvidence.learned.meanCappedS.toFixed(1)} s. One round regressed. Tower-only synthetic tests.</p></div>
         <p>This interactive test shows ideal tower visibility only. Flat local arena; terrain, camera misses and vehicle search are excluded. Learned positions are the best tested pair, pending ArcticSim validation.</p>
       </footer>
     </section>
