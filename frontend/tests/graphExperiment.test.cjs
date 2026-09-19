@@ -138,3 +138,24 @@ test("many random replays do not evict the trained model they depend on", async 
   const model = await h.invoke(h.request({ method: "GET", query: { id: "fixed-job-id", download: "model" } }));
   assert.equal(model.status, 200); assert.equal(model.body.ok, true);
 });
+
+test("page reload recovers the latest training job without starting another process", async () => {
+  const h = harness();
+  const latest = () => h.invoke(h.request({ method: "GET", query: { latestTraining: "1" } }));
+  assert.equal((await latest()).body.status, "idle");
+  await h.invoke(h.request());
+  assert.equal((await latest()).body.id, "fixed-job-id");
+  assert.equal((await latest()).body.status, "running");
+  h.child.emit("close", 0);
+  const complete = await latest();
+  assert.equal(complete.body.status, "complete");
+  assert.equal(complete.body.result.ok, true);
+  await h.invoke(h.request({ body: { kind: "replay", seed: 9 } }));
+  assert.equal((await latest()).body.id, "fixed-job-id");
+  h.child.emit("close", 0);
+  const next = await h.invoke(h.request({ body: { kind: "train", seed: 10 } }));
+  assert.equal((await latest()).body.id, next.body.id);
+  assert.equal(h.spawns.length, 3);
+  assert.equal((await h.invoke(h.request({ method: "GET", query: { latestTraining: "1" }, socket: { remoteAddress: "10.0.0.2" } }))).status, 403);
+  h.child.emit("close", 0);
+});

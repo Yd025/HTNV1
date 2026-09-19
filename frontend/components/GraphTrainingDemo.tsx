@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type PointerEvent } from "react";
 import { assetLabel, cameraFootprint, drawFrame, gridPoint, isQuad, nearestCell, nearestSource, type ArcticProfile, type GraphCandidate, type GraphJob, type GraphMetrics, type GraphReplay, type GraphReport, type GraphTower, type XY } from "../lib/graphExperiment";
 import LiveMissionInsights from "./LiveMissionInsights";
+import TrainingRunMonitor from "./TrainingRunMonitor";
 import styles from "./GraphTrainingDemo.module.css";
 
 const INITIAL_SEED = 190926;
@@ -77,8 +78,11 @@ export default function GraphTrainingDemo() {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [showGraph, setShowGraph] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
+  const [inspectedTrainingIndex, setInspectedTrainingIndex] = useState<number | null>(null);
+  const trainingMonitorRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<SVGSVGElement>(null);
   const busy = starting || job?.status === "running";
+  const training = job?.kind === "train" && job.status === "running";
   const frameIndex = replay ? Math.max(0, replay.frames.findIndex(item => item.t > playhead) === -1 ? replay.frames.length - 1 : replay.frames.findIndex(item => item.t > playhead) - 1) : 0;
   const frame = replay?.frames[frameIndex];
   const visualFrame = useMemo(() => replay && replay.frames.length ? drawFrame(replay, reducedMotion ? frame?.t ?? 0 : playhead) : null, [replay, playhead, reducedMotion, frame?.t]);
@@ -88,6 +92,7 @@ export default function GraphTrainingDemo() {
   const firstHit = replay?.frames.find(item => item.sources.length > 0)?.t;
   const currentPoint = mode === "boat" ? boatStart ?? replay?.frames[0]?.boat : mode.startsWith("tower") ? towers[mode === "tower0" ? 0 : 1] : null;
   const currentCandidate = selectedCandidate === null ? null : history.find(candidate => candidate.index === selectedCandidate);
+  const inspectedCandidate = inspectedTrainingIndex === null ? null : history.find(candidate => candidate.index === inspectedTrainingIndex) ?? null;
 
   function useReplay(value: GraphReplay, newTowers?: GraphTower[]) {
     setReplay(value); setTowers(value.towers ?? newTowers ?? []); setPlayhead(0); setRunning(false); setCustom(false); setBoatStart(null);
@@ -99,11 +104,21 @@ export default function GraphTrainingDemo() {
   }
   useEffect(() => {
     let active = true;
-    Promise.all([readJSON("/experiments/arctic-profile.json"), readJSON("/experiments/graph-report.json")]).then(([terrain, results]) => {
+    Promise.all([readJSON("/experiments/arctic-profile.json"), readJSON("/experiments/graph-report.json"), readJSON("/api/graph-experiment?latestTraining=1").catch(() => null)]).then(([terrain, results, latest]) => {
       if (!active) return; setProfile(terrain); useReport(results);
+      if (latest?.id && latest.status === "running") {
+        setJob(latest); setNotice("Reconnected to the training run already in progress.");
+        if (Number.isInteger(latest.progress?.seed)) setSeed(latest.progress.seed);
+      } else if (latest?.id && latest.status === "complete" && latest.result) {
+        useReport(latest.result); setModelJob(latest.id);
+      }
     }).catch(cause => { if (active) setError(`The saved experiment is unavailable. ${cause.message}`); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (training) trainingMonitorRef.current?.scrollIntoView({ behavior: reducedMotion ? "instant" : "smooth", block: "start" });
+  }, [training, inspectedTrainingIndex]);
 
   useEffect(() => {
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -121,10 +136,6 @@ export default function GraphTrainingDemo() {
         const value: GraphJob = await readJSON(`/api/graph-experiment?id=${job.id}`);
         if (!active) return;
         setJob(value);
-        const latest = value.progress?.history?.[value.progress.history.length - 1];
-        if (value.kind === "train" && value.status === "running" && latest) {
-          setTowers(latest.towers); setSelectedCandidate(latest.index); setCustom(true); setPlayhead(0);
-        }
         if (value.status === "complete" && value.result) {
           if (value.kind === "train") { useReport(value.result as GraphReport); setModelJob(value.id); setNotice("Training finished. The selected model is now shown with its untouched test results."); }
           else { useReplay(value.result as GraphReplay, towers); setReplayIndex(null); setRunning(true); setNotice("New water-route test ready. The boat position was hidden from the search policy."); }
@@ -165,6 +176,7 @@ export default function GraphTrainingDemo() {
 
   async function startJob(kind: "train" | "replay", random = false) {
     setError(null); setStarting(true); setRunning(false); setAutoSequence(false);
+    if (kind === "train") setInspectedTrainingIndex(null);
     const nextSeed = kind === "train" ? seed : random ? (randomSeed + 7919) % 2147483647 : replay?.seed ?? randomSeed;
     if (random) setRandomSeed(nextSeed);
     const requestedStart = random ? null : boatStart ?? routeStartOverride;
@@ -205,6 +217,7 @@ export default function GraphTrainingDemo() {
     setRouteStartOverride(null); setAutoSequence(false);
   }
   function chooseCandidate(candidate: GraphCandidate) {
+    if (training) { setInspectedTrainingIndex(candidate.index); return; }
     setTowers(candidate.towers); setSelectedCandidate(candidate.index); setCustom(true); setRunning(false); setAutoSequence(false); setPlayhead(0); setReplayIndex(null); setBoatStart(null);
     setNotice(`Placement ${candidate.index + 1}: ${pct(candidate.train.detectionRate)} training detection. Run this placement to test it with the selected model.`);
   }
@@ -216,12 +229,15 @@ export default function GraphTrainingDemo() {
   const sensorFor = (id: string) => profile.sensors[id.includes("tower") ? "tower" : isQuad(id) ? "quad" : "plane"];
   const trainedRate = report.metrics.trained.detectionRate;
   const difference = trainedRate - report.metrics.baseline.detectionRate;
+  const progress = job?.progress;
+  const progressTotal = progress?.phase === "validation" ? progress.validationTotal : progress?.testTotal ?? progress?.total;
+  const progressCompleted = progress?.phase === "validation" ? progress.validationCompleted : progress?.testCompleted ?? progress?.completed;
   const togglePlayback = () => { if (frameIndex >= replay!.frames.length - 1) setPlayhead(0); setAutoSequence(false); setRunning(!running); };
   const seek = (seconds: number) => { setRunning(false); setAutoSequence(false); setPlayhead(seconds); };
 
   return <section className={styles.demo} aria-labelledby={`${unique}-title`}>
     <header className={styles.heading}><div><h2 id={`${unique}-title`}>Teach the fleet to search</h2><p>Two towers. Two drones. Random boats on the Fort Ross water graph.</p></div><span className={styles.modelTag}>Terrain-based training · simulated detections</span></header>
-    <div className={styles.workbench}>
+    {!training && <div className={styles.workbench}>
       <div className={styles.stage}>
         <div className={styles.toolbar}>
           <button disabled={busy} onClick={() => startJob("replay", true)}>Spawn random boat</button>
@@ -278,16 +294,16 @@ export default function GraphTrainingDemo() {
         <div className={styles.viewOptions}><label><input type="checkbox" checked={showCones} onChange={e => setShowCones(e.target.checked)} />Radar sweep guides</label><label><input type="checkbox" checked={showFootprints} onChange={e => setShowFootprints(e.target.checked)} />Exact camera footprints</label><label><input type="checkbox" checked={showGraph} onChange={e => setShowGraph(e.target.checked)} />Navigable water graph</label></div>
         <div className={styles.sensorFacts}><h3>Verified configuration</h3><p>Towers 60° · quad 114.6° · plane 69° horizontal views.</p><p>Boat 3 m/s · quad 10 m/s · plane 15 m/s.</p><p>Camera reach depends on view, altitude and terrain. Detection is not calibrated.</p></div>
       </aside>
-    </div>
+    </div>}
     <div className={styles.notice} role="status" aria-live="polite">{notice || "Choose a saved unseen mission, spawn a new boat, or move the towers and rerun the test."}</div>
     {error && <p className={styles.error} role="alert">{error}</p>}
-    <LiveMissionInsights replay={replay!} elapsedS={playhead} horizonS={report.protocol.horizonS} stepS={report.protocol.stepS} freshnessS={report.protocol.freshnessS} running={running} pending={custom || busy} onToggle={togglePlayback} onSeek={seek} />
+    {training ? <div ref={trainingMonitorRef} style={{ scrollMarginTop: 80 }}><TrainingRunMonitor profile={profile} progress={job.progress} inspectedCandidate={inspectedCandidate} onFollow={() => setInspectedTrainingIndex(null)} stepS={report.protocol.stepS} freshnessS={report.protocol.freshnessS} /></div> : <LiveMissionInsights replay={replay!} elapsedS={playhead} horizonS={report.protocol.horizonS} stepS={report.protocol.stepS} freshnessS={report.protocol.freshnessS} running={running} pending={custom || busy} onToggle={togglePlayback} onSeek={seek} />}
     <div className={styles.learning}>
       <div className={styles.learningHeader}><div><h3>Learning history</h3><p>Learn boat movement, compare placements and search policies, then freeze the winner before testing.</p></div><div className={styles.trainActions}><label>Training seed<input aria-label="Training seed" type="number" min="0" max="2147483647" step="1" value={seed} disabled={busy} onChange={e => setSeed(Math.max(0, Math.min(2147483647, Math.trunc(Number(e.target.value) || 0))))} /></label><button className={styles.primary} disabled={busy} onClick={() => startJob("train")}>{job?.kind === "train" && job.status === "running" ? "Training in progress…" : "Retrain model"}</button></div></div>
-      {job?.kind === "train" && job.status === "running" && <div className={styles.progress}><progress aria-label="Model training progress" max={job.progress?.testTotal ?? job.progress?.total ?? report.protocol.candidates} value={job.progress?.testCompleted ?? job.progress?.completed ?? history.length} /><span>{job.progress?.phase === "test" ? "Testing frozen model" : job.progress?.phase === "validation" ? "Validating candidates" : "Learning candidates"} · {job.progress?.testCompleted ?? job.progress?.completed ?? 0} / {job.progress?.testTotal ?? job.progress?.total ?? report.protocol.candidates}</span></div>}
+      {training && <div className={styles.progress}><progress aria-label="Model training progress" max={progressTotal ?? report.protocol.candidates} value={progressCompleted ?? 0} /><span>{progress?.phase === "test" ? "Testing frozen model" : progress?.phase === "validation" ? "Validating candidates" : "Learning candidates"} · {progressCompleted ?? 0} / {progressTotal ?? report.protocol.candidates}</span></div>}
       <div className={styles.protocol}><span>{report.protocol.motionTrajectories} motion trajectories</span><span>{report.protocol.trainEpisodes} training missions</span><span>{report.protocol.validationEpisodes} validation missions</span><span>{report.protocol.testEpisodes} untouched test missions</span></div>
-      <div className={styles.candidates} aria-label="Learned tower placements">{history.map(candidate => <button key={candidate.index} disabled={busy} aria-pressed={selectedCandidate === candidate.index} title={`Inspect placement ${candidate.index + 1}: ${pct(candidate.train.detectionRate)} training detection`} onClick={() => chooseCandidate(candidate)}><span>{candidate.index + 1}</span><i style={{ height: `${Math.max(3, candidate.train.detectionRate * .46)}px` }} /><small>{Math.round(candidate.train.detectionRate)}%</small></button>)}</div>
-      <p className={styles.historyNote}>{currentCandidate ? `Inspecting placement ${currentCandidate.index + 1} · training ${pct(currentCandidate.train.detectionRate)} · capped delay ${num(currentCandidate.train.meanCappedS, " s")}. Run this placement to simulate it using the selected trained movement model.` : `Validation selected placement ${report.selectedIndex + 1}. Bars show training detection for every tested placement and policy. Select a placement to inspect it; saved test scores below remain tied to this winner.`}</p>
+      <div className={styles.candidates} aria-label="Learned tower placements">{history.map(candidate => <button key={candidate.index} disabled={training ? !candidate.preview : busy} aria-pressed={(training ? inspectedTrainingIndex : selectedCandidate) === candidate.index} title={`Inspect placement ${candidate.index + 1}: ${pct(candidate.train.detectionRate)} training detection`} onClick={() => chooseCandidate(candidate)}><span>{candidate.index + 1}</span><i style={{ height: `${Math.max(3, candidate.train.detectionRate * .46)}px` }} /><small>{Math.round(candidate.train.detectionRate)}%</small></button>)}</div>
+      <p className={styles.historyNote}>{training ? inspectedCandidate ? `Inspecting the recorded mission for placement ${inspectedCandidate.index + 1}. Training continues in the background; choose Follow current training to return.` : "Following the current training candidate. Select a completed placement to inspect its recorded mission and measured output." : currentCandidate ? `Inspecting placement ${currentCandidate.index + 1} · training ${pct(currentCandidate.train.detectionRate)} · capped delay ${num(currentCandidate.train.meanCappedS, " s")}. Run this placement to simulate it using the selected trained movement model.` : `Validation selected placement ${report.selectedIndex + 1}. Bars show training detection for every tested placement and policy. Select a placement to inspect it; saved test scores below remain tied to this winner.`}</p>
       <div className={styles.trainingChart}><Plot label={job?.kind === "train" && job.status === "running" ? "Training results arriving live" : "Completed training candidates"} rows={history.map(candidate => ({ x: candidate.index + 1, values: [candidate.train.detectionRate] }))} series={[{ label: "Candidate training detection", color: "var(--status)" }]} xLabel="Placement + policy candidate" maxX={Math.max(report.protocol.candidates, history.length)} /></div>
       {job?.kind === "train" && job.status === "running" && job.progress?.partialMetrics && <div className={styles.partialResults}>
         <h3>Unseen evaluation, arriving live</h3><p>Each column uses only the missions evaluated so far. The completed comparison is published after all three methods finish.</p>

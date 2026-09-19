@@ -61,9 +61,31 @@ def snap_towers(terrain,values):
     return towers_for(terrain,output)
 
 
-def evaluate(terrain,config,episodes,motion,horizon,step,record=False):
-    rows=[run_episode(terrain,config,e,motion,horizon,step,record) for e in episodes]
+def evaluate(terrain,config,episodes,motion,horizon,step,record=False,*,capture_preview=False,on_progress=None):
+    """Evaluate unchanged missions, optionally recording the first real example.
+
+    Progress observes completed rows only. Recording changes output frames, not
+    sensor sampling, planning, random draws, candidate selection or scores.
+    """
+    rows=[]
+    for index,episode in enumerate(episodes):
+        rows.append(run_episode(terrain,config,episode,motion,horizon,step,record or (capture_preview and index==0)))
+        completed=index+1
+        if on_progress and (completed==1 or completed%4==0 or completed==len(episodes)):
+            on_progress(summarize(rows),rows[0] if capture_preview else None,completed,len(episodes))
     return summarize(rows),rows
+
+
+def training_preview(phase,candidate_index,example,episode_total,policy=None):
+    """Stable recorded example from the first actually evaluated episode."""
+    if example is None:
+        return None
+    value={"id":f"{phase}:{candidate_index}:{policy or 'candidate'}:{example['seed']}",
+           "phase":phase,"candidateIndex":candidate_index,"episodeIndex":0,
+           "episodeTotal":episode_total,"replay":example}
+    if policy is not None:
+        value["policy"]=policy
+    return value
 
 
 def progress_snapshot(completed_rows,evaluating_policy,horizon_s,step_s):
@@ -110,6 +132,7 @@ def train(args):
     history=[]
     best_config=initial
     best_score=None
+    best_index=None
     for index in range(protocol["candidates"]):
         if index==0: config=initial
         else:
@@ -124,21 +147,45 @@ def train(args):
                     point=np.asarray([tower["x"],tower["y"]])+rng.normal(0,500 if index<6 else 220,2)
                 values.append({"x":float(point[0]),"y":float(point[1]),"heading":float(tower["heading"]+rng.normal(0,35))})
             config={"towers":snap_towers(terrain,values),"weights":np.clip(np.asarray(best_config["weights"])*np.exp(rng.normal(0,.35,5)),.05,15).tolist()}
-        score,_=evaluate(terrain,config,train_episodes,motion,h,dt)
+        active_candidate={"index":index,"towers":config["towers"],"weights":config["weights"]}
+        progress({"phase":"training","seed":seed,"completed":index,"total":protocol["candidates"],"history":history,
+                  "activeCandidate":active_candidate,"candidateCompleted":0,"candidateEpisodes":len(train_episodes),
+                  "candidateMetrics":None,"bestCandidate":best_index,"preview":None})
+        def training_progress(partial,example,completed,total):
+            progress({"phase":"training","seed":seed,"completed":index,"total":protocol["candidates"],"history":history,
+                      "activeCandidate":active_candidate,"candidateCompleted":completed,"candidateEpisodes":total,
+                      "candidateMetrics":partial,"bestCandidate":best_index,
+                      "preview":training_preview("training",index,example,total)})
+        score,training_rows=evaluate(terrain,config,train_episodes,motion,h,dt,capture_preview=True,on_progress=training_progress)
+        preview=training_preview("training",index,training_rows[0],len(train_episodes))
         accepted=best_score is None or objective(score)<objective(best_score)
-        if accepted: best_config,best_score=config,score
-        history.append({"index":index,"towers":config["towers"],"weights":config["weights"],"train":score,"accepted":accepted})
-        progress({"phase":"training","seed":seed,"completed":index+1,"total":protocol["candidates"],"history":history})
+        if accepted: best_config,best_score,best_index=config,score,index
+        history.append({"index":index,"towers":config["towers"],"weights":config["weights"],"train":score,"accepted":accepted,"preview":preview})
+        progress({"phase":"training","seed":seed,"completed":index+1,"total":protocol["candidates"],"history":history,
+                  "activeCandidate":active_candidate,"candidateCompleted":len(train_episodes),"candidateEpisodes":len(train_episodes),
+                  "candidateMetrics":score,"bestCandidate":best_index,"preview":preview})
         print(f"Candidate{index+1}/{protocol['candidates']}: {score['detectionRate']:.1f}% detected; cappedmean{score['meanCappedS']:.1f}s",flush=True)
     # Initial plus three training finalists; validation decides, never the test.
     finalists={0,*[c["index"] for c in sorted(history,key=lambda c:(objective(c["train"]),c["index"]))[:3]]}
     progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],
-              "history":history,"validationCompleted":0,"validationTotal":len(finalists)})
+              "history":history,"validationCompleted":0,"validationTotal":len(finalists),"bestCandidate":best_index,"preview":None})
     for validation_index,i in enumerate(sorted(finalists)):
         config={"towers":history[i]["towers"],"weights":history[i]["weights"]}
-        history[i]["validation"],_=evaluate(terrain,config,validation,motion,h,dt)
+        active_candidate={"index":i,"towers":config["towers"],"weights":config["weights"]}
+        progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
+                  "validationCompleted":validation_index,"validationTotal":len(finalists),"activeCandidate":active_candidate,
+                  "candidateCompleted":0,"candidateEpisodes":len(validation),"candidateMetrics":None,"bestCandidate":best_index,"preview":None})
+        def validation_progress(partial,example,completed,total):
+            progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
+                      "validationCompleted":validation_index,"validationTotal":len(finalists),"activeCandidate":active_candidate,
+                      "candidateCompleted":completed,"candidateEpisodes":total,"candidateMetrics":partial,"bestCandidate":best_index,
+                      "preview":training_preview("validation",i,example,total)})
+        history[i]["validation"],validation_rows=evaluate(terrain,config,validation,motion,h,dt,capture_preview=True,on_progress=validation_progress)
         progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],
-                  "history":history,"validationCompleted":validation_index+1,"validationTotal":len(finalists)})
+                  "history":history,"validationCompleted":validation_index+1,"validationTotal":len(finalists),
+                  "activeCandidate":active_candidate,"candidateCompleted":len(validation),"candidateEpisodes":len(validation),
+                  "candidateMetrics":history[i]["validation"],"bestCandidate":best_index,
+                  "preview":training_preview("validation",i,validation_rows[0],len(validation))})
     winner=min((history[i] for i in finalists),key=lambda c:(objective(c["validation"]),c["index"]))
     selected={"towers":winner["towers"],"weights":winner["weights"]}
     model={"schemaVersion":1,"mode":"synthetic-terrain-graph","seed":seed,"profileHash":profile_hash(profile),
@@ -147,20 +194,28 @@ def train(args):
         raise ValueError("Experiment source changed during training; rerun with stable code")
     save(args.model_output,model)
     progress({"phase":"test","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
-              "testCompleted":0,"testTotal":protocol["testEpisodes"]*3,**progress_snapshot({},"baseline",h,dt)})
+              "testCompleted":0,"testTotal":protocol["testEpisodes"]*3,"bestCandidate":winner["index"],"preview":None,
+              **progress_snapshot({},"baseline",h,dt)})
     tests=[scenario(terrain,seed+400000+i,h,dt) for i in range(protocol["testEpisodes"])]
     result_rows={}
     count=0
     for label,config,learned_motion in (("baseline",baseline,None),("untrained",untrained,None),("trained",selected,motion)):
         rows=[]
+        candidate_index=winner["index"] if label=="trained" else None
+        active_candidate={"index":candidate_index,"towers":config["towers"],"weights":config["weights"]}
         progress({"phase":"test","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
-                  "testCompleted":count,"testTotal":len(tests)*3,**progress_snapshot(result_rows,label,h,dt)})
-        for episode in tests:
-            rows.append(run_episode(terrain,config,episode,learned_motion,h,dt,label=="trained"))
+                  "testCompleted":count,"testTotal":len(tests)*3,"activeCandidate":active_candidate,
+                  "candidateCompleted":0,"candidateEpisodes":len(tests),"candidateMetrics":None,"bestCandidate":winner["index"],"preview":None,
+                  **progress_snapshot(result_rows,label,h,dt)})
+        for episode_index,episode in enumerate(tests):
+            rows.append(run_episode(terrain,config,episode,learned_motion,h,dt,label=="trained" or episode_index==0))
             count+=1
-            if count%10==0 or len(rows)==len(tests):
+            if len(rows)==1 or count%10==0 or len(rows)==len(tests):
                 progress({"phase":"test","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
-                          "testCompleted":count,"testTotal":len(tests)*3,**progress_snapshot({**result_rows,label:rows},label,h,dt)})
+                          "testCompleted":count,"testTotal":len(tests)*3,"activeCandidate":active_candidate,
+                          "candidateCompleted":len(rows),"candidateEpisodes":len(tests),"candidateMetrics":summarize(rows),
+                          "bestCandidate":winner["index"],"preview":training_preview("test",candidate_index,rows[0],len(tests),label),
+                          **progress_snapshot({**result_rows,label:rows},label,h,dt)})
         result_rows[label]=rows
         print(f"{label}: {summarize(rows)}",flush=True)
     metrics={label:summarize(rows) for label,rows in result_rows.items()}
@@ -190,7 +245,9 @@ def train(args):
         raise ValueError("Experiment source changed during evaluation; rerun with stable code")
     save(args.output,report)
     progress({"phase":"complete","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,"metrics":metrics,
-              "testCompleted":count,"testTotal":len(tests)*3,**progress_snapshot(result_rows,"trained",h,dt)})
+              "testCompleted":count,"testTotal":len(tests)*3,"bestCandidate":winner["index"],
+              "preview":training_preview("test",winner["index"],result_rows["trained"][0],len(tests),"trained"),
+              **progress_snapshot(result_rows,"trained",h,dt)})
     return report
 
 

@@ -32,8 +32,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const remote = req.socket.remoteAddress ?? "";
   if (!loopback(hostname) || !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)) return res.status(403).json({ error: "Training is available from this computer only." });
   if (req.method === "GET") {
-    const id = typeof req.query.id === "string" ? req.query.id : "";
+    const latestTraining = req.query.latestTraining === "1";
+    const id = latestTraining
+      ? [...jobs.values()].reverse().find(item => item.kind === "train")?.id ?? ""
+      : typeof req.query.id === "string" ? req.query.id : "";
     const job = jobs.get(id);
+    if (latestTraining && !job) return res.status(200).json({ status: "idle" });
     if (!job) return res.status(404).json({ error: "This experiment is no longer available. Start a new run." });
     if (req.query.download === "result" || req.query.download === "model") {
       if (job.status !== "complete" || (req.query.download === "model" && job.kind !== "train")) return res.status(409).json({ error: "This download is not ready yet." });

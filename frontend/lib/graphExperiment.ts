@@ -13,7 +13,12 @@ export interface GraphMetrics {
   bySource?: Record<string, number>;
 }
 export interface GraphReplay { seed: number; towers?: GraphTower[]; frames: GraphFrame[]; metrics: GraphMetrics; firstDetectionS?: number | null }
-export interface GraphCandidate { index: number; towers: GraphTower[]; weights?: number[]; train: GraphMetrics; validation?: GraphMetrics; accepted?: boolean }
+export interface GraphTrainingPreview {
+  id: string; phase: "training" | "validation" | "test"; candidateIndex: number | null;
+  episodeIndex: number; episodeTotal: number; policy?: "baseline" | "untrained" | "trained";
+  replay: GraphReplay;
+}
+export interface GraphCandidate { index: number; towers: GraphTower[]; weights?: number[]; train: GraphMetrics; validation?: GraphMetrics; accepted?: boolean; preview?: GraphTrainingPreview }
 export interface GraphReport {
   schemaVersion: number; seed: number; profileHash: string;
   selectedIndex: number;
@@ -33,7 +38,16 @@ export interface ArcticProfile {
   towerDefaults: GraphTower[];
   frame?: Record<string, unknown>;
 }
-export interface GraphJob { id: string; kind: "train" | "replay"; status: "running" | "complete" | "failed"; error?: string; progress?: { phase?: string; completed?: number; total?: number; testCompleted?: number; testTotal?: number; history?: GraphCandidate[]; evaluatingPolicy?: string; partialMetrics?: Partial<Record<"baseline" | "untrained" | "trained", GraphMetrics>>; partialDetectionCurve?: { t: number; baseline: number | null; untrained: number | null; trained: number | null }[] }; result?: GraphReport | GraphReplay }
+export interface GraphJob { id: string; kind: "train" | "replay"; status: "running" | "complete" | "failed"; error?: string; progress?: {
+  seed?: number; phase?: string; completed?: number; total?: number; testCompleted?: number; testTotal?: number;
+  validationCompleted?: number; validationTotal?: number;
+  history?: GraphCandidate[]; evaluatingPolicy?: string;
+  activeCandidate?: { index: number | null; towers: GraphTower[]; weights: number[] };
+  candidateCompleted?: number; candidateEpisodes?: number; candidateMetrics?: GraphMetrics | null;
+  bestCandidate?: number | null; preview?: GraphTrainingPreview | null;
+  partialMetrics?: Partial<Record<"baseline" | "untrained" | "trained", GraphMetrics>>;
+  partialDetectionCurve?: { t: number; baseline: number | null; untrained: number | null; trained: number | null }[];
+}; result?: GraphReport | GraphReplay }
 
 export const assetLabel = (id: string) => id.includes("tower") ? (id.endsWith("2") ? "Tower 2" : "Tower 1") : /quad|copter/.test(id) ? "Quadcopter" : "Fixed-wing";
 export const isQuad = (id: string) => /quad|copter/.test(id);
