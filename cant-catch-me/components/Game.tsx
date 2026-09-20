@@ -3,8 +3,12 @@ import Scene, { type CameraMode, type Models } from './Scene';
 import Radar from './Radar';
 import LoadingScreen from './LoadingScreen';
 import TowerWarning from './TowerWarning';
-import { OpeningAttemptRecorder, flushPendingAttempts, requestLearningStart } from '../lib/learningClient';
+import BadgePanel from './BadgePanel';
+import { useBadgeController } from '../hooks/useBadgeController';
+import { BadgeInput } from '../lib/badgeInput';
+import type { BadgeButtons } from '../lib/badgeControllerTypes';
 import { GAME_RULES, createGame, formatTime, startGame, togglePause, type GameState, type InputState, type WorldData } from '../lib/game';
+import { OpeningAttemptRecorder, flushPendingAttempts, requestLearningStart } from '../lib/learningClient';
 
 function Icon({name,...props}:{name:'boat'|'arrow'|'pause'|'play'|'retry'|'close'|'pin'|'expand'|'camera'|'look'|'boost';className?:string}) {
   const paths: Record<string,ReactNode>={
@@ -23,7 +27,6 @@ class SceneBoundary extends Component<{children:ReactNode},{failed:boolean}> {
 }
 
 const snapshot=(s:GameState):GameState=>({...s,boat:{...s.boat},drones:s.drones.map(drone=>({...drone})),plane:{...s.plane},towers:s.towers.map(t=>({...t})),pickups:s.pickups.map(pickup=>({...pickup})),lastKnown:s.lastKnown?{...s.lastKnown}:null});
-// Boat dynamics and faster detected pursuit have their own score record.
 // Keep earlier long-range spotting scores separate from overhead-only play.
 const BEST_KEY='cant-catch-me-best-overhead-spotting-v2';
 const formatDistance=(metres:number)=>metres>=1000?`${(metres/1000).toFixed(1)} km`:`${Math.round(metres)} m`;
@@ -66,12 +69,17 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const [initialGame]=useState(()=>createGame(world,Math.floor(Math.random()*0x100000000)));
   const game=useRef(initialGame),input=useRef<InputState>({throttle:0,steer:0});
   const lookBack=useRef(false);
+  const badgeInput=useRef(new BadgeInput()),keyboardLookBack=useRef(false);
+  const [badgeOpen,setBadgeOpen]=useState(false),[badgeNotice,setBadgeNotice]=useState('');
+  const badgeButton=useRef<HTMLButtonElement>(null),badgeClose=useRef<HTMLButtonElement>(null);
+  const badgeWasOpen=useRef(false);
   const [cameraMode,setCameraMode]=useState<CameraMode>('helm'),[motionEnabled,setMotionEnabled]=useState(true);
   const [hud,setHud]=useState(()=>snapshot(game.current)),[best,setBest]=useState(0),[sceneReady,setSceneReady]=useState(false),[reducedMotion,setReducedMotion]=useState(false),[controls,setControls]=useState(false);
   const keys=useRef(new Set<string>()),touch=useRef(new Set<string>()),newBest=useRef(false),main=useRef<HTMLElement>(null),action=useRef<HTMLButtonElement>(null),guideButton=useRef<HTMLButtonElement>(null),guideClose=useRef<HTMLButtonElement>(null);
   const [loopNotice,setLoopNotice]=useState(false);
   const [starting,setStarting]=useState(false);
   const startingRef=useRef(false),mounted=useRef(true),startController=useRef<AbortController|null>(null);
+  const badgeLostDuringStart=useRef(false);
   const recorder=useRef<OpeningAttemptRecorder|null>(null);
   const reported=useRef('ready'),bestRecord=useRef(0),bestAtRunStart=useRef(0);
   const saveBest=useCallback((updateDisplay=true)=>{
@@ -95,30 +103,32 @@ function Session({world,models}:{world:WorldData;models:Models}) {
     reported.current=s.status;
   },[saveBest]);
   const ready=useCallback(()=>setSceneReady(true),[]);
-  const clearInput=useCallback(()=>{keys.current.clear();touch.current.clear();lookBack.current=false;input.current={throttle:0,steer:0};},[]);
+  const clearInput=useCallback(()=>{keys.current.clear();touch.current.clear();badgeInput.current.clear();keyboardLookBack.current=false;lookBack.current=false;input.current={throttle:0,steer:0};},[]);
   const changeCamera=useCallback(()=>{setCameraMode(previous=>previous==='helm'?'chase':'helm');if(game.current.status==='playing')main.current?.focus();},[]);
   const changeMotion=()=>setMotionEnabled(previous=>{try{localStorage.setItem('cant-catch-me-camera-motion',String(!previous));}catch{}return !previous;});
   const refreshInput=useCallback(()=>{
     if(game.current.status!=='playing'){input.current={throttle:0,steer:0};lookBack.current=false;return;}
     const pressed=(...codes:string[])=>codes.some(c=>keys.current.has(c)||touch.current.has(c));
-    input.current={throttle:pressed('KeyS','ArrowDown')?-1:Number(pressed('KeyW','ArrowUp')),steer:Number(pressed('KeyD','ArrowRight'))-Number(pressed('KeyA','ArrowLeft'))};
+    input.current=badgeInput.current.merge({throttle:pressed('KeyS','ArrowDown')?-1:Number(pressed('KeyW','ArrowUp')),steer:Number(pressed('KeyD','ArrowRight'))-Number(pressed('KeyA','ArrowLeft'))});
+    lookBack.current=keyboardLookBack.current||badgeInput.current.held('b');
   },[]);
   const begin=useCallback(async()=>{
     if(startingRef.current||!['ready','caught'].includes(game.current.status))return;
-    startingRef.current=true;setStarting(true);clearInput();
+    startingRef.current=true;badgeLostDuringStart.current=false;setStarting(true);clearInput();
     const controller=new AbortController();startController.current=controller;
     const seed=Math.floor(Math.random()*0x100000000);
     try{
       const selected=await requestLearningStart(world,seed,controller.signal);
       if(!mounted.current||controller.signal.aborted)return;
       recorder.current?.abandon(game.current);
-      // Pin the selected tower sites and flight policy to this attempt.
-      // Terrain, camera limits, capture rules and the boost seed stay fixed.
+      // Only the tower sites differ. Terrain, sensor settings, aircraft launches
+      // and the selected boost seed stay identical to the baseline game.
       game.current=createGame(selected.world,seed);
       recorder.current=selected.session?new OpeningAttemptRecorder(selected.session):null;
       newBest.current=false;bestAtRunStart.current=bestRecord.current;
-      startGame(game.current);setControls(false);
-      if(document.hidden)togglePause(game.current);
+      startGame(game.current);setControls(false);setBadgeOpen(badgeLostDuringStart.current);
+      setBadgeNotice(badgeLostDuringStart.current?'Badge signal lost. Reconnect your badge or continue with keyboard and touch.':'');
+      if(document.hidden||badgeLostDuringStart.current)togglePause(game.current);
       update();main.current?.focus();
     }finally{
       startingRef.current=false;startController.current=null;
@@ -127,7 +137,23 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   },[clearInput,update,world]);
   const beforeTick=useCallback((state:GameState,controls:InputState)=>recorder.current?.beforeTick(state,controls),[]);
   const afterStep=useCallback((state:GameState)=>recorder.current?.afterStep(state),[]);
-  const pause=useCallback(()=>{clearInput();togglePause(game.current);if(game.current.status==='playing'){main.current?.focus();}update();},[clearInput,update]);
+  const pause=useCallback(()=>{clearInput();togglePause(game.current);if(game.current.status==='playing'){setBadgeOpen(false);setBadgeNotice('');main.current?.focus();}update();},[clearInput,update]);
+  const onBadgeButtons=useCallback((buttons:BadgeButtons,connected:boolean)=>{
+    const actions=badgeInput.current.update(buttons);
+    if(connected&&!document.hidden&&actions.start){
+      if(['ready','caught'].includes(game.current.status)&&sceneReady)void begin();
+      else if(game.current.status==='playing'||game.current.status==='paused')pause();
+    }
+    if(connected&&!document.hidden&&actions.camera&&game.current.status==='playing')changeCamera();
+    refreshInput();
+  },[begin,pause,sceneReady,changeCamera,refreshInput]);
+  const onBadgeLost=useCallback(()=>{
+    badgeInput.current.reset();clearInput();
+    if(startingRef.current)badgeLostDuringStart.current=true;
+    if(game.current.status==='playing'){togglePause(game.current);setBadgeNotice('Badge signal lost. Reconnect your badge or continue with keyboard and touch.');setBadgeOpen(true);setControls(false);update();}
+  },[clearInput,update]);
+  const badge=useBadgeController(onBadgeButtons,onBadgeLost);
+  const closeBadge=()=>{setBadgeOpen(false);badgeButton.current?.focus();};
   useEffect(()=>{
     mounted.current=true;flushPendingAttempts();
     const leaving=()=>recorder.current?.abandon(game.current,true);
@@ -155,23 +181,30 @@ function Session({world,models}:{world:WorldData;models:Models}) {
     const down=(e:KeyboardEvent)=>{
       const status=game.current.status;
       const editing=e.target instanceof HTMLElement&&Boolean(e.target.closest('input,textarea,select,[contenteditable="true"]'));
+      if(e.code==='Escape'&&badgeOpen){e.preventDefault();setBadgeOpen(false);badgeButton.current?.focus();return;}
       if(editing)return;
       if(e.code==='Escape'||e.code==='KeyP'){if(!e.repeat){e.preventDefault();if(status==='ready'&&controls){setControls(false);guideButton.current?.focus();}else pause();}return;}
+      if(badgeOpen&&(e.code==='Space'||e.code==='Enter'))return;
       if((e.code==='Space'||e.code==='Enter')&&(status==='ready'||status==='caught')&&sceneReady){if(!(e.target instanceof HTMLButtonElement)){e.preventDefault();begin();}return;}
       if(e.target instanceof HTMLButtonElement&&(e.code==='Space'||e.code==='Enter'))return;
       if(status!=='playing')return;
       if(e.code==='KeyC'){if(!e.repeat){e.preventDefault();changeCamera();}return;}
-      if(e.code==='Space'){e.preventDefault();lookBack.current=true;return;}
+      if(e.code==='Space'){e.preventDefault();keyboardLookBack.current=true;refreshInput();return;}
       if(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowLeft','ArrowDown','ArrowRight','Space'].includes(e.code)){e.preventDefault();keys.current.add(e.code);refreshInput();}
     };
-    const up=(e:KeyboardEvent)=>{keys.current.delete(e.code);if(e.code==='Space')lookBack.current=false;refreshInput();};
+    const up=(e:KeyboardEvent)=>{keys.current.delete(e.code);if(e.code==='Space')keyboardLookBack.current=false;refreshInput();};
     const blur=()=>{clearInput();if(game.current.status==='playing'){togglePause(game.current);update();}};
     const visibility=()=>{if(document.hidden)blur();};
     window.addEventListener('keydown',down);window.addEventListener('keyup',up);window.addEventListener('blur',blur);document.addEventListener('visibilitychange',visibility);
     return ()=>{window.removeEventListener('keydown',down);window.removeEventListener('keyup',up);window.removeEventListener('blur',blur);document.removeEventListener('visibilitychange',visibility);};
-  },[begin,pause,refreshInput,clearInput,sceneReady,update,changeCamera,controls]);
+  },[begin,pause,refreshInput,clearInput,sceneReady,update,changeCamera,controls,badgeOpen]);
   useEffect(()=>{if(hud.status==='paused'||hud.status==='caught')action.current?.focus();},[hud.status]);
   useEffect(()=>{if(controls&&hud.status==='ready')guideClose.current?.focus();},[controls,hud.status]);
+  useEffect(()=>{
+    if(badgeOpen&&hud.status==='ready')badgeClose.current?.focus();
+    else if(!badgeOpen&&badgeWasOpen.current)badgeButton.current?.focus();
+    badgeWasOpen.current=badgeOpen;
+  },[badgeOpen,hud.status]);
   useEffect(()=>{if(hud.status==='caught')clearInput();},[hud.status,clearInput]);
   useEffect(()=>{
     if(!hud.loop){setLoopNotice(false);return;}
@@ -189,14 +222,14 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const relativeDrone=Math.atan2(nearestDrone.x-hud.boat.x,nearestDrone.z-hud.boat.z)-hud.boat.heading;
   const droneBearing=Math.atan2(Math.sin(relativeDrone),Math.cos(relativeDrone));
   const droneDirection=Math.abs(droneBearing)<Math.PI/4?'ahead':Math.abs(droneBearing)>Math.PI*3/4?'astern':droneBearing>0?'to port':'to starboard';
-  return <main ref={main} tabIndex={-1} className={`game-shell ${cameraMode==='helm'?'helm-view':''} ${isIntro?'is-intro':''} ${controls&&isIntro?'guide-open':''} ${towerWarning?'has-tower-contact':''} ${hud.status==='caught'?'is-caught':''}`} aria-label="Can't Catch Me boat survival game">
+  return <main ref={main} tabIndex={-1} className={`game-shell ${cameraMode==='helm'?'helm-view':''} ${isIntro?'is-intro':''} ${(controls||badgeOpen)&&isIntro?'guide-open':''} ${towerWarning?'has-tower-contact':''} ${hud.status==='caught'?'is-caught':''}`} aria-label="Can't Catch Me boat survival game">
     <div className="scene"><Scene world={world} models={models} game={game} input={input} onUpdate={update} onReady={ready} onBeforeTick={beforeTick} onAfterStep={afterStep} reducedMotion={reducedMotion||!motionEnabled} cameraMode={cameraMode} lookBack={lookBack}/></div>
     <div className="vignette"/>
     <header className="topbar">
       <div className="brand"><span className="brand-icon"><Icon name="boat"/></span><span>can’t catch me<span className="brand-period">.</span></span></div>
       <div className="top-actions"><span className="location"><Icon name="pin"/>Fort Ross, Nunavut</span>{!isIntro&&<>
         <button className="icon-button camera-button" aria-label={`Switch to ${cameraMode==='helm'?'chase':'helm'} camera`} title="Change camera (C)" onClick={changeCamera}><Icon name="camera"/><span>{cameraMode==='helm'?'Helm':'Chase'}</span></button>
-        <button className="icon-button look-button" aria-label={lookBack.current?'Look forward':'Look back'} aria-pressed={lookBack.current} title="Look behind you (or hold Space)" disabled={hud.status!=='playing'} onClick={()=>{lookBack.current=!lookBack.current;main.current?.focus();}}><Icon name="look"/></button>
+        <button className="icon-button look-button" aria-label={lookBack.current?'Look forward':'Look back'} aria-pressed={lookBack.current} title="Look behind you (or hold Space)" disabled={hud.status!=='playing'} onClick={()=>{keyboardLookBack.current=!keyboardLookBack.current;refreshInput();main.current?.focus();}}><Icon name="look"/></button>
         <button className="icon-button" aria-label={hud.status==='paused'?'Resume game':'Pause game'} onClick={pause} disabled={hud.status==='caught'}><Icon name={hud.status==='paused'?'play':'pause'}/></button>
       </>}<button className="icon-button fullscreen" disabled={!sceneReady} aria-label="Toggle fullscreen" onClick={()=>{if(document.fullscreenElement)void document.exitFullscreen().catch(()=>{});else void main.current?.requestFullscreen?.().catch(()=>{});}}><Icon name="expand"/></button></div>
     </header>
@@ -206,10 +239,10 @@ function Session({world,models}:{world:WorldData;models:Models}) {
         <h1>can’t<br/>catch me<span>.</span></h1>
         <p className="intro-copy">Two towers. Two drones. One endless escape.<br/>Fresh patrols. Faster drones. Keep going.</p>
         <button className="primary start" disabled={!sceneReady||starting} onClick={begin}>{starting?'Preparing your escape…':sceneReady?'Make your escape':'Preparing the water…'}<Icon name="arrow"/></button>
-        <button ref={guideButton} className="text-button intro-help" disabled={!sceneReady} onClick={()=>setControls(previous=>!previous)} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button>
+        <div className="intro-menu-links"><button ref={guideButton} className="text-button intro-help" disabled={!sceneReady} onClick={()=>{setControls(previous=>!previous);setBadgeOpen(false);}} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button><button ref={badgeButton} className="text-button intro-help badge-menu-link" disabled={!sceneReady} onClick={()=>{setBadgeOpen(previous=>!previous);setControls(false);}} aria-expanded={badgeOpen} aria-controls="badge-panel">{badge.status==='connected'?'Badge connected':'Connect a badge'}<span className={`badge-dot ${badge.status==='connected'?'connected':''}`}/></button></div>
         <div className="intro-meta"><span>{GAME_RULES.pace}× pace</span><span className="meta-dot"/><span>Survive as long as you can</span>{best>0&&<><span className="meta-dot"/><span>Best {formatTime(best)}</span></>}</div>
       </section>
-      {controls?<aside className="intro-guide" aria-labelledby="guide-title"><div className="guide-heading"><h2 id="guide-title">Make a clean escape.</h2><button ref={guideClose} className="icon-button" aria-label="Close how to play" onClick={()=>{setControls(false);guideButton.current?.focus();}}><Icon name="close"/></button></div><HowToPlay/></aside>:<aside className="field-note"><span className="note-line"/><p>The river keeps going.<br/>So does the chase.<br/><strong>Outrun the next patrol.</strong></p></aside>}
+      {badgeOpen?<aside className="intro-guide badge-guide" aria-labelledby="badge-title"><div className="guide-heading"><h2 id="badge-title">Take the helm.</h2><button ref={badgeClose} className="icon-button" aria-label="Close badge setup" onClick={closeBadge}><Icon name="close"/></button></div><BadgePanel controller={badge}/></aside>:controls?<aside className="intro-guide" aria-labelledby="guide-title"><div className="guide-heading"><h2 id="guide-title">Make a clean escape.</h2><button ref={guideClose} className="icon-button" aria-label="Close how to play" onClick={()=>{setControls(false);guideButton.current?.focus();}}><Icon name="close"/></button></div><HowToPlay/></aside>:<aside className="field-note"><span className="note-line"/><p>The river keeps going.<br/>So does the chase.<br/><strong>Outrun the next patrol.</strong></p></aside>}
       <footer className="intro-footer"><div className="keyboard-hint"><span className="key-group"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>or arrow keys to steer</span></div><span className="world-caption">The waters of Fort Ross · 71.99° N</span></footer>
     </> : <>
       <section className="score" aria-label="Survival time"><span>Still free</span><strong>{formatTime(hud.time)}</strong>{best>0&&<small>Best {formatTime(best)}</small>}</section>
@@ -231,15 +264,17 @@ function Session({world,models}:{world:WorldData;models:Models}) {
 
     {(hud.status==='paused'||hud.status==='caught')&&<div className="menu-scrim"><section className="run-menu" role="dialog" aria-modal="true" aria-labelledby="menu-title" onKeyDown={e=>{
       if(e.key!=='Tab')return;
-      const buttons=Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+      const buttons=Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),[tabindex="0"]'));
       const first=buttons[0],last=buttons[buttons.length-1];
       if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
       else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
     }}>
       {hud.status==='paused'?<><span className="menu-symbol"><Icon name="pause"/></span><h2 id="menu-title">Catch your breath.</h2><p>The chase is paused. The coast can wait.</p><button ref={action} className="primary" onClick={pause}>Back to the water<Icon name="play"/></button></>:<><span className="menu-symbol caught-symbol"><Icon name="boat"/></span><h2 id="menu-title">Caught. This time.</h2><p>You kept them chasing for</p><div className="final-time">{formatTime(hud.time)}</div><span className="best-result">{newBest.current?'A new personal best.':`Your best: ${formatTime(best)}`}</span><button ref={action} className="primary" disabled={starting} onClick={begin}>{starting?'Preparing your escape…':'One more escape'}<Icon name="retry"/></button></>}
       <div className="view-options"><button onClick={changeCamera}>View: {cameraMode==='helm'?'Helm':'Chase'}</button><button onClick={changeMotion} aria-pressed={motionEnabled&&!reducedMotion} disabled={reducedMotion}>Camera sway: {motionEnabled&&!reducedMotion?'on':'off'}</button></div>
-      <button className="text-button" onClick={()=>setControls(!controls)} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button>
+      {badgeNotice&&<p className="badge-lost-notice" role="status">{badgeNotice}</p>}
+      <div className="run-menu-links"><button className="text-button" onClick={()=>{setControls(!controls);setBadgeOpen(false);}} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button><button ref={badgeButton} className="text-button" onClick={()=>{setBadgeOpen(!badgeOpen);setControls(false);}} aria-expanded={badgeOpen} aria-controls="badge-panel">{badgeOpen?'Hide badge setup':badge.status==='connected'?'Badge connected':'Connect a badge'}</button></div>
       {controls&&<HowToPlay/>}
+      {badgeOpen&&<BadgePanel controller={badge}/>}
     </section></div>}
     {!sceneReady&&<LoadingScreen stage="scene"/>}
   </main>;

@@ -15,7 +15,14 @@ $repo = $PSScriptRoot
 $BackendPort = 8000
 $DashboardPort = 3003
 $GamePort = 3100
-if (!$GamePath) { $GamePath = Join-Path (Split-Path $repo -Parent) 'cant-catch-me' }
+if (!$GamePath) {
+    $bundledGame = Join-Path $repo 'cant-catch-me'
+    $GamePath = if (Test-Path -LiteralPath (Join-Path $bundledGame 'package.json')) {
+        $bundledGame
+    } else {
+        Join-Path (Split-Path $repo -Parent) 'cant-catch-me'
+    }
+}
 $GamePath = [IO.Path]::GetFullPath($GamePath)
 $backendUrl = "http://127.0.0.1:$BackendPort"
 $dashboardUrl = "http://127.0.0.1:$DashboardPort"

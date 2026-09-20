@@ -1,4 +1,5 @@
 const { withSentryConfig } = require("@sentry/nextjs/config");
+const { PHASE_DEVELOPMENT_SERVER } = require("next/constants");
 const sentryOrg = process.env.SENTRY_ORG?.trim();
 const sentryProject = process.env.SENTRY_PROJECT?.trim();
 const sentryBuildToken = process.env.SENTRY_AUTH_TOKEN?.trim();
@@ -12,7 +13,12 @@ const nextConfig = {
   experimental: { instrumentationHook: true },
 };
 
-module.exports = withSentryConfig(nextConfig, {
+module.exports = withSentryConfig((phase) => ({
+  ...nextConfig,
+  distDir: process.env.NEXT_DIST_DIR || (
+    phase === PHASE_DEVELOPMENT_SERVER ? "node_modules/.cache/overwatch-dev" : ".next"
+  ),
+}), {
   ...(sentryOrg ? { org: sentryOrg } : {}),
   ...(sentryProject ? { project: sentryProject } : {}),
   ...(sentryBuildToken ? { authToken: sentryBuildToken } : {}),

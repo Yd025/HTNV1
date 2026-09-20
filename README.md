@@ -1,5 +1,15 @@
 # Operation: Overwatch — teammate start
 
+## Release 0.2
+
+The `release/0.2` branch bundles the current dashboard, backend, saved experiment evidence, and `cant-catch-me/` game, including badge controls and the Freeze submission documents. It preserves the existing strategy and benchmark results. The game is included in this checkout; the Windows launcher locates it automatically and retains support for a sibling game checkout. Development and production dashboard builds use separate output directories, with `NEXT_DIST_DIR` available as an override.
+
+The frozen 200-mission report records 50/200 baseline detections and 133/200 optimized detections. Aircraft custody covers all sampled mission time, including missions without detection. The mean longest-gap metric assigns the full 300-second horizon to undetected missions, so its reduction combines improved acquisition with contact continuity. These are synthetic results, not measured live-camera accuracy.
+
+The coordinated report's legacy `postTowerCustodyPct` field actually counts eligible samples after any sensor confirms the target, despite the saved definition saying tower acquisition. This definition mismatch does not affect detection rate, aircraft custody, or mean longest gap above. The historical report is retained unchanged.
+
+Release checks: 229 backend tests passed across the suite and one targeted rerun with its mocked database enabled; 116 dashboard tests passed and one was skipped; 105 game tests and game typechecking passed. Both production builds completed and served their main pages locally; the dashboard's Windows standalone dependency-copy step warned about a dependency junction, so that standalone output is not a validated deployment artifact. The launcher was syntax-checked without starting a fleet controller.
+
 Hack the North WHITEOUT base. This repo already contains the shared intelligence loop, simulator adapter, and HUD.
 
 **Four-person team: start with [docs/team/README.md](docs/team/README.md).** The shared setup is on `dev`; each person works on their assigned branch and opens small PRs into `dev`. Tracking research and the proposed predictive handoff are in [docs/research/TRACKING_RESEARCH.md](docs/research/TRACKING_RESEARCH.md).
@@ -10,7 +20,7 @@ Hack the North WHITEOUT base. This repo already contains the shared intelligence
 
 The dashboard's **Game** tab (`/?tab=game`) connects to the separate Cant Catch Me game server. It shows actual opening-stretch player outcomes, capture rate by layout, held-out replay comparisons, and a 2D preview driven by the game's live ship, tower and aircraft positions. This data is separate from the operational simulation and its training experiments; game activity does not command the fleet.
 
-Run the sibling `cant-catch-me` app with `npm run dev` (port 3100), then start this frontend as usual. The frontend's read-only `/api/game-learning` route reads the game server. Set `GAME_SERVICE_URL` to its server-reachable origin (default `http://127.0.0.1:3100`) and `NEXT_PUBLIC_GAME_URL` to the player-facing origin (default `http://localhost:3100`); restart the frontend after configuration changes. An unavailable game shows an explicit reconnect state without interrupting the mission dashboard.
+Run the bundled `cant-catch-me` app with `npm run dev` (port 3100), then start this frontend as usual. The frontend's read-only `/api/game-learning` route reads the game server. Set `GAME_SERVICE_URL` to its server-reachable origin (default `http://127.0.0.1:3100`) and `NEXT_PUBLIC_GAME_URL` to the player-facing origin (default `http://localhost:3100`); restart the frontend after configuration changes. An unavailable game shows an explicit reconnect state without interrupting the mission dashboard.
 
 The game pins each player's opening tower layout, verifies completed recordings through its exact deterministic engine, sends a sanitized attempt attachment to Sentry, imports and validates the saved attachment, and automatically evaluates new sites after eight completed Sentry-imported attempts. The Game tab shows upload/import status and links to Sentry visual replays. The game needs its DSNs for recording and a server-only SENTRY_API_TOKEN with project:read to import model data; DSNs alone cannot enable model ingestion. It changes tower positions only. Land, protected-start, capture-time and retained-escape checks gate promotion; active players and later procedural stretches keep their existing rules. Historical routes are replay estimates, not proof that future human players will behave the same way. Runs that close or exceed five active minutes are excluded from training. Persistent attempts and layouts are stored in the game's `.game-learning` directory, outside Git; use `GAME_LEARNING_DIR` for a durable location. One game server process owns that archive. See the game's README for the endpoint contract, recording limits and fairness policy.
 
