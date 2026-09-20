@@ -74,6 +74,19 @@ class SurveillanceTests(unittest.TestCase):
         self.assertEqual(result["frames"][-1]["phase"], "lost")
         self.assertFalse(any(frame["towerConfirmed"] for frame in result["frames"]))
 
+    def test_fixed_wing_support_cannot_read_hidden_route_after_confirmation(self):
+        def observe(terrain, pose, kind, boat, condition, seed, t, mask):
+            return [Observation("tower-1", (t * .5, 0.), t, 5., .9)] if pose["id"] == "tower-1" else []
+        a = scenario(self.terrain, 1, 60)
+        b = Scenario(1, scenario(self.terrain, 999, 60).positions)
+        with patch("graph_search.sample_observations", side_effect=observe):
+            left = run_episode(self.terrain, self.config, a, horizon=60, replay=True)
+            right = run_episode(self.terrain, self.config, b, horizon=60, replay=True)
+        self.assertTrue(any(frame["estimate"] for frame in left["frames"]))
+        for x, y in zip(left["frames"], right["frames"]):
+            self.assertEqual(x["drones"], y["drones"])
+            self.assertEqual(x["phase"], y["phase"])
+
     def test_plane_at_waypoint_keeps_forward_speed_with_bounded_heading(self):
         drone = {"id":"plane", "x":0., "y":0., "z":120., "heading":0.}
         distance = move_surveillance_drone(self.terrain, drone, self.terrain.node(0.,0.), 1.)

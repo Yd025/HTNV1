@@ -16,6 +16,7 @@ from pathlib import Path
 from behaviors.trees import CRUISE_ALT
 from flight_policy import COORDINATED_ALGORITHM, LEGACY_ALGORITHM, normalize_flight_policy
 from geo import bearing_deg, haversine_m, ll_to_ne, ne_to_ll
+from plane_shadow import PlaneShadow
 from sim.types import Arena, VehicleState
 
 
@@ -143,20 +144,21 @@ class PatrolRoute:
         return [bounded_ll(world, north, east) for north, east in points]
 
 
-def support_waypoint(world, me: VehicleState, leg: int) -> tuple[float, float]:
-    """Alternating passes aligned with the estimated vessel course."""
+def support_waypoint(world, me: VehicleState, shadow: PlaneShadow) -> tuple[float, float] | None:
+    """Moving offset passes, with a camera-derived blind-zone standoff."""
     track = world.track
     n, e = point_ne(world, track.lat, track.lon)
-    speed = math.hypot(track.vn, track.ve)
-    un, ue = (track.vn / speed, track.ve / speed) if speed > .5 else (1., 0.)
-    policy = world.flight_policy
-    # Keep a forward-looking fixed camera useful during the approach. Plane
-    # cannot independently yaw its camera at the contact while flying away.
-    height = me.alt_msl if me.alt_msl is not None and me.alt_msl > 5 else CRUISE_ALT["plane"]
-    camera_reach = max(250., min(1100., height / math.tan(math.radians(8))))
-    along = speed * policy["lookaheadS"] + (camera_reach if leg % 2 else -camera_reach)
-    side = policy["supportOffsetM"] * (1 if leg % 2 else -1)
-    return bounded_ll(world, n + un * along - ue * side, e + ue * along + un * side)
+    mn, meast = point_ne(world, me.lat, me.lon)
+    height = me.alt_msl if me.alt_msl is not None else (None if me.mavlink else me.alt)
+    if height is None or not math.isfinite(height) or height <= 5.:
+        return None  # no live home-relative altitude substituted for sea height
+    # Source skywalker_x8 fixed mount. Current body pitch/roll are not in the
+    # adapter contract; camera-backed reports remain the authority for custody.
+    sensor = {"pitchDeg": -8.021409, "hfovDeg": 68.984119,
+              "vfovDeg": 42.261117, "farClipM": 1500.}
+    x, y = shadow.waypoint((meast, mn), me.heading, max(15., me.groundspeed), height,
+                          (e, n), (track.ve, track.vn), world.flight_policy, sensor)
+    return bounded_ll(world, y, x)
 
 
 def coordinated_reacquire(world, me: VehicleState) -> tuple[float, float]:

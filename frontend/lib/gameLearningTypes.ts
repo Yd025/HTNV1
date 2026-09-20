@@ -2,7 +2,8 @@
 import type { FlightPolicy } from './graphExperiment';
 export const LEGACY_RULES_VERSION = 'opening-physics-loop-pace2-v1';
 export const OVERHEAD_RULES_VERSION = 'opening-overhead-spotting-v2';
-export const RULES_VERSION = 'opening-coordinated-surveillance-v3';
+export const COORDINATED_RULES_VERSION = 'opening-coordinated-surveillance-v3';
+export const RULES_VERSION = 'opening-observation-shadowing-v4';
 export const WORLD_VERSION = 'fort-ross-257-v1';
 export const LEARNING_POLICY = {
   minimumAttempts: 8,
@@ -46,7 +47,7 @@ export type AttemptReplay = { attempt: AttemptSummary; layout: Layout; frames: L
 export type ReplayScore = {
   attempts: number; captures: number; escapes: number; censored: number;
   captureRate: number; meanCaptureSeconds: number | null; cappedMeanSeconds: number;
-  surveillance?: { detectionRate: number; meanFirstDetectionSeconds: number | null; visualContactFraction: number; longestContactGapSeconds: number; meanAircraftDistanceM: number };
+  surveillance?: { detectionRate: number; meanFirstDetectionSeconds: number | null; visualContactFraction: number; planeVisualContactFraction?: number; longestContactGapSeconds: number; meanAircraftDistanceM: number };
 };
 export type LearningRound = {
   algorithm?: 'coordinated-surveillance-v1';

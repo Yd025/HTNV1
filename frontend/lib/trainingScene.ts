@@ -101,7 +101,20 @@ export function sensorReplayDetail(profile: ArcticProfile, frames: GraphFrame[],
     changedAt = sample.t;
     latest = measurement;
   }
-  return latest ? { crop: sensorImageCrop(animate ? centerAt(elapsedS) : target!, zoom), timestamp: latest.timestamp, inView: !!projectSensorPoint(pose, latest) } : null;
+  if (!latest) return null;
+  const crop = sensorImageCrop(animate ? centerAt(elapsedS) : target!, zoom);
+  const projection = projectSensorPoint(pose, latest);
+  return { crop, timestamp: latest.timestamp, inView: !!projection, inCrop: !!cropSensorPoint(projection, crop) };
+}
+
+/** Keep the user's zoom preference, but show the full camera image when its crop loses evidence. */
+export function sensorReplayView(detail: ReturnType<typeof sensorReplayDetail>, elapsedS: number, requestedZoom: number) {
+  const ageS = detail ? Math.max(0, elapsedS - detail.timestamp) : 0;
+  const reason = !detail ? "awaiting a report" : ageS > 10 ? "last report is over 10 s old"
+    : !detail.inView ? "last report outside camera view" : !detail.inCrop ? "last report outside detail crop" : null;
+  const zoom = reason ? 1 : requestedZoom;
+  return { zoom, crop: zoom > 1 ? detail!.crop : undefined, available: !reason,
+    status: reason ?? (ageS >= 1 ? `last report ${Math.floor(ageS)} s ago` : "reported position") };
 }
 
 /** Map an image point into the crop, preserving its measurement metadata. */

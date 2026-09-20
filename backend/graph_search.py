@@ -587,7 +587,9 @@ class CoordinatedPlanner(BeliefPlanner):
     def __init__(self, terrain, policy, launch, motion=None, weights=None):
         super().__init__(terrain, motion, weights)
         self.policy, self.launch = policy, launch
-        self.patrol, self.visited, self.support_cursor = {}, {"plane": set(), "quad": set()}, 0
+        from plane_shadow import PlaneShadow
+        self.patrol, self.visited = {}, {"plane": set(), "quad": set()}
+        self.plane_shadow = PlaneShadow()
         self.water_index = {int(node): i for i, node in enumerate(terrain.wids)}
         for kind in ("plane", "quad"):
             ids = terrain.wids
@@ -646,6 +648,8 @@ class CoordinatedPlanner(BeliefPlanner):
         point = mission.predict(now)
         kind = drone["id"]
         if point is None:
+            if kind == "plane":
+                self.plane_shadow.reset()
             drone["missionRole"] = "wide_search" if kind == "plane" else "gap_search"
             return self.patrol_goal(drone, other_goal)
         lead = min(self.policy["lookaheadS"], np.linalg.norm(point-[drone["x"], drone["y"]])/self.terrain.profile["speedsMps"][kind])
@@ -664,18 +668,19 @@ class CoordinatedPlanner(BeliefPlanner):
             away = away/max(float(np.linalg.norm(away)), 1e-9) if np.linalg.norm(away) > 1 else np.array([0., -1.])
             point = point+away*standoff
         else:
-            velocity = mission.velocity
-            along = velocity/max(float(np.linalg.norm(velocity)), 1e-9) if np.linalg.norm(velocity) > .5 else np.array([0., 1.])
-            side = np.array([along[1], -along[0]])
-            width = self.policy["supportOffsetM"]
-            corners = ((-1,-1), (1,-1), (1,1), (-1,1))
-            a,b = corners[self.support_cursor % 4]
-            goal = point+a*along*max(400., width*1.8)+b*side*width
-            if np.linalg.norm(goal-[drone["x"], drone["y"]]) < max(100., self.terrain.cell*.7):
-                self.support_cursor += 1
-                a,b = corners[self.support_cursor % 4]
-                goal = point+a*along*max(400., width*1.8)+b*side*width
-            point = goal
+            # Use the current estimate here: PlaneShadow applies its own
+            # bounded lead. Double-leading would put the real contact behind
+            # the chosen camera footprint when the learned horizon is long.
+            estimate = point - mission.velocity*lead
+            point = self.plane_shadow.waypoint(
+                (drone["x"], drone["y"]), drone["heading"], self.terrain.profile["speedsMps"][kind],
+                drone["z"], estimate, mission.velocity, self.policy, self.terrain.profile["sensors"][kind])
+            if mission.phase != "reacquire":
+                drone["missionRole"] = "support_pass" if self.plane_shadow.phase == "observe" else "support_reposition"
+            self.goals[kind] = self.terrain.node(*point)
+            # Heading waypoints remain continuous: snapping them to a coarse
+            # terrain cell would defeat the camera margin on close passes.
+            return point
         self.goals[kind] = self.terrain.node(*point)
         return self.goals[kind]
 
@@ -688,7 +693,7 @@ def move_surveillance_drone(terrain, drone, goal, step, look_at=None):
     """
     kind = drone["id"]
     clearance = terrain.profile["assetHeightsM"][kind]
-    target = terrain.xy[goal]
+    target = terrain.xy[goal] if isinstance(goal, (int, np.integer)) else np.asarray(goal, dtype=float)
     start = np.array([drone["x"], drone["y"]])
     drone["path"] = [{"x":float(start[0]), "y":float(start[1])}, {"x":float(target[0]), "y":float(target[1])}]
     traveled = 0.

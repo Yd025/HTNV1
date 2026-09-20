@@ -1,7 +1,7 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { assetLabel, type ArcticProfile, type GraphFrame, type GraphTower } from "../lib/graphExperiment";
-import { sensorAspect, sensorPose, sensorReplayDetail } from "../lib/trainingScene";
+import { sensorAspect, sensorPose, sensorReplayDetail, sensorReplayView } from "../lib/trainingScene";
 import styles from "./TrainingMissionViews.module.css";
 
 const TrainingMissionScene = dynamic(() => import("./TrainingMissionScene"), {
@@ -43,8 +43,8 @@ function SensorView({ profile, frame, frames, towers, elapsedS, running, sensorI
   const animate = running && playback.running && frame.t > playback.settledSampleS;
   const pose = sensorPose(profile, frame, towers, sensorId);
   const detail = pose ? sensorReplayDetail(profile, frames, towers, pose, elapsedS, requestedZoom, animate) : null;
-  const digitalZoom = detail ? requestedZoom : 1;
-  const detailStatus = detail ? !detail.inView ? "last report outside view" : detail.timestamp < frame.t ? `last report ${Math.floor(elapsedS - detail.timestamp)} s ago` : "reported position" : "awaiting a report";
+  const view = sensorReplayView(detail, elapsedS, requestedZoom);
+  const digitalZoom = view.zoom;
   const status = reportStatus(frame, sensorId);
   return <figure className={`${styles.sensor} ${compact ? styles.compactSensor : ""}`} aria-label={`${assetLabel(sensorId)} modeled camera view`}>
     <figcaption className={styles.sensorHeading}>
@@ -55,15 +55,15 @@ function SensorView({ profile, frame, frames, towers, elapsedS, running, sensorI
       <div className={styles.sensorMedia}>
         <div className={styles.sensorControls} role="group" aria-label={`${assetLabel(sensorId)} camera magnification`}>
           <button type="button" aria-pressed={digitalZoom === 1} onClick={() => setRequestedZoom(1)}>Wide</button>
-          {[12, 24].map(zoom => <button key={zoom} type="button" aria-pressed={digitalZoom === zoom} disabled={!detail} onClick={() => setRequestedZoom(zoom)}
-            title={detail ? "Keep this magnification between camera reports" : "Contact detail becomes available after this camera's first accepted report"}>{zoom}× detail</button>)}
+          {[12, 24].map(zoom => <button key={zoom} type="button" aria-pressed={digitalZoom === zoom} disabled={!view.available} onClick={() => setRequestedZoom(zoom)}
+            title={view.available ? "Magnify this camera's recent reported position" : "Detail resumes when a recent report is inside the camera crop"}>{zoom}× detail</button>)}
         </div>
         <div className={styles.sensorImage}>
           <div className={styles.sensorViewport} style={compact ? { maxWidth: `${180 * sensorAspect(pose.sensor)}px` } : undefined}>
-            <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} digitalZoom={digitalZoom} sensorCrop={detail?.crop} />
+            <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} digitalZoom={digitalZoom} sensorCrop={view.crop} />
           </div>
         </div>
-        <p className={styles.sensorViewMode}>{digitalZoom > 1 ? `${digitalZoom}× digital crop · ${detailStatus}` : `Wide · ${degrees(pose.sensor.hfovDeg)} horizontal view`}</p>
+        <p className={styles.sensorViewMode}>{digitalZoom > 1 ? `${digitalZoom}× digital crop · ${view.status}` : `Wide · ${degrees(pose.sensor.hfovDeg)} horizontal view${requestedZoom > 1 ? ` · ${view.status}` : ""}`}</p>
       </div>
       {!compact && <dl className={styles.sensorReadout}>
         <div><dt>Camera heading</dt><dd>{degrees(((pose.heading % 360) + 360) % 360)}</dd></div>
@@ -112,7 +112,7 @@ export default function TrainingMissionViews({ surface, profile, frame, frames, 
       <div className={styles.overviewScene}><TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="orbit" compact selectedId={selectedId} onSelect={setSelectedSensor} /></div>
       <p className={styles.overviewHelp}>Drag to orbit · scroll to zoom · modeled replay imagery</p>
       <div className={styles.cameraGrid}>{sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} frames={frames} towers={towers} elapsedS={elapsedS} running={running} sensorId={sensorId} compact />)}</div>
-      <p className={styles.overviewNote}>Zoom stays steady between reports. A last report is not a current visual lock. Imagery shows evaluation truth at the {frame.t.toFixed(1)} s sample.</p>
+      <p className={styles.overviewNote}>Cameras return to Wide when a report leaves the crop or is over 10 s old. Detail resumes on a recent report. A reported position is not a current visual lock. Imagery shows evaluation truth at the {frame.t.toFixed(1)} s sample.</p>
     </>}
   </section>;
   return <div className={styles.views}>
@@ -143,7 +143,7 @@ export default function TrainingMissionViews({ surface, profile, frame, frames, 
           {selectedId ? <SensorView profile={profile} frame={frame} frames={frames} towers={towers} elapsedS={elapsedS} running={running} sensorId={selectedId} /> : <p className={styles.emptyReports}>No observer poses in this mission sample.</p>}
         </aside>
       </div>}
-      <p className={styles.modelNote}>Modeled replay imagery · camera motion is smoothed between recorded samples. Detail opens after the first report and keeps your magnification through report gaps; use Wide for the full view. Last reports are labeled and do not imply a current visual lock. This is synthetic imagery, not a live camera feed.</p>
+      <p className={styles.modelNote}>Modeled replay imagery · cameras return to Wide when a report leaves the crop or is over 10 s old. Your detail setting resumes when a recent report is visible in the crop. Last reports do not imply a current visual lock. This is synthetic imagery, not a live camera feed.</p>
       <ObservationTable frame={frame} />
     </>}
   </div>;

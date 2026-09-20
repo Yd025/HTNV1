@@ -7,7 +7,7 @@ const ts = require("typescript");
 const exportsObject = {};
 const source = fs.readFileSync(path.resolve(__dirname, "../lib/trainingScene.ts"), "utf8");
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: exportsObject });
-const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport, sensorReportCrop, sensorReplayDetail, cropSensorPoint } = exportsObject;
+const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport, sensorReportCrop, sensorReplayDetail, sensorReplayView, cropSensorPoint } = exportsObject;
 
 test("world coordinates preserve projected axes and the camera basis matches the overview frustum", () => {
   assert.deepEqual(Array.from(scenePosition({ x: 20, y: 30, z: 40 })), [20, 40, -30]);
@@ -173,7 +173,7 @@ test("replay detail retains magnification through missed reports without showing
   assert.equal(outside.inView, false, "retained magnification cannot imply that the old report is still in view");
 });
 
-test("handoff playback never drops detail magnification after a camera's first accepted report", () => {
+test("handoff playback retains the requested crop independently of its visibility fallback", () => {
   const profile = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/arctic-profile.json"), "utf8"));
   const report = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/graph-report.json"), "utf8"));
   const replay = report.replays.find(item => item.seed === 591955);
@@ -191,4 +191,29 @@ test("handoff playback never drops detail magnification after a camera's first a
     }
     if (id === "quad") assert.ok(gaps > 10, "the regression must exercise intermittent aircraft reports");
   }
+});
+
+test("camera detail returns to Wide after a turn, stale report, or crop exit and resumes on fresh evidence", () => {
+  const profile = { sensors: { quad: opticalPose.sensor } };
+  const drone = { ...opticalPose, cameraHeading: 0, cameraPitch: 0 };
+  const observation = { source: "quad", x: 0, y: 100, timestamp: 10, accepted: true };
+  const frames = [{ t: 10, drones: [drone], observations: [observation] }];
+  const detailAt = (time, pose = opticalPose) => sensorReplayDetail(profile, frames, [], pose, time, 12);
+  assert.equal(sensorReplayView(detailAt(10), 10, 12).zoom, 12);
+  const turned = sensorReplayView(detailAt(15, { ...opticalPose, heading: 180 }), 15, 12);
+  assert.equal(turned.zoom, 1);
+  assert.equal(turned.crop, undefined, "Wide must clear the renderer's previous crop");
+  assert.equal(turned.status, "last report outside camera view");
+  const cropExit = sensorReplayView(detailAt(15, { ...opticalPose, heading: 10 }), 15, 12);
+  assert.equal(cropExit.zoom, 1, "the full image can contain the report while the old 12x crop misses it");
+  assert.equal(cropExit.status, "last report outside detail crop");
+  assert.equal(sensorReplayView(detailAt(20), 20, 12).zoom, 12);
+  const stale = sensorReplayView(detailAt(20.01), 20.01, 12);
+  assert.equal(stale.zoom, 1);
+  assert.equal(stale.available, false);
+  frames.push({ t: 25, drones: [drone], observations: [{ ...observation, timestamp: 25, x: 30 }] });
+  assert.equal(sensorReplayView(detailAt(25), 25, 12).zoom, 12, "fresh report restores saved magnification");
+  assert.equal(sensorReplayView(detailAt(25), 25, 1).zoom, 1, "manual Wide remains Wide");
+  assert.equal(sensorReplayView(detailAt(9), 9, 12).zoom, 1, "seeking earlier cannot use future reports");
+  assert.equal(sensorReplayView(null, 25, 12).available, false);
 });

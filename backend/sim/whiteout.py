@@ -39,6 +39,14 @@ HEADING_OFFSET_DEG = -49.8
 
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
 AIRBORNE_ALT = {"plane": 15.0, "copter": 8.0, "rover": 0.0, "tower": 0.0}
+# Verified Fort Ross collision heightmap: maximum 252.109 m MSL. Keep a
+# 50 m terrain margin plus climb/altitude settling allowance. This envelope
+# belongs to this adapter/site, not the portable trained flight parameters.
+FORT_ROSS_CRUISE_MSL = 310.0
+FORT_ROSS_RELEASE_MSL = 303.0
+# World (-350, 1250): the complete 200 m disk samples sea-level terrain;
+# ArduPlane's configured WP_LOITER_RAD is 120 m. The strip points here.
+FORT_ROSS_CLIMB_LOITER = (71.99681544635214, -94.8567993157745)
 # Camera optical centre AMSL from fort_ross.world pose.z + HEAD_Z (terrain/tower.py).
 CAM_ALT_MSL = {"tower-1": 119.5, "tower-2": 229.3}
 PITCH_MIN_DEG = -30.0
@@ -134,7 +142,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
 
 
 class _Air:
-    __slots__ = ("phase", "last_cmd_at", "last_takeoff_at", "takeoff_sent", "arm_tries")
+    __slots__ = ("phase", "last_cmd_at", "last_takeoff_at", "takeoff_sent", "arm_tries", "climb_hold")
 
     def __init__(self) -> None:
         self.phase = "boot"
@@ -142,6 +150,7 @@ class _Air:
         self.last_takeoff_at = 0.0
         self.takeoff_sent = False
         self.arm_tries = 0
+        self.climb_hold: tuple[float, float] | None = None
 
 
 class WhiteoutAdapter:
@@ -162,6 +171,8 @@ class WhiteoutAdapter:
             ],
         )
         self._spec = _fleet_spec()
+        from agents.surveillance import load_runtime_policy
+        self._terrain_envelope = load_runtime_policy()["algorithm"] == "coordinated-surveillance-v1"
         self._bridges: dict[str, MavlinkBridge] = {}
         self._air: dict[str, _Air] = {s["vehicle_id"]: _Air() for s in self._spec}
         self._last_ok: dict[str, bool] = {s["vehicle_id"]: False for s in self._spec}
@@ -318,6 +329,9 @@ class WhiteoutAdapter:
         if command.lat is None or command.lon is None:
             return
         alt = command.alt if command.alt is not None else CRUISE_ALT.get(vclass, 40.0)
+        if self._terrain_envelope and vclass in {"plane", "copter"}:
+            # _advance already required finite MSL and home-relative heights.
+            alt = max(alt, self._cruise_altitude(bridge.snapshot()))
         if vclass == "rover":
             alt = 0.0
         if vclass == "plane":
@@ -502,6 +516,11 @@ class WhiteoutAdapter:
                 "frame_id": frame_id, "received_at": received_at, "boxes": len(hits), "localized": projected,
                 "quality": self._detector.last_frame.get("quality")}
 
+    @staticmethod
+    def _cruise_altitude(snap: dict[str, Any]) -> float:
+        """Convert the site MSL envelope into MAVLink's home-relative frame."""
+        return FORT_ROSS_CRUISE_MSL - (float(snap["alt_msl"]) - float(snap["alt"]))
+
     async def _advance(self, spec: dict[str, Any], bridge: MavlinkBridge) -> bool:
         """One arm/takeoff step. Returns True when GUIDED gotos are legal."""
         vclass: str = spec["vehicle_class"]
@@ -511,6 +530,10 @@ class WhiteoutAdapter:
         now = time.monotonic()
         snap = bridge.snapshot()
         alt_now = float(snap.get("alt") or 0.0)
+        if self._terrain_envelope and vclass in {"plane", "copter"}:
+            if not _position_ready(snap) or any(snap.get(key) is None or not math.isfinite(float(snap[key]))
+                   for key in ("alt", "alt_msl")):
+                return False
         # Belly X8: RC override expires in ~3 s. Keep the pusher lit
         # every tick of the ground roll or TAKEOFF/NAV_TAKEOFF never moves.
         if vclass == "plane" and alt_now < AIRBORNE_ALT["plane"] and snap.get("armed"):
@@ -518,12 +541,19 @@ class WhiteoutAdapter:
             gs_now = float(snap.get("groundspeed") or 0.0)
             pitch_stick = 1620 if gs_now >= 9.0 else 1500
             await bridge.rc_override(1500, pitch_stick, 1900, 1500)
-        if now - air.last_cmd_at < 1.8:
-            return air.phase == "ready"
         mode = str(snap.get("mode") or "").upper()
         armed = bool(snap.get("armed"))
         alt = alt_now
         need_alt = AIRBORNE_ALT[vclass]
+        cruise_alt = CRUISE_ALT[vclass]
+        if self._terrain_envelope and vclass in {"plane", "copter"}:
+            cruise_alt = self._cruise_altitude(snap)
+            need_alt = cruise_alt - (FORT_ROSS_CRUISE_MSL - FORT_ROSS_RELEASE_MSL)
+        if now - air.last_cmd_at < 1.8:
+            # Command pacing must not turn yesterday's readiness into current
+            # clearance: loss of height, arming or GUIDED mode closes the gate.
+            return (air.phase == "ready" and armed and "GUIDED" in mode
+                    and alt >= need_alt)
 
         logger.info(
             "advance %s phase=%s mode=%s armed=%s alt=%.1f",
@@ -546,6 +576,13 @@ class WhiteoutAdapter:
 
         if vclass == "plane":
             gs = float(snap.get("groundspeed") or 0.0)
+            if self._terrain_envelope and air.climb_hold is None:
+                # A controller reconnect must not drag an already airborne
+                # plane across the site at its old low altitude. Climb in a
+                # local loiter; only a ground launch uses the surveyed strip.
+                air.climb_hold = ((float(snap["lat"]), float(snap["lon"]))
+                                  if armed and alt >= AIRBORNE_ALT["plane"]
+                                  else FORT_ROSS_CLIMB_LOITER)
             if not armed:
                 await bridge.set_mode("FBWA")
                 air.arm_tries += 1
@@ -554,12 +591,16 @@ class WhiteoutAdapter:
                 return False
             if alt < need_alt:
                 # FBWA rolls the belly; once it has energy, GUIDED holds the climb.
-                if alt >= 6.0 and gs >= 8.0:
+                established_flight = self._terrain_envelope and alt >= AIRBORNE_ALT["plane"]
+                if established_flight or (alt >= 6.0 and gs >= 8.0):
                     await bridge.rc_override(0, 0, 0, 0)
-                    await bridge.set_mode("GUIDED")
-                    aim = spec.get("takeoff_aim") or spec.get("home")
+                    if "GUIDED" not in mode:
+                        await bridge.set_mode("GUIDED")
+                    aim = (air.climb_hold if self._terrain_envelope
+                           else spec.get("takeoff_aim") or spec.get("home"))
                     if aim:
-                        await bridge.send_plane_goto(aim[0], aim[1], 60.0)
+                        await bridge.send_plane_goto(aim[0], aim[1], cruise_alt if self._terrain_envelope else 60.0)
+                    air.phase = "climb"
                     air.last_cmd_at = now
                     return False
                 if "FBWA" not in mode:
@@ -574,6 +615,7 @@ class WhiteoutAdapter:
                 await bridge.set_mode("GUIDED")
                 air.last_cmd_at = now
             air.phase = "ready"
+            air.climb_hold = None
             return True
 
         # copter
@@ -587,11 +629,21 @@ class WhiteoutAdapter:
             air.last_cmd_at = now
             return False
         if alt < need_alt:
+            if self._terrain_envelope and alt >= AIRBORNE_ALT["copter"]:
+                # Do not redirect the climbing quad across a ridge. A restarted
+                # airborne controller also climbs vertically before resuming.
+                if air.climb_hold is None:
+                    air.climb_hold = (float(snap["lat"]), float(snap["lon"]))
+                await bridge.send_goto(*air.climb_hold, cruise_alt)
+                air.phase = "climb"
+                air.last_cmd_at = now
+                return False
             if not air.takeoff_sent or (now - air.last_takeoff_at) >= 4.0:
-                await bridge.takeoff(CRUISE_ALT["copter"])
+                await bridge.takeoff(cruise_alt)
                 air.takeoff_sent = True
                 air.last_takeoff_at = now
                 air.last_cmd_at = now
             return False
         air.phase = "ready"
+        air.climb_hold = None
         return True
