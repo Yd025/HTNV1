@@ -5,15 +5,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { buildReportData } = require('./training-report-data.cjs');
+const { renderStaticReport } = require('./training-report-static.cjs');
 const experiments = path.resolve(__dirname, '../public/experiments');
 const { data, csv } = buildReportData(experiments);
 const template = fs.readFileSync(path.join(__dirname, 'training-report.template.html'), 'utf8');
+const profile = JSON.parse(fs.readFileSync(path.join(experiments, 'arctic-profile.json'), 'utf8'));
 const replacements = {
   '__REPORT_DATA__': JSON.stringify(data).replace(/</g, '\\u003c'),
   '__REPORT_CSV__': JSON.stringify(csv).replace(/</g, '\\u003c'),
-  '__TERRAIN_IMAGE__': 'data:image/png;base64,' + fs.readFileSync(path.join(experiments, 'fort-ross-terrain.png')).toString('base64'),
 };
 let html = template;
+// The saved HTML is readable even when a file preview strips scripts. Scripts
+// enhance this complete initial snapshot with filters, pagination and downloads.
+for (const [id, content] of Object.entries(renderStaticReport(data, profile))) {
+  const element = new RegExp(`(<([\\w-]+)\\b[^>]*\\bid="${id}"[^>]*>)[\\s\\S]*?(<\\/\\2>)`);
+  if (!element.test(html)) throw new Error(`Missing static report element: ${id}`);
+  html = html.replace(element, (_match, open, _tag, close) => open + content + close);
+}
 for (const [token, value] of Object.entries(replacements)) {
   if (html.split(token).length !== 2) throw new Error(`Expected exactly one ${token} placeholder`);
   html = html.replace(token, () => value);
