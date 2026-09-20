@@ -1,7 +1,7 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { assetLabel, type ArcticProfile, type GraphFrame, type GraphTower } from "../lib/graphExperiment";
-import { sensorAspect, sensorPose } from "../lib/trainingScene";
+import { acceptedSensorReport, sensorAspect, sensorPose } from "../lib/trainingScene";
 import styles from "./TrainingMissionViews.module.css";
 
 const TrainingMissionScene = dynamic(() => import("./TrainingMissionScene"), {
@@ -29,12 +29,15 @@ function reportStatus(frame: GraphFrame, source: string) {
   const accepted = observations.some(item => item.accepted);
   return {
     accepted,
-    label: accepted ? "Accepted report" : observations.length ? "Report rejected" : "No accepted report",
+    label: accepted ? "Modeled report" : observations.length ? "Report rejected" : "No accepted report",
   };
 }
 
 function SensorView({ profile, frame, towers, sensorId, compact = false }: ViewProps & { sensorId: string; compact?: boolean }) {
+  const [requestedZoom, setRequestedZoom] = useState(12);
   const pose = sensorPose(profile, frame, towers, sensorId);
+  const report = pose ? acceptedSensorReport(frame, pose) : null;
+  const digitalZoom = report ? requestedZoom : 1;
   const status = reportStatus(frame, sensorId);
   return <figure className={`${styles.sensor} ${compact ? styles.compactSensor : ""}`} aria-label={`${assetLabel(sensorId)} modeled camera view`}>
     <figcaption className={styles.sensorHeading}>
@@ -42,10 +45,18 @@ function SensorView({ profile, frame, towers, sensorId, compact = false }: ViewP
       <span className={styles.reportStatus} data-accepted={status.accepted}>{status.label}</span>
     </figcaption>
     {pose ? <>
-      <div className={styles.sensorImage}>
-        <div className={styles.sensorViewport} style={compact ? { maxWidth: `${140 * sensorAspect(pose.sensor)}px` } : undefined}>
-          <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} />
+      <div className={styles.sensorMedia}>
+        <div className={styles.sensorControls} role="group" aria-label={`${assetLabel(sensorId)} camera magnification`}>
+          <button type="button" aria-pressed={digitalZoom === 1} onClick={() => setRequestedZoom(1)}>Wide</button>
+          {[12, 24].map(zoom => <button key={zoom} type="button" aria-pressed={digitalZoom === zoom} disabled={!report} onClick={() => setRequestedZoom(zoom)}
+            title={report ? "Magnify this camera's reported position" : "Contact detail needs an accepted report inside this camera's view"}>{zoom}× detail</button>)}
         </div>
+        <div className={styles.sensorImage}>
+          <div className={styles.sensorViewport} style={compact ? { maxWidth: `${180 * sensorAspect(pose.sensor)}px` } : undefined}>
+            <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} digitalZoom={digitalZoom} />
+          </div>
+        </div>
+        <p className={styles.sensorViewMode}>{digitalZoom > 1 ? `${digitalZoom}× digital crop · reported position` : `Wide · ${degrees(pose.sensor.hfovDeg)} horizontal view`}</p>
       </div>
       {!compact && <dl className={styles.sensorReadout}>
         <div><dt>Camera heading</dt><dd>{degrees(((pose.heading % 360) + 360) % 360)}</dd></div>
@@ -66,7 +77,7 @@ function ObservationTable({ frame }: Pick<Props, "frame">) {
       <h3>Camera observations</h3>
       <span>Mission sample · {frame.t.toFixed(1)} s</span>
     </div>
-    <p className={styles.observationNote}>Synthetic sensor reports used by the 2D mission. Accepted reports update the track; rendering the boat does not create a detection.</p>
+    <p className={styles.observationNote}>Synthetic sensor reports used by the 2D mission. Accepted reports are modeled measurements, not proof of a visual lock; rendering the boat does not create a detection.</p>
     {observations.length ? <div className={styles.tableWrap} tabIndex={0} aria-label="Camera observations table, scroll horizontally if needed">
       <table>
         <caption>Positions use the projected Arctic grid in metres.</caption>
@@ -94,7 +105,7 @@ export default function TrainingMissionViews({ surface, profile, frame, towers, 
       <div className={styles.overviewScene}><TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="orbit" compact selectedId={selectedId} onSelect={setSelectedSensor} /></div>
       <p className={styles.overviewHelp}>Drag to orbit · scroll to zoom · modeled replay imagery</p>
       <div className={styles.cameraGrid}>{sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} towers={towers} sensorId={sensorId} compact />)}</div>
-      <p className={styles.overviewNote}>Approximate views from the same terrain and camera poses. Reports remain at the {frame.t.toFixed(1)} s sample; boat imagery is evaluation truth.</p>
+      <p className={styles.overviewNote}>Detail crops magnify reported positions; a model report is not an image-confirmed lock. Imagery shows evaluation truth at the {frame.t.toFixed(1)} s sample.</p>
     </>}
   </section>;
   return <div className={styles.views}>
@@ -125,7 +136,7 @@ export default function TrainingMissionViews({ surface, profile, frame, towers, 
           {selectedId ? <SensorView profile={profile} frame={frame} towers={towers} sensorId={selectedId} /> : <p className={styles.emptyReports}>No observer poses in this mission sample.</p>}
         </aside>
       </div>}
-      <p className={styles.modelNote}>Modeled replay imagery · approximate reconstruction from the mission terrain grid. Camera direction and field of view follow the replay; this is synthetic imagery, not a live camera feed.</p>
+      <p className={styles.modelNote}>Modeled replay imagery · approximate reconstruction from the mission terrain grid. Accepted reports automatically open a 12× detail crop of the reported position; use Wide to see the recorded field of view. This is synthetic imagery, not a live camera feed.</p>
       <ObservationTable frame={frame} />
     </>}
   </div>;

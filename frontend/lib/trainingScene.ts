@@ -49,6 +49,38 @@ export function acceptedSensorReport(frame: GraphFrame, pose: TrainingSensorPose
   return projection ? { ...projection, timestamp: report.timestamp } : null;
 }
 
+/** A digital crop within the recorded image; the camera pose and optics stay unchanged. */
+export interface SensorCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zoom: number;
+}
+
+/** Magnify the accepted measurement's neighborhood without consulting boat truth. */
+export function sensorReportCrop(frame: GraphFrame, pose: TrainingSensorPose, zoom = 12): SensorCrop | null {
+  const report = acceptedSensorReport(frame, pose);
+  if (!report) return null;
+  const magnification = Number.isFinite(zoom) ? Math.max(1, zoom) : 1;
+  const fraction = 1 / magnification;
+  return {
+    x: Math.max(0, Math.min(1 - fraction, report.x - fraction / 2)),
+    y: Math.max(0, Math.min(1 - fraction, report.y - fraction / 2)),
+    width: fraction,
+    height: fraction,
+    zoom: magnification,
+  };
+}
+
+/** Map an image point into the crop, preserving its measurement metadata. */
+export function cropSensorPoint<T extends { x: number; y: number }>(point: T | null, crop: SensorCrop): T | null {
+  if (!point) return null;
+  const x = (point.x - crop.x) / crop.width, y = (point.y - crop.y) / crop.height;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { ...point, x, y };
+}
+
 /** Recorded optical poses only. The boat position never steers a sensor camera. */
 export function sensorPose(profile: ArcticProfile, frame: GraphFrame, towers: GraphTower[], id: string): TrainingSensorPose | null {
   const towerIndex = towers.findIndex(tower => tower.id === id);

@@ -20,6 +20,15 @@
 .sensorHeading h3 { margin: 0; font-size: 13px; font-weight: 500; }
 .reportStatus { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 .reportStatus[data-accepted=true] { color: var(--status); }
+.sensorMedia { min-width: 0; background: var(--canvas); }
+.sensorControls { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.sensorControls button { min-height: 30px; padding: 5px 9px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--text-muted); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.sensorControls button[aria-pressed=true] { color: var(--text); border-color: var(--status); background: var(--surface-raised); }
+.sensorControls button:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+.sensorControls button:disabled { opacity: .45; cursor: not-allowed; }
+.sensorViewMode { margin: 0; padding: 7px 18px 9px; color: var(--text-muted); font-size: 10px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.compactSensor .sensorControls { padding: 6px 10px; }
+.compactSensor .sensorViewMode { padding: 6px 10px 8px; }
 .sensorImage { width: 100%; overflow: hidden; background: var(--canvas); }
 .sensorViewport { width: 100%; margin: 0 auto; }
 .sensorReadout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px 18px; margin: 0; padding: 17px 18px 20px; font-variant-numeric: tabular-nums; }

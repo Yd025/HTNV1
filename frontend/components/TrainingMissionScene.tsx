@@ -3,7 +3,7 @@ import { Canvas, useThree } from "@react-three/fiber";
 import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useRef, type ElementRef, type ReactNode } from "react";
 import { BufferGeometry, Float32BufferAttribute, PerspectiveCamera, SRGBColorSpace, Vector3 } from "three";
 import { assetLabel, cameraFootprint, isQuad, type ArcticProfile, type GraphFrame, type GraphTower } from "../lib/graphExperiment";
-import { acceptedSensorReport, scenePosition, sensorAspect, sensorDirection, sensorPose, terrainHeight, type TrainingSensorPose } from "../lib/trainingScene";
+import { acceptedSensorReport, cropSensorPoint, scenePosition, sensorAspect, sensorDirection, sensorPose, sensorReportCrop, terrainHeight, type SensorCrop, type TrainingSensorPose } from "../lib/trainingScene";
 import { sceneColors } from "../lib/theme";
 import { VehicleModel, useVehicleMaterials } from "./scene/VehicleModels";
 
@@ -16,18 +16,22 @@ export type TrainingMissionSceneProps = {
   selectedId?: string | null;
   onSelect?: (id: string) => void;
   compact?: boolean;
+  digitalZoom?: number;
 };
 
 /** A view of the overview's replay, with no simulation clock or control commands. */
-export default function TrainingMissionScene({ profile, frame, towers, mode = "orbit", sensorId, selectedId, onSelect, compact = false }: TrainingMissionSceneProps) {
+export default function TrainingMissionScene({ profile, frame, towers, mode = "orbit", sensorId, selectedId, onSelect, compact = false, digitalZoom = 1 }: TrainingMissionSceneProps) {
   const pose = mode === "sensor" ? sensorPose(profile, frame, towers, sensorId ?? "") : null;
-  const report = pose ? acceptedSensorReport(frame, pose) : null;
+  const crop = pose && digitalZoom > 1 ? sensorReportCrop(frame, pose, digitalZoom) : null;
+  const wideReport = pose ? acceptedSensorReport(frame, pose) : null;
+  const report = crop ? cropSensorPoint(wideReport, crop) : wideReport;
+  const opticalCenter = crop ? cropSensorPoint({ x: .5, y: .5 }, crop) : { x: .5, y: .5 };
   if (mode === "sensor" && !pose) return <SceneUnavailable>Camera pose is unavailable for this mission sample.</SceneUnavailable>;
   return <div style={{ position: "relative", width: "100%", ...(pose ? { aspectRatio: sensorAspect(pose.sensor) } : { height: "100%", minHeight: compact ? 240 : 420 }), background: sceneColors.void }}>
     <SceneBoundary>
       <Canvas frameloop="demand" dpr={[1, 1.5]} gl={{ antialias: true, powerPreference: "low-power" }}
         camera={{ fov: 42, near: .05, far: 25000, position: [4500, 4500, 5500] }}
-        aria-label={pose ? `Modeled ${assetLabel(pose.id)} camera at the current overview time` : "Fort Ross 3D view of the current overview mission"}
+        aria-label={pose ? `Modeled ${assetLabel(pose.id)} camera at the current overview time${crop ? `, ${crop.zoom} times digital crop` : ", full field of view"}` : "Fort Ross 3D view of the current overview mission"}
         fallback={<SceneUnavailable>3D rendering is unavailable on this device. The 2D overview remains available.</SceneUnavailable>}>
         <color attach="background" args={[pose ? "#8b9aa5" : sceneColors.void]} />
         <hemisphereLight args={["#e2e7ea", "#5b6670", 2.3]} />
@@ -35,7 +39,7 @@ export default function TrainingMissionScene({ profile, frame, towers, mode = "o
         <Suspense fallback={<Html center><span style={{ color: sceneColors.chalk, whiteSpace: "nowrap" }}>Loading Fort Ross terrain…</span></Html>}>
           <Terrain profile={profile} />
           <Boat frame={frame} />
-          {pose ? <SensorCamera pose={pose} /> : <>
+          {pose ? <SensorCamera pose={pose} crop={crop} /> : <>
             <OrbitCamera half={profile.grid.halfM} />
             <MissionSymbols profile={profile} frame={frame} towers={towers} selectedId={selectedId} onSelect={onSelect} />
           </>}
@@ -43,11 +47,11 @@ export default function TrainingMissionScene({ profile, frame, towers, mode = "o
       </Canvas>
     </SceneBoundary>
     {pose ? <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none", display: "grid", placeItems: "center" }}>
-      <svg width="30" height="30" viewBox="0 0 30 30" fill="none"><path d="M15 2v8m0 10v8M2 15h8m10 0h8" stroke="#e2e7ea" strokeWidth="1" opacity=".8" /></svg>
+      {opticalCenter && <svg style={{ position: "absolute", left: `${opticalCenter.x * 100}%`, top: `${opticalCenter.y * 100}%`, transform: "translate(-50%, -50%)" }} width="30" height="30" viewBox="0 0 30 30" fill="none"><path d="M15 2v8m0 10v8M2 15h8m10 0h8" stroke="#e2e7ea" strokeWidth="1" opacity=".8" /></svg>}
       {report && <div style={{ position: "absolute", left: `${report.x * 100}%`, top: `${report.y * 100}%`, transform: "translate(-50%, -50%)", width: 26, height: 26, color: "#e2e7ea" }}>
         <svg width="26" height="26" viewBox="0 0 26 26" fill="none"><path d="M1 9V1h8m8 0h8v8m0 8v8h-8m-8 0H1v-8" stroke="#182232" strokeWidth="3" /><path d="M1 9V1h8m8 0h8v8m0 8v8h-8m-8 0H1v-8" stroke="currentColor" strokeWidth="1.5" /></svg>
-        <span style={{ position: "absolute", left: report.x > .75 ? "auto" : 30, right: report.x > .75 ? 30 : "auto", top: report.y < .12 ? 17 : 0, background: "#182232", padding: "2px 4px", fontSize: 10, whiteSpace: "nowrap" }}>Report · {report.timestamp.toFixed(0)} s</span>
       </div>}
+      {report && <span style={{ position: "absolute", left: 7, top: 7, background: "#182232", color: "#e2e7ea", padding: "3px 5px", fontSize: 10, whiteSpace: "nowrap" }}>Reported position · {report.timestamp.toFixed(0)} s</span>}
     </div> : <div style={{ position: "absolute", bottom: 12, left: 12, color: sceneColors.chalk, background: sceneColors.ink, padding: "5px 8px", fontSize: 11, pointerEvents: "none" }}>Drag to orbit · scroll to zoom · asset symbols enlarged</div>}
   </div>;
 }
@@ -100,7 +104,7 @@ function Boat({ frame }: { frame: GraphFrame }) {
   </group>;
 }
 
-function SensorCamera({ pose }: { pose: TrainingSensorPose }) {
+function SensorCamera({ pose, crop }: { pose: TrainingSensorPose; crop: SensorCrop | null }) {
   const { camera, invalidate, size } = useThree();
   useLayoutEffect(() => {
     if (!(camera instanceof PerspectiveCamera)) return;
@@ -113,9 +117,15 @@ function SensorCamera({ pose }: { pose: TrainingSensorPose }) {
     camera.aspect = sensorAspect(pose.sensor);
     camera.near = pose.sensor.nearClipM ?? .05;
     camera.far = pose.sensor.farClipM;
+    if (crop) {
+      // Re-render a crop of the recorded sensor optics. Neither the vehicle nor
+      // the optical axis is turned toward evaluation truth or the report.
+      const height = pose.sensor.height ?? 720, width = height * sensorAspect(pose.sensor);
+      camera.setViewOffset(width, height, crop.x * width, crop.y * height, crop.width * width, crop.height * height);
+    } else camera.clearViewOffset();
     camera.updateProjectionMatrix();
     invalidate();
-  }, [camera, invalidate, pose, size.width, size.height]);
+  }, [camera, invalidate, pose, crop, size.width, size.height]);
   return null;
 }
 

@@ -7,7 +7,7 @@ const ts = require("typescript");
 const exportsObject = {};
 const source = fs.readFileSync(path.resolve(__dirname, "../lib/trainingScene.ts"), "utf8");
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: exportsObject });
-const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport } = exportsObject;
+const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport, sensorReportCrop, cropSensorPoint } = exportsObject;
 
 test("world coordinates preserve projected axes and the camera basis matches the overview frustum", () => {
   assert.deepEqual(Array.from(scenePosition({ x: 20, y: 30, z: 40 })), [20, 40, -30]);
@@ -77,4 +77,61 @@ test("report reticles require an accepted measurement from this camera and never
   assert.deepEqual(acceptedSensorReport(frame, opticalPose), report);
   frame.observations.push({ ...rejected, x: 0, y: -100, timestamp: 25, accepted: true });
   assert.equal(acceptedSensorReport(frame, opticalPose), null, "a newer out-of-view report must not show an old reticle");
+});
+
+test("digital detail uses only accepted in-view reports and preserves the source image aspect", () => {
+  const observation = { source: "quad", x: 0, y: 100, timestamp: 20, accepted: true };
+  const frame = { boat: { x: 1000, y: 1000 }, observations: [observation] };
+  const crop = sensorReportCrop(frame, opticalPose);
+  assert.equal(crop.zoom, 12);
+  assert.equal(crop.width, 1 / 12);
+  assert.equal(crop.height, crop.width);
+  assert.ok(Math.abs(crop.x + crop.width / 2 - .5) < 1e-10);
+  assert.ok(Math.abs(crop.y + crop.height / 2 - .5) < 1e-10);
+  frame.boat = { x: -5000, y: -5000 };
+  assert.deepEqual(sensorReportCrop(frame, opticalPose), crop, "boat truth cannot move the crop");
+  for (const observations of [undefined, [], [{ ...observation, accepted: false }], [{ ...observation, source: "tower-1" }], [{ ...observation, y: -100 }]]) {
+    assert.equal(sensorReportCrop({ ...frame, observations }, opticalPose), null);
+  }
+  assert.equal(sensorReportCrop(frame, opticalPose, 0).zoom, 1);
+  assert.equal(sensorReportCrop(frame, opticalPose, Infinity).zoom, 1);
+});
+
+test("digital crops stay within image edges and reticles use the same crop transform", () => {
+  const frame = { observations: [{ source: "quad", x: 99, y: 100, timestamp: 30, accepted: true }] };
+  const crop = sensorReportCrop(frame, opticalPose);
+  assert.equal(crop.x + crop.width, 1);
+  assert.ok(crop.x >= 0 && crop.y >= 0 && crop.y + crop.height <= 1);
+  const projected = acceptedSensorReport(frame, opticalPose), detail = cropSensorPoint(projected, crop);
+  assert.ok(detail.x > .9 && detail.x < 1, "edge reports remain near the image edge instead of inventing outside pixels");
+  assert.ok(Math.abs(detail.y - .5) < 1e-10);
+  assert.equal(detail.timestamp, 30);
+  assert.equal(detail.depthM, projected.depthM);
+  assert.equal(cropSensorPoint({ x: 0, y: 0 }, crop), null);
+  assert.equal(cropSensorPoint(null, crop), null);
+  const origin = cropSensorPoint({ x: crop.x, y: crop.y }, crop);
+  assert.equal(origin.x, 0); assert.equal(origin.y, 0);
+});
+
+test("saved handoff report crops include the physical vessel at 150 s and the reported 245 s regression", () => {
+  const profile = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/arctic-profile.json"), "utf8"));
+  const report = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/graph-report.json"), "utf8"));
+  const replay = report.replays.find(item => item.seed === 591955);
+  assert.ok(replay, "the saved handoff example must exist");
+  for (const time of [150, 245]) for (const zoom of [12, 24]) {
+    const frame = replay.frames.find(item => item.t === time), pose = sensorPose(profile, frame, replay.towers, "quad");
+    const crop = sensorReportCrop(frame, pose, zoom);
+    assert.ok(crop, `the quad must have an accepted in-view report at ${time} s`);
+    const corners = [];
+    // Bounds of the existing six-metre vessel, in metres, at the replay's evaluation truth.
+    for (const dx of [-.9, .9]) for (const dy of [-3, 3]) for (const z of [0, 1.625]) {
+      const projected = projectSensorPoint(pose, { x: frame.boat.x + dx, y: frame.boat.y + dy, z });
+      assert.ok(projected, `the physical vessel must be in the source camera at ${time} s`);
+      const detail = cropSensorPoint(projected, crop);
+      assert.ok(detail, `the report-centered crop must contain the vessel at ${time} s`);
+      corners.push(detail);
+    }
+    const displayedWidth = (Math.max(...corners.map(point => point.x)) - Math.min(...corners.map(point => point.x))) * 186;
+    assert.ok(displayedWidth > 14, `the crop must make the compact vessel visible at ${time} s`);
+  }
 });
