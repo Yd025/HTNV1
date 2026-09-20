@@ -1,5 +1,9 @@
+import { buildSurveillanceRoutes, DEFAULT_FLIGHT_POLICY, FLIGHT_ALGORITHM, LEGACY_FLIGHT_ALGORITHM, normalizeFlightPolicy, observePosition, planPlaneShadow, surveillanceTarget, type FlightPolicy, type SearchPoint, type SurveillanceRole, type SurveillanceState } from './surveillance';
+
 /** Coordinates use Three.js X/Z; heading zero points toward +Z. */
 export type WorldData = {
+  algorithm?: typeof FLIGHT_ALGORITHM;
+  flightPolicy?: FlightPolicy;
   size: number;
   half: number;
   heights: number[];
@@ -22,12 +26,22 @@ export type AircraftState = {
   mode: "patrol" | "pursuit" | "searching";
   patrolIndex: number;
   searchPhase: number;
+  role?: SurveillanceRole;
+  target?: SearchPoint;
 };
 export type DroneState = AircraftState & { tagProgress: number; distanceToBoat: number };
 export type BoostPickup = { id: number; x: number; z: number };
 type AircraftLaunch = Pick<AircraftState, "id" | "x" | "z" | "heading" | "altitude" | "patrolIndex">;
 export type GameState = {
+  /** Frozen v3 pursuit stays available for saved recordings. */
+  planeTracking: 'point-pursuit' | 'observation-shadowing';
+  algorithm: typeof FLIGHT_ALGORITHM | typeof LEGACY_FLIGHT_ALGORITHM;
+  flightPolicy: FlightPolicy;
+  surveillance: SurveillanceState;
+  initialSurveillanceRoutes: SurveillanceState['routes'];
   status: "ready" | "playing" | "paused" | "caught";
+  /** Retain the original camera model only when replaying earlier recordings. */
+  aircraftSpotting: "forward-camera" | "overhead";
   /** Active real seconds, used for the survival score and capture duration. */
   time: number;
   /** Accelerated seconds, used for movement, radar, search, and difficulty. */
@@ -101,6 +115,7 @@ export const GAME_RULES = {
   planeFov: (69 * Math.PI) / 180,
   planeVision: 1100,
   planeSpeed: 100,
+  overheadSpottingRadius: 65,
   tagRadius: 65,
   tagSeconds: 2,
   graceSeconds: 6,
@@ -293,10 +308,17 @@ function beginNextPatrol(state: GameState, world: WorldData, progress: number): 
     drone.distanceToBoat = Math.hypot(drone.x - state.boat.x, drone.z - state.boat.z);
   });
   Object.assign(state.plane, launch(3400, 0, 3, 235), { speed: GAME_RULES.planeSpeed });
+  if (state.algorithm === FLIGHT_ALGORITHM) {
+    state.surveillance = { routes: buildSurveillanceRoutes(state.patrolPoints, [...state.drones, state.plane], state.towers, state.flightPolicy, world.spawn.heading), observation: null, leadDroneId: null };
+    for (const aircraft of [...state.drones, state.plane]) { aircraft.patrolIndex = 0; aircraft.target = undefined; aircraft.role = aircraft.id === 'P1' ? 'broad-search' : 'gap-search'; }
+  }
   state.distanceToDrone = Math.min(...state.drones.map((drone) => drone.distanceToBoat));
 }
 
-export function createGame(world: WorldData, seed = 0x51a7): GameState {
+export function createGame(world: WorldData, seed = 0x51a7, settings: { aircraftSpotting?: GameState["aircraftSpotting"]; algorithm?: GameState['algorithm']; flightPolicy?: Partial<FlightPolicy>; planeTracking?: GameState['planeTracking'] } = {}): GameState {
+  const aircraftSpotting = settings.aircraftSpotting ?? "overhead";
+  const algorithm = settings.algorithm ?? world.algorithm ?? FLIGHT_ALGORITHM;
+  const flightPolicy = normalizeFlightPolicy(settings.flightPolicy ?? world.flightPolicy ?? DEFAULT_FLIGHT_POLICY);
   const spawn = { ...world.spawn };
   const limit = world.half - 160;
   // Select a distant starting patrol location. Later pursuit only uses observations.
@@ -305,30 +327,37 @@ export function createGame(world: WorldData, seed = 0x51a7): GameState {
     return { x: clamp(spawn.x + Math.sin(angle) * 1350, -limit, limit), z: clamp(spawn.z + Math.cos(angle) * 1350, -limit, limit) };
   });
   options.sort((a, b) => Math.hypot(b.x - spawn.x, b.z - spawn.z) - Math.hypot(a.x - spawn.x, a.z - spawn.z));
-  // A fixed route covers the channel, including its launch area. It is generated
-  // from terrain alone and never changes in response to an unobserved boat.
+  // A fixed route covers navigable terrain without targeting an unobserved boat.
+  // Earlier recordings retain their original route through the ship's spawn.
   const candidates: { x: number; z: number }[] = [];
-  const divisions = Math.max(2, Math.ceil(world.half * 2 / 500));
+  const divisions = Math.max(2, Math.ceil(world.half * 2 / (algorithm === FLIGHT_ALGORITHM ? flightPolicy.laneSpacingM : 500)));
   const spacing = world.half * 2 / divisions;
   for (let row = 0; row < divisions; row++) for (let col = 0; col < divisions; col++) {
     const x = -world.half + (col + 0.5) * spacing;
     const z = -world.half + (row + 0.5) * spacing;
     if (isNavigable(world, x, z) && Math.hypot(x - spawn.x, z - spawn.z) > 200) candidates.push({ x, z });
   }
-  const patrolPoints = [{ x: spawn.x, z: spawn.z }];
+  const patrolPoints: { x: number; z: number }[] = aircraftSpotting === "forward-camera" ? [{ x: spawn.x, z: spawn.z }] : [];
   while (candidates.length) {
-    const previous = patrolPoints[patrolPoints.length - 1];
+    const previous = patrolPoints[patrolPoints.length - 1] ?? options[0];
     let closest = 0;
     for (let i = 1; i < candidates.length; i++) {
       if (Math.hypot(candidates[i].x - previous.x, candidates[i].z - previous.z) < Math.hypot(candidates[closest].x - previous.x, candidates[closest].z - previous.z)) closest = i;
     }
     patrolPoints.push(candidates.splice(closest, 1)[0]);
   }
-  const launch = (id: string, point: { x: number; z: number }, patrolIndex: number, altitude: number): AircraftLaunch => ({
-    id, ...point, patrolIndex,
-    heading: Math.atan2(patrolPoints[patrolIndex].x - point.x, patrolPoints[patrolIndex].z - point.z),
-    altitude: Math.max(world.waterLevel + altitude, sampleRiverHeight(world, point.x, point.z) + 70),
-  });
+  if (!patrolPoints.length) patrolPoints.push({ ...options[0] });
+  const launch = (id: string, point: { x: number; z: number }, patrolIndex: number, altitude: number): AircraftLaunch => {
+    if (aircraftSpotting === "overhead") {
+      patrolIndex = patrolPoints.reduce((best, target, i, points) =>
+        Math.hypot(target.x - point.x, target.z - point.z) < Math.hypot(points[best].x - point.x, points[best].z - point.z) ? i : best, 0);
+    }
+    return {
+      id, ...point, patrolIndex,
+      heading: Math.atan2(patrolPoints[patrolIndex].x - point.x, patrolPoints[patrolIndex].z - point.z),
+      altitude: Math.max(world.waterLevel + altitude, sampleRiverHeight(world, point.x, point.z) + 70),
+    };
+  };
   const secondPosition = options.reduce((best, point) =>
     Math.hypot(point.x - options[0].x, point.z - options[0].z) > Math.hypot(best.x - options[0].x, best.z - options[0].z) ? point : best, options[1]);
   const initialDrones = [
@@ -342,10 +371,14 @@ export function createGame(world: WorldData, seed = 0x51a7): GameState {
     return separation(point) > separation(best) ? point : best;
   }, options[1]);
   const initialPlane = launch("P1", planePosition, 0, 235);
-  const resetAircraft = (initial: AircraftLaunch): AircraftState => ({ ...initial, speed: 0, detecting: false, mode: "patrol", searchPhase: 0 });
+  const resetAircraft = (initial: AircraftLaunch): AircraftState => ({ ...initial, speed: 0, detecting: false, mode: "patrol", searchPhase: 0,
+    ...(algorithm === FLIGHT_ALGORITHM ? { patrolIndex: 0, role: initial.id === 'P1' ? 'broad-search' : 'gap-search', target: undefined } : {}) });
   const drones = initialDrones.map((initial) => ({ ...resetAircraft(initial), tagProgress: 0, distanceToBoat: Math.hypot(initial.x - spawn.x, initial.z - spawn.z) }));
+  const routes = algorithm === FLIGHT_ALGORITHM ? buildSurveillanceRoutes(patrolPoints, [...initialDrones, initialPlane], world.towers, flightPolicy, world.spawn.heading) : {};
   const state: GameState = {
-    status: "ready", time: 0, simulationTime: 0,
+    algorithm, flightPolicy, planeTracking: settings.planeTracking ?? 'observation-shadowing', surveillance: { routes, observation: null, leadDroneId: null },
+    initialSurveillanceRoutes: structuredClone(routes),
+    status: "ready", aircraftSpotting, time: 0, simulationTime: 0,
     boat: { ...spawn, ...restingBoat() },
     drones, plane: { ...resetAircraft(initialPlane), speed: GAME_RULES.planeSpeed },
     towers: world.towers.map((tower) => ({ ...tower, baseHeading: tower.heading, detecting: false })),
@@ -375,6 +408,11 @@ export function startGame(state: GameState): void {
   Object.assign(state.plane, state.initialPlane, { speed: GAME_RULES.planeSpeed, detecting: false, mode: "patrol", searchPhase: 0 });
   state.towers = state.initialTowers.map((tower) => ({ ...tower, baseHeading: tower.heading, detecting: false }));
   state.patrolPoints = state.initialPatrolPoints.map((point) => ({ ...point }));
+  state.surveillance = { routes: structuredClone(state.initialSurveillanceRoutes), observation: null, leadDroneId: null };
+  if (state.algorithm === FLIGHT_ALGORITHM) for (const aircraft of [...state.drones, state.plane]) {
+    aircraft.patrolIndex = 0; aircraft.target = undefined;
+    aircraft.role = aircraft.id === 'P1' ? 'broad-search' : 'gap-search';
+  }
   Object.assign(state, {
     status: "playing", time: 0, simulationTime: 0, detected: false, alert: "clear", tagProgress: 0,
     distanceToDrone: Math.min(...state.drones.map((drone) => drone.distanceToBoat)),
@@ -514,47 +552,61 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
       && hasLineOfSight(world, tower.x, tower.z, tower.height + 55, boat.x, boat.z, world.waterLevel + 5);
     towerSeesBoat ||= tower.detecting;
   });
+  const overheadSpotting = state.aircraftSpotting === "overhead";
   const aircraftSeeBoat = (aircraft: AircraftState, range: number, fov: number) => active
-    && Math.hypot(aircraft.x - boat.x, aircraft.z - boat.z) <= range
-    && Math.abs(angleDifference(Math.atan2(boat.x - aircraft.x, boat.z - aircraft.z), aircraft.heading)) <= fov / 2
+    && Math.hypot(aircraft.x - boat.x, aircraft.z - boat.z) <= (overheadSpotting ? GAME_RULES.overheadSpottingRadius : range)
+    && (overheadSpotting || Math.abs(angleDifference(Math.atan2(boat.x - aircraft.x, boat.z - aircraft.z), aircraft.heading)) <= fov / 2)
     && hasLineOfSight(world, aircraft.x, aircraft.z, aircraft.altitude, boat.x, boat.z, world.waterLevel + 5);
-  // Every participant contributes only a real camera/radar observation. A plane
-  // looking away from the boat cannot report it merely because it is nearby.
+  // New runs require a clear downward observation directly over the ship.
+  // The forward camera cone remains available for deterministic older replays.
   for (const drone of state.drones) drone.detecting = aircraftSeeBoat(drone, GAME_RULES.droneVision, GAME_RULES.droneFov);
   state.plane.detecting = aircraftSeeBoat(state.plane, GAME_RULES.planeVision, GAME_RULES.planeFov);
   state.detected = towerSeesBoat || state.drones.some((drone) => drone.detecting) || state.plane.detecting;
   if (state.detected) {
+    if (state.algorithm === FLIGHT_ALGORITHM) {
+      state.surveillance.observation = observePosition(state.surveillance.observation, boat, state.simulationTime, GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier);
+      const lead = state.drones.find((drone) => drone.id === state.surveillance.leadDroneId);
+      const seeing = state.drones.find((drone) => drone.detecting);
+      if (!lead || (!lead.detecting && seeing)) state.surveillance.leadDroneId = (seeing ?? state.drones.reduce((best, drone) =>
+        Math.hypot(drone.x - boat.x, drone.z - boat.z) < Math.hypot(best.x - boat.x, best.z - boat.z) ? drone : best)).id;
+    }
     state.lastKnown = { x: boat.x, z: boat.z };
     state.lostFor = 0;
     for (const aircraft of [...state.drones, state.plane]) aircraft.searchPhase = 0;
   } else if (state.lastKnown) {
     state.lostFor += STEP;
     if (state.lostFor >= 45) {
+      state.surveillance.observation = null;
+      state.surveillance.leadDroneId = null;
       state.lastKnown = null;
       state.lostFor = 0;
       // Resume the terrain-defined route near the last search, without consulting
       // the boat's hidden position.
       for (const aircraft of [...state.drones, state.plane]) {
-        aircraft.patrolIndex = state.patrolPoints.reduce((best, point, i, points) =>
+        const route = state.algorithm === FLIGHT_ALGORITHM ? state.surveillance.routes[aircraft.id] : state.patrolPoints;
+        aircraft.patrolIndex = route.reduce((best, point, i, points) =>
           Math.hypot(point.x - aircraft.x, point.z - aircraft.z) < Math.hypot(points[best].x - aircraft.x, points[best].z - aircraft.z) ? i : best, 0);
       }
     }
   }
 
   const patrolTarget = (aircraft: AircraftState, reach: number) => {
-    let waypoint = state.patrolPoints[aircraft.patrolIndex];
+    const route = state.algorithm === FLIGHT_ALGORITHM ? state.surveillance.routes[aircraft.id] : state.patrolPoints;
+    aircraft.patrolIndex %= route.length;
+    let waypoint = route[aircraft.patrolIndex];
     if (Math.hypot(aircraft.x - waypoint.x, aircraft.z - waypoint.z) < reach) {
-      aircraft.patrolIndex = (aircraft.patrolIndex + 1) % state.patrolPoints.length;
-      waypoint = state.patrolPoints[aircraft.patrolIndex];
+      aircraft.patrolIndex = (aircraft.patrolIndex + 1) % route.length;
+      waypoint = route[aircraft.patrolIndex];
     }
     return waypoint;
   };
   const limit = state.loop === 0 ? world.half - 80 : GAME_RULES.loopLength / 2 + 450;
   const minX = state.patrolOrigin.x - limit, maxX = state.patrolOrigin.x + limit;
   const minZ = state.patrolOrigin.z - limit, maxZ = state.patrolOrigin.z + limit;
-  const moveAircraft = (aircraft: AircraftState, target: { x: number; z: number }, turnRate: number, altitude: number) => {
+  const moveAircraft = (aircraft: AircraftState, target: { x: number; z: number }, turnRate: number, altitude: number, plannedRate?: number) => {
     const desiredHeading = Math.atan2(clamp(target.x, minX, maxX) - aircraft.x, clamp(target.z, minZ, maxZ) - aircraft.z);
-    aircraft.heading += clamp(angleDifference(desiredHeading, aircraft.heading), -STEP * turnRate, STEP * turnRate);
+    aircraft.heading += plannedRate === undefined ? clamp(angleDifference(desiredHeading, aircraft.heading), -STEP * turnRate, STEP * turnRate)
+      : STEP * clamp(plannedRate, -turnRate, turnRate);
     aircraft.x = clamp(aircraft.x + Math.sin(aircraft.heading) * aircraft.speed * STEP, minX, maxX);
     aircraft.z = clamp(aircraft.z + Math.cos(aircraft.heading) * aircraft.speed * STEP, minZ, maxZ);
     const ground = sampleRiverHeight(world, aircraft.x, aircraft.z);
@@ -564,7 +616,10 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
 
   state.drones.forEach((drone, i) => {
     let target: { x: number; z: number };
-    if (state.lastKnown) {
+    if (state.algorithm === FLIGHT_ALGORITHM && state.surveillance.observation) {
+      drone.role = state.detected ? (state.surveillance.leadDroneId === drone.id ? 'track' : 'forward-support') : 'reacquire';
+      target = surveillanceTarget(state.surveillance.observation, state.flightPolicy, state.simulationTime, drone.role, i, world.spawn.heading);
+    } else if (state.lastKnown) {
       const searchDistance = Math.hypot(drone.x - state.lastKnown.x, drone.z - state.lastKnown.z);
       if (!state.detected && searchDistance < 200) drone.searchPhase += STEP * 0.65;
       const orbit = drone.searchPhase > 0 ? 150 : 0;
@@ -572,15 +627,18 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
         x: state.lastKnown.x + Math.sin(drone.searchPhase + i * Math.PI) * orbit,
         z: state.lastKnown.z + Math.cos(drone.searchPhase + i * Math.PI) * orbit,
       };
-    } else target = patrolTarget(drone, 100);
+    } else { target = patrolTarget(drone, 100); if (state.algorithm === FLIGHT_ALGORITHM) drone.role = 'gap-search'; }
+    if (state.algorithm === FLIGHT_ALGORITHM) drone.target = { ...target };
     const chaseSpeed = getDroneTopSpeed(state.loop, state.detected);
     const difficulty = getDroneTopSpeed(state.loop) / GAME_RULES.droneMaxSpeed;
     // Boat velocity and distance may influence pursuit only while a sensor has
     // an actual observation. Hidden movement never changes the search flight.
     let desiredSpeed = (state.lastKnown ? 53 : Math.min(70, 38 + patrolTime * 0.07)) * difficulty;
     if (state.detected) {
-      const observedDistance = Math.hypot(drone.x - boat.x, drone.z - boat.z);
-      const approachSpeed = Math.max(18, Math.abs(boat.speed) + Math.max(0, observedDistance - 25) * 0.65);
+      const observed = state.surveillance.observation;
+      const observedDistance = state.algorithm === FLIGHT_ALGORITHM ? Math.hypot(drone.x - target.x, drone.z - target.z) : Math.hypot(drone.x - boat.x, drone.z - boat.z);
+      const observedSpeed = state.algorithm === FLIGHT_ALGORITHM && observed ? Math.hypot(observed.vx, observed.vz) : Math.abs(boat.speed);
+      const approachSpeed = Math.max(18, observedSpeed + Math.max(0, observedDistance - 25) * 0.65);
       desiredSpeed = Math.min(chaseSpeed, approachSpeed);
     }
     const acceleration = (state.detected ? GAME_RULES.droneDetectedAcceleration : GAME_RULES.droneAcceleration)
@@ -597,16 +655,33 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
 
   const plane = state.plane;
   let planeTarget: { x: number; z: number };
-  if (state.lastKnown) {
+  let plannedRate: number | undefined;
+  if (state.algorithm === FLIGHT_ALGORITHM && state.surveillance.observation) {
+    // Continue observation passes until a quad has its own visual contact;
+    // only then hand over and fly ahead to support the next gap.
+    plane.role = !state.detected ? 'reacquire' : state.drones.some((drone) => drone.detecting) ? 'forward-support' : 'track';
+    if (state.planeTracking === 'observation-shadowing') {
+      // Quads own close pursuit. The plane keeps its own useful view through
+      // repeat passes instead of abandoning the boat for a point far ahead.
+      // Even a fresh quad report is a cue, not proof that the plane sees it.
+      if (!state.surveillance.planePlan || state.simulationTime - state.surveillance.planePlan.at >= 1) {
+        state.surveillance.planePlan = planPlaneShadow(plane, state.surveillance.observation, state.flightPolicy, state.simulationTime,
+          { speed: GAME_RULES.planeSpeed, turnRate: 0.43, viewRadius: GAME_RULES.overheadSpottingRadius, minX, maxX, minZ, maxZ });
+      }
+      planeTarget = state.surveillance.planePlan.target;
+      plannedRate = state.surveillance.planePlan.turnRate;
+    } else planeTarget = surveillanceTarget(state.surveillance.observation, state.flightPolicy, state.simulationTime, plane.role, 2, world.spawn.heading);
+  } else if (state.lastKnown) {
     // Fixed-wing aircraft cannot hover: a bounded turn produces repeated passes
-    // and a circling search around the last observation. Its FPV camera always
-    // faces its own heading, so it must really reacquire the boat on a pass.
+    // and a circling search around the last observation. It must obtain a new
+    // observation on each pass before reporting the boat's updated position.
     if (!state.detected && Math.hypot(plane.x - state.lastKnown.x, plane.z - state.lastKnown.z) < 500) plane.searchPhase += STEP * 0.35;
     const orbit = plane.searchPhase > 0 ? 260 : 0;
     planeTarget = { x: state.lastKnown.x + Math.sin(plane.searchPhase) * orbit, z: state.lastKnown.z + Math.cos(plane.searchPhase) * orbit };
-  } else planeTarget = patrolTarget(plane, 300);
+  } else { planeTarget = patrolTarget(plane, 300); state.surveillance.planePlan = undefined; if (state.algorithm === FLIGHT_ALGORITHM) plane.role = 'broad-search'; }
+  if (state.algorithm === FLIGHT_ALGORITHM) plane.target = { ...planeTarget };
   plane.speed = GAME_RULES.planeSpeed;
-  moveAircraft(plane, planeTarget, 0.43, 235);
+  moveAircraft(plane, planeTarget, 0.43, 235, plannedRate);
 
   state.distanceToDrone = Math.min(...state.drones.map((drone) => drone.distanceToBoat));
   state.tagProgress = Math.max(...state.drones.map((drone) => drone.tagProgress));

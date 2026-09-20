@@ -7,10 +7,11 @@
     "build": "next build",
     "start": "next start -p 3100",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/game.test.js"
+    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/*.test.js"
   },
   "dependencies": {
     "@react-three/fiber": "8.17.10",
+    "@sentry/nextjs": "10.75.0",
     "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1",

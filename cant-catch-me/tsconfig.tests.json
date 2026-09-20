@@ -9,5 +9,5 @@
     "outDir": ".test-build",
     "types": ["node"]
   },
-  "include": ["lib/game.ts", "tests/game.test.ts"]
+  "include": ["lib/game.ts", "lib/learning*.ts", "tests/*.test.ts"]
 }

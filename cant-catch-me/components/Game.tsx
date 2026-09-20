@@ -3,6 +3,7 @@ import Scene, { type CameraMode, type Models } from './Scene';
 import Radar from './Radar';
 import LoadingScreen from './LoadingScreen';
 import TowerWarning from './TowerWarning';
+import { OpeningAttemptRecorder, flushPendingAttempts, requestLearningStart } from '../lib/learningClient';
 import { GAME_RULES, createGame, formatTime, startGame, togglePause, type GameState, type InputState, type WorldData } from '../lib/game';
 
 function Icon({name,...props}:{name:'boat'|'arrow'|'pause'|'play'|'retry'|'close'|'pin'|'expand'|'camera'|'look'|'boost';className?:string}) {
@@ -23,7 +24,8 @@ class SceneBoundary extends Component<{children:ReactNode},{failed:boolean}> {
 
 const snapshot=(s:GameState):GameState=>({...s,boat:{...s.boat},drones:s.drones.map(drone=>({...drone})),plane:{...s.plane},towers:s.towers.map(t=>({...t})),pickups:s.pickups.map(pickup=>({...pickup})),lastKnown:s.lastKnown?{...s.lastKnown}:null});
 // Boat dynamics and faster detected pursuit have their own score record.
-const BEST_KEY='cant-catch-me-best-physics-loop-patrol-pace2';
+// Keep earlier long-range spotting scores separate from overhead-only play.
+const BEST_KEY='cant-catch-me-best-overhead-spotting-v2';
 const formatDistance=(metres:number)=>metres>=1000?`${(metres/1000).toFixed(1)} km`:`${Math.round(metres)} m`;
 
 function HowToPlay() {
@@ -39,7 +41,7 @@ function HowToPlay() {
     <p className="touch-guide">On touch screens, use the arrows along the bottom.</p>
     <div className="play-rules">
       <div><h3>Feel the weight</h3><p>Build speed with the throttle and brake early. The hull carries momentum, drifts through turns and slows against the water. Keep heading downriver: no reversing or U-turns.</p></div>
-      <div><h3>Break their view</h3><p>A tower warning means you’ve been spotted. Drones accelerate while the patrol can see you; the scout only shares sightings. A drone within {GAME_RULES.tagRadius} m needs a clear view for {GAME_RULES.tagSeconds} uninterrupted seconds to tag you. Find cover to break its lock.</p></div>
+      <div><h3>Break their view</h3><p>Aircraft follow patrol routes until a tower spots you or an aircraft passes overhead, within {GAME_RULES.overheadSpottingRadius} m with a clear view. They chase a shared sighting and search its last location when you disappear. A drone must stay within {GAME_RULES.tagRadius} m with a clear view for {GAME_RULES.tagSeconds} uninterrupted seconds to tag you. The scout cannot capture you.</p></div>
       <div className="boost-rule"><h3><Icon name="boost"/>Catch a speed boost</h3><p>Collect orange boosts for {GAME_RULES.boostDuration} seconds of extra speed. They appear in different places each run.</p></div>
       <div><h3>Outrun the next patrol</h3><p>Every new stretch brings fresh towers and drones. Each patrol is a little faster than the last. The river and radar follow you; your run keeps going.</p></div>
     </div>
@@ -68,6 +70,9 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const [hud,setHud]=useState(()=>snapshot(game.current)),[best,setBest]=useState(0),[sceneReady,setSceneReady]=useState(false),[reducedMotion,setReducedMotion]=useState(false),[controls,setControls]=useState(false);
   const keys=useRef(new Set<string>()),touch=useRef(new Set<string>()),newBest=useRef(false),main=useRef<HTMLElement>(null),action=useRef<HTMLButtonElement>(null),guideButton=useRef<HTMLButtonElement>(null),guideClose=useRef<HTMLButtonElement>(null);
   const [loopNotice,setLoopNotice]=useState(false);
+  const [starting,setStarting]=useState(false);
+  const startingRef=useRef(false),mounted=useRef(true),startController=useRef<AbortController|null>(null);
+  const recorder=useRef<OpeningAttemptRecorder|null>(null);
   const reported=useRef('ready'),bestRecord=useRef(0),bestAtRunStart=useRef(0);
   const saveBest=useCallback((updateDisplay=true)=>{
     const score=game.current.time;
@@ -94,11 +99,46 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const changeCamera=useCallback(()=>{setCameraMode(previous=>previous==='helm'?'chase':'helm');if(game.current.status==='playing')main.current?.focus();},[]);
   const changeMotion=()=>setMotionEnabled(previous=>{try{localStorage.setItem('cant-catch-me-camera-motion',String(!previous));}catch{}return !previous;});
   const refreshInput=useCallback(()=>{
+    if(game.current.status!=='playing'){input.current={throttle:0,steer:0};lookBack.current=false;return;}
     const pressed=(...codes:string[])=>codes.some(c=>keys.current.has(c)||touch.current.has(c));
     input.current={throttle:pressed('KeyS','ArrowDown')?-1:Number(pressed('KeyW','ArrowUp')),steer:Number(pressed('KeyD','ArrowRight'))-Number(pressed('KeyA','ArrowLeft'))};
   },[]);
-  const begin=useCallback(()=>{clearInput();newBest.current=false;bestAtRunStart.current=bestRecord.current;if(game.current.status==='caught')game.current=createGame(world,Math.floor(Math.random()*0x100000000));startGame(game.current);setControls(false);update();main.current?.focus();},[clearInput,update,world]);
-  const pause=useCallback(()=>{clearInput();togglePause(game.current);update();},[clearInput,update]);
+  const begin=useCallback(async()=>{
+    if(startingRef.current||!['ready','caught'].includes(game.current.status))return;
+    startingRef.current=true;setStarting(true);clearInput();
+    const controller=new AbortController();startController.current=controller;
+    const seed=Math.floor(Math.random()*0x100000000);
+    try{
+      const selected=await requestLearningStart(world,seed,controller.signal);
+      if(!mounted.current||controller.signal.aborted)return;
+      recorder.current?.abandon(game.current);
+      // Pin the selected tower sites and flight policy to this attempt.
+      // Terrain, camera limits, capture rules and the boost seed stay fixed.
+      game.current=createGame(selected.world,seed);
+      recorder.current=selected.session?new OpeningAttemptRecorder(selected.session):null;
+      newBest.current=false;bestAtRunStart.current=bestRecord.current;
+      startGame(game.current);setControls(false);
+      if(document.hidden)togglePause(game.current);
+      update();main.current?.focus();
+    }finally{
+      startingRef.current=false;startController.current=null;
+      if(mounted.current)setStarting(false);
+    }
+  },[clearInput,update,world]);
+  const beforeTick=useCallback((state:GameState,controls:InputState)=>recorder.current?.beforeTick(state,controls),[]);
+  const afterStep=useCallback((state:GameState)=>recorder.current?.afterStep(state),[]);
+  const pause=useCallback(()=>{clearInput();togglePause(game.current);if(game.current.status==='playing'){main.current?.focus();}update();},[clearInput,update]);
+  useEffect(()=>{
+    mounted.current=true;flushPendingAttempts();
+    const leaving=()=>recorder.current?.abandon(game.current,true);
+    window.addEventListener('online',flushPendingAttempts);
+    window.addEventListener('pagehide',leaving);
+    return ()=>{
+      mounted.current=false;startController.current?.abort();leaving();
+      window.removeEventListener('online',flushPendingAttempts);
+      window.removeEventListener('pagehide',leaving);
+    };
+  },[]);
   useEffect(()=>{
     try{const saved=Number(localStorage.getItem(BEST_KEY));if(Number.isFinite(saved)&&saved>0){bestRecord.current=saved;setBest(saved);}setMotionEnabled(localStorage.getItem('cant-catch-me-camera-motion')!=='false');}catch{}
     const mq=window.matchMedia('(prefers-reduced-motion: reduce)');setReducedMotion(mq.matches);const motion=()=>setReducedMotion(mq.matches);mq.addEventListener('change',motion);
@@ -114,6 +154,8 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   useEffect(()=>{
     const down=(e:KeyboardEvent)=>{
       const status=game.current.status;
+      const editing=e.target instanceof HTMLElement&&Boolean(e.target.closest('input,textarea,select,[contenteditable="true"]'));
+      if(editing)return;
       if(e.code==='Escape'||e.code==='KeyP'){if(!e.repeat){e.preventDefault();if(status==='ready'&&controls){setControls(false);guideButton.current?.focus();}else pause();}return;}
       if((e.code==='Space'||e.code==='Enter')&&(status==='ready'||status==='caught')&&sceneReady){if(!(e.target instanceof HTMLButtonElement)){e.preventDefault();begin();}return;}
       if(e.target instanceof HTMLButtonElement&&(e.code==='Space'||e.code==='Enter'))return;
@@ -130,6 +172,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   },[begin,pause,refreshInput,clearInput,sceneReady,update,changeCamera,controls]);
   useEffect(()=>{if(hud.status==='paused'||hud.status==='caught')action.current?.focus();},[hud.status]);
   useEffect(()=>{if(controls&&hud.status==='ready')guideClose.current?.focus();},[controls,hud.status]);
+  useEffect(()=>{if(hud.status==='caught')clearInput();},[hud.status,clearInput]);
   useEffect(()=>{
     if(!hud.loop){setLoopNotice(false);return;}
     setLoopNotice(true);
@@ -147,7 +190,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const droneBearing=Math.atan2(Math.sin(relativeDrone),Math.cos(relativeDrone));
   const droneDirection=Math.abs(droneBearing)<Math.PI/4?'ahead':Math.abs(droneBearing)>Math.PI*3/4?'astern':droneBearing>0?'to port':'to starboard';
   return <main ref={main} tabIndex={-1} className={`game-shell ${cameraMode==='helm'?'helm-view':''} ${isIntro?'is-intro':''} ${controls&&isIntro?'guide-open':''} ${towerWarning?'has-tower-contact':''} ${hud.status==='caught'?'is-caught':''}`} aria-label="Can't Catch Me boat survival game">
-    <div className="scene"><Scene world={world} models={models} game={game} input={input} onUpdate={update} onReady={ready} reducedMotion={reducedMotion||!motionEnabled} cameraMode={cameraMode} lookBack={lookBack}/></div>
+    <div className="scene"><Scene world={world} models={models} game={game} input={input} onUpdate={update} onReady={ready} onBeforeTick={beforeTick} onAfterStep={afterStep} reducedMotion={reducedMotion||!motionEnabled} cameraMode={cameraMode} lookBack={lookBack}/></div>
     <div className="vignette"/>
     <header className="topbar">
       <div className="brand"><span className="brand-icon"><Icon name="boat"/></span><span>can’t catch me<span className="brand-period">.</span></span></div>
@@ -162,7 +205,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
       <section className="intro">
         <h1>can’t<br/>catch me<span>.</span></h1>
         <p className="intro-copy">Two towers. Two drones. One endless escape.<br/>Fresh patrols. Faster drones. Keep going.</p>
-        <button className="primary start" disabled={!sceneReady} onClick={begin}>{sceneReady?'Make your escape':'Preparing the water…'}<Icon name="arrow"/></button>
+        <button className="primary start" disabled={!sceneReady||starting} onClick={begin}>{starting?'Preparing your escape…':sceneReady?'Make your escape':'Preparing the water…'}<Icon name="arrow"/></button>
         <button ref={guideButton} className="text-button intro-help" disabled={!sceneReady} onClick={()=>setControls(previous=>!previous)} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button>
         <div className="intro-meta"><span>{GAME_RULES.pace}× pace</span><span className="meta-dot"/><span>Survive as long as you can</span>{best>0&&<><span className="meta-dot"/><span>Best {formatTime(best)}</span></>}</div>
       </section>
@@ -193,7 +236,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
       if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
       else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
     }}>
-      {hud.status==='paused'?<><span className="menu-symbol"><Icon name="pause"/></span><h2 id="menu-title">Catch your breath.</h2><p>The chase is paused. The coast can wait.</p><button ref={action} className="primary" onClick={pause}>Back to the water<Icon name="play"/></button></>:<><span className="menu-symbol caught-symbol"><Icon name="boat"/></span><h2 id="menu-title">Caught. This time.</h2><p>You kept them chasing for</p><div className="final-time">{formatTime(hud.time)}</div><span className="best-result">{newBest.current?'A new personal best.':`Your best: ${formatTime(best)}`}</span><button ref={action} className="primary" onClick={begin}>One more escape<Icon name="retry"/></button></>}
+      {hud.status==='paused'?<><span className="menu-symbol"><Icon name="pause"/></span><h2 id="menu-title">Catch your breath.</h2><p>The chase is paused. The coast can wait.</p><button ref={action} className="primary" onClick={pause}>Back to the water<Icon name="play"/></button></>:<><span className="menu-symbol caught-symbol"><Icon name="boat"/></span><h2 id="menu-title">Caught. This time.</h2><p>You kept them chasing for</p><div className="final-time">{formatTime(hud.time)}</div><span className="best-result">{newBest.current?'A new personal best.':`Your best: ${formatTime(best)}`}</span><button ref={action} className="primary" disabled={starting} onClick={begin}>{starting?'Preparing your escape…':'One more escape'}<Icon name="retry"/></button></>}
       <div className="view-options"><button onClick={changeCamera}>View: {cameraMode==='helm'?'Helm':'Chase'}</button><button onClick={changeMotion} aria-pressed={motionEnabled&&!reducedMotion} disabled={reducedMotion}>Camera sway: {motionEnabled&&!reducedMotion?'on':'off'}</button></div>
       <button className="text-button" onClick={()=>setControls(!controls)} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button>
       {controls&&<HowToPlay/>}

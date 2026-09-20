@@ -4,11 +4,12 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { GAME_RULES, SIMULATION_STEP, getSector, sampleRiverHeight, stepGame, type GameState, type InputState, type WorldData } from '../lib/game';
 import { Ocean, FoamWake, hullWaterPose, type BoatPose } from './Ocean';
+import SentryCanvasRecorder from './SentryCanvasRecorder';
 
 type Part = { name: string; type: string; material: string; color?: string; positions?: number[]; indices?: number[]; matrix?: number[]; size?: number[]; radius?: number; length?: number };
 export type Models = Record<string, { parts: Part[] }>;
 export type CameraMode = 'helm' | 'chase';
-type Props = { world: WorldData; models: Models; game: MutableRefObject<GameState>; input: MutableRefObject<InputState>; onUpdate: () => void; reducedMotion: boolean; onReady: () => void; cameraMode: CameraMode; lookBack: MutableRefObject<boolean> };
+type Props = { world: WorldData; models: Models; game: MutableRefObject<GameState>; input: MutableRefObject<InputState>; onUpdate: () => void; reducedMotion: boolean; onReady: () => void; cameraMode: CameraMode; lookBack: MutableRefObject<boolean>; onBeforeTick?: (state: GameState, input: InputState) => void; onAfterStep?: (state: GameState) => void };
 const palette: Record<string, string> = { body: '#244653', panel: '#edf4ee', metal: '#708e91', accent: '#f6a04d' };
 
 function buildModel(model: Models[string], kind: string) {
@@ -189,7 +190,7 @@ function blendAircraft(target:AircraftPose,a:AircraftPose,b:AircraftPose,alpha:n
 }
 
 function World(props: Props) {
-  const { world, models, game, input, onUpdate, reducedMotion, onReady, cameraMode, lookBack } = props;
+  const { world, models, game, input, onUpdate, reducedMotion, onReady, cameraMode, lookBack, onBeforeTick, onAfterStep } = props;
   const boat=useRef<THREE.Group>(null), drones=useRef<(THREE.Group|null)[]>([]), plane=useRef<THREE.Group>(null);
   const clock=useRef(0),report=useRef(0),previousTime=useRef(0),previousStatus=useRef('ready');
   const previousPose=useRef(copyPose(game.current)),pose=useRef(copyPose(game.current));
@@ -213,7 +214,9 @@ function World(props: Props) {
       Object.assign(previousPose.current.boat,s.boat);
       s.drones.forEach((d,i)=>Object.assign(previousPose.current.drones[i],d));
       Object.assign(previousPose.current.plane,s.plane);
+      onBeforeTick?.(s,input.current);
     });
+    onAfterStep?.(s);
     if(s.loop!==previousLoop.current){
       // Patrols are replaced at a new stretch; never interpolate their flight
       // across kilometres. The boat and its camera remain continuous.
@@ -296,5 +299,5 @@ function World(props: Props) {
 }
 
 export default function Scene(props: Props) {
-  return <Canvas camera={{position:[1700,1750,2300],fov:48,near:1,far:15000}} dpr={[1,1.6]} gl={{antialias:true,alpha:false,powerPreference:'high-performance'}}><World {...props}/></Canvas>;
+  return <Canvas camera={{position:[1700,1750,2300],fov:48,near:1,far:15000}} dpr={[1,1.6]} gl={{antialias:true,alpha:false,powerPreference:'high-performance'}}><World {...props}/><SentryCanvasRecorder/></Canvas>;
 }

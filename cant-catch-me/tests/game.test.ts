@@ -3,11 +3,14 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { GAME_RULES, SIMULATION_STEP, createGame, formatTime, getDroneTopSpeed, getSector, hasLineOfSight, isNavigable, sampleHeight, sampleRiverHeight, startGame, stepGame, togglePause, type GameState, type InputState, type WorldData } from "../lib/game";
+import { LEGACY_FLIGHT_ALGORITHM } from '../lib/surveillance';
 
 function ocean(): WorldData {
   return { size: 131, half: 3250, heights: Array(131 * 131).fill(-20), waterLevel: 1, towers: [], spawn: { x: 0, z: 0, heading: 0 }, source: "test" };
 }
-function play(world: WorldData): GameState { const game = createGame(world); startGame(game); return game; }
+function play(world: WorldData, aircraftSpotting?: GameState["aircraftSpotting"]): GameState {
+  const game = createGame(world, undefined, { aircraftSpotting }); startGame(game); return game;
+}
 function setBoatSpeed(game: GameState, speed: number, enginePower = 1): void {
   Object.assign(game.boat, { speed, enginePower, velocityX: Math.sin(game.boat.heading) * speed, velocityZ: Math.cos(game.boat.heading) * speed });
 }
@@ -351,12 +354,12 @@ test("hidden boat positions and speeds cannot affect either drone or the scoutin
   assert.equal(b.alert, "searching");
 });
 
-test("published camera angles constrain each aircraft and terrain still blocks every sensor", () => {
+test("legacy forward cameras retain their angles, range and terrain occlusion", () => {
   assert.equal(GAME_RULES.radarFov, 60 * Math.PI / 180);
   assert.equal(GAME_RULES.droneFov, 114.6 * Math.PI / 180);
   assert.equal(GAME_RULES.planeFov, 69 * Math.PI / 180);
   for (const sensorIndex of [0, 1, 2]) {
-    const world = ocean(); const game = play(world); game.simulationTime = 6; game.time = 3;
+    const world = ocean(); const game = play(world, "forward-camera"); game.simulationTime = 6; game.time = 3;
     const aircraft = [...game.drones, game.plane];
     for (const craft of aircraft) Object.assign(craft, { x: 3000, z: 3000 });
     const sensor = aircraft[sensorIndex];
@@ -372,22 +375,93 @@ test("published camera angles constrain each aircraft and terrain still blocks e
   }
 });
 
+test("aircraft only spot directly overhead, regardless of heading, and never from 100–1100 metres away", () => {
+  assert.equal(GAME_RULES.overheadSpottingRadius, 65);
+  for (const sensorIndex of [0, 1, 2]) for (const distance of [0, 64, 65, 65.1, 100, 300, 600, 1100]) {
+    const world = ocean(); const game = play(world); game.simulationTime = 6;
+    assert.equal(game.aircraftSpotting, "overhead");
+    const aircraft = [...game.drones, game.plane];
+    for (const craft of aircraft) Object.assign(craft, { x: 3000, z: 3000, speed: 0 });
+    const sensor = aircraft[sensorIndex];
+    // Face away inside the overhead footprint; face directly at the boat outside it.
+    Object.assign(sensor, { x: 0, z: -distance, heading: distance <= 65 ? Math.PI : 0, altitude: 106 });
+    stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+    assert.equal(sensor.detecting, distance <= 65, `${sensor.id} at ${distance} m`);
+    assert.equal(game.detected, distance <= 65);
+    assert.deepEqual(game.lastKnown, distance <= 65 ? { x: 0, z: 0 } : null);
+    assert.ok(aircraft.every(craft => craft.mode === (distance <= 65 ? "pursuit" : "patrol")));
+  }
+});
+
+test("overhead spotting requires both an active patrol and an unobstructed downward view", () => {
+  for (const sensorIndex of [0, 1, 2]) {
+    const world = ocean(); world.half = 325;
+    const game = play(world);
+    const aircraft = [...game.drones, game.plane];
+    const sensor = aircraft[sensorIndex];
+    const tickSensor = () => {
+      for (const craft of aircraft) Object.assign(craft, { x: 3000, z: 3000, speed: 0 });
+      Object.assign(sensor, { x: 60, z: 0, heading: Math.PI / 2, altitude: 106 });
+      stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+    };
+    tickSensor();
+    assert.equal(sensor.detecting, false, `${sensor.id} must respect the grace period`);
+    game.simulationTime = GAME_RULES.graceSeconds;
+    for (let row = 0; row < world.size; row++) world.heights[row * world.size + 71] = 400;
+    tickSensor();
+    assert.equal(sensor.detecting, false, `${sensor.id} cannot spot through the ridge 30 m to the right of the hull`);
+    assert.equal(game.lastKnown, null);
+    world.heights.fill(-20);
+    tickSensor();
+    assert.equal(sensor.detecting, true, `${sensor.id} sees the hull after the obstruction is removed`);
+  }
+});
+
+test("new patrols start on nearby terrain waypoints without a ship-spawn waypoint; legacy starts remain reproducible", () => {
+  const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
+  const game = createGame(world);
+  assert.ok(game.patrolPoints.every(point => Math.hypot(point.x - world.spawn.x, point.z - world.spawn.z) > 200));
+  const fleet = [...game.drones, game.plane];
+  assert.equal(new Set(fleet.map(craft => JSON.stringify(game.surveillance.routes[craft.id][0]))).size, fleet.length, "Aircraft start on distinct assigned search routes");
+  for (const craft of fleet) {
+    const route = game.surveillance.routes[craft.id];
+    assert.ok(route.length > 1, 'Search aircraft need a moving patrol, not a single-point loiter');
+    const target = route[craft.patrolIndex];
+    const distance = Math.hypot(target.x - craft.x, target.z - craft.z);
+    assert.equal(distance, Math.min(...route.map(point => Math.hypot(point.x - craft.x, point.z - craft.z))));
+    assert.ok(Number.isFinite(craft.heading));
+  }
+  const legacy = createGame(world, undefined, { aircraftSpotting: "forward-camera", algorithm: LEGACY_FLIGHT_ALGORITHM });
+  assert.deepEqual(legacy.patrolPoints[0], { x: world.spawn.x, z: world.spawn.z });
+  assert.equal(legacy.drones[0].patrolIndex, 0);
+  assert.equal(legacy.plane.patrolIndex, 0);
+  for (const state of [game, legacy]) {
+    const mode = state.aircraftSpotting;
+    const originalAircraft = structuredClone([...state.drones, state.plane]);
+    startGame(state); advance(state, world, 1); startGame(state);
+    assert.equal(state.aircraftSpotting, mode);
+    assert.deepEqual([...state.drones, state.plane], originalAircraft);
+  }
+});
+
 test("the fixed-wing scout shares actual observations with both drones but cannot tag", () => {
   const world = ocean(); const game = play(world); game.simulationTime = 6; game.time = 3;
   game.drones.forEach((drone, i) => Object.assign(drone, { x: -2800 + i * 100, z: -2800 }));
-  Object.assign(game.plane, { x: 0, z: -800, heading: 0 });
+  Object.assign(game.plane, { x: 0, z: -40, heading: Math.PI });
   stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
   assert.equal(game.plane.detecting, true);
   assert.equal(game.detected, true);
   assert.ok(game.drones.every((drone) => !drone.detecting && drone.mode === "pursuit"));
   assert.deepEqual(game.lastKnown, { x: 0, z: 0 });
-  game.plane.heading = Math.PI;
+  game.plane.z = -100;
+  game.boat.x = 200;
   stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
   assert.equal(game.plane.detecting, false);
   assert.equal(game.detected, false);
+  assert.deepEqual(game.lastKnown, { x: 0, z: 0 }, "Losing the overhead sighting freezes the last observed location");
   assert.ok(game.drones.every((drone) => drone.mode === "searching"));
   for (let frame = 0; frame < 180; frame++) {
-    Object.assign(game.plane, { x: 0, z: -10, heading: 0 });
+    Object.assign(game.plane, { x: game.boat.x, z: game.boat.z - 10, heading: 0 });
     stepGame(game, world, { throttle: 0, steer: 0 }, 1 / 60);
   }
   assert.equal(game.status, "playing", "A nearby scout is an observer, never a capture agent");
@@ -524,9 +598,9 @@ test("grace period prevents immediate tags and score formatting is stable", () =
   assert.equal(formatTime(-10), "00:00");
 });
 
-test("the full fleet finds an idle boat while following boosts permits a forward-only Fort Ross escape", () => {
+test("legacy idle capture timing is retained while overhead spotting permits a forward-only Fort Ross escape", () => {
   const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
-  const idle = play(world);
+  const idle = play(world, "forward-camera");
   advance(idle, world, 30);
   assert.equal(idle.status, "caught", "A stationary player must eventually be found by the terrain-defined patrol");
   assert.ok(idle.time > 10 && idle.time < 25, `An idle boat survived ${idle.time.toFixed(2)} real seconds`);
@@ -680,7 +754,7 @@ test("each loop makes the drones a little faster, with a bounded difficulty cap"
     game.loop = loop;
     game.nextLoopProgress = 10000;
     game.simulationTime = 10;
-    Object.assign(game.drones[0], { x: 0, z: -450, heading: 0, speed: 0 });
+    Object.assign(game.drones[0], { x: 0, z: -45, heading: 0, speed: 0 });
     stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
     assert.equal(game.detected, true);
     return game.drones[0].speed;
