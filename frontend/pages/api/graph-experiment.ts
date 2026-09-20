@@ -97,7 +97,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     reserved = job;
     await mkdir(directory, { recursive: true });
     const args = ["-B", script, "--output", path.join(directory, "result.json")];
-    if (kind === "train") args.push("--seed", String(body.seed), "--algorithm", algorithm, "--model-output", path.join(directory, "model.json"), "--progress", path.join(directory, "progress.json"));
+    if (kind === "train") {
+      args.push("--seed", String(body.seed), "--algorithm", algorithm, "--model-output", path.join(directory, "model.json"), "--progress", path.join(directory, "progress.json"));
+      // Re-evaluate the saved settings alongside new candidates rather than
+      // discarding them whenever the user starts another experiment.
+      if (algorithm === "coordinated-surveillance-v1" && existsSync(model)) args.push("--initial-model", model);
+    }
     else {
       await writeFile(path.join(directory, "request.json"), JSON.stringify(replay));
       args.push("--replay", path.join(directory, "request.json"), "--model", model);

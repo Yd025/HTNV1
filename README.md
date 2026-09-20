@@ -1,5 +1,42 @@
 # Operation: Overwatch — teammate start
 
+## Noncombat simulation tracking update
+
+This iteration improves the offline hackathon simulation. Cameras retain independent pending observations, so unrelated clutter cannot erase a contact awaiting confirmation. A rejected return no longer consumes a whole camera frame before another compatible return is considered. The discovering aircraft can briefly verify its own recent sighting without awarding confirmation or custody. Following waypoints keep their continuous camera viewing distance, and a fresh observation from another sensor prevents an unnecessary lost-contact search offset. Patrol also advances when the aircraft's own camera has covered a waypoint, avoiding repeated approaches to already-observed cells and unreachable edge waypoints.
+
+Terrain, sensor probabilities, camera limits, aircraft speeds, turn rates, scoring tolerances and two-frame confirmation requirements remain unchanged. The legacy tower-first path is preserved. These changes do not modify the fleet adapters or runtime aircraft controllers.
+
+Training can reuse a saved candidate with `--initial-model`, then compares it against new proposals on training and validation missions. Old test results are never imported as a selection score. The dashboard uses this warm start for coordinated training. The standalone `backend/compare_simulation.py` checks source fingerprints and disjoint seeds, runs each checkout in an isolated process, verifies matching scenarios and scoring rules, and reports paired confidence intervals while retaining every missed mission.
+
+The original source, model and results remain frozen on [release/0.2](https://github.com/Yd025/HTNV1/tree/release/0.2). Use that checkout to replay the original coordinated model; its source fingerprints intentionally differ from this revision.
+
+The initial tracking revision is retained in [its comparison](frontend/public/experiments/tracking-initial-comparison.json) and [parameter model](frontend/public/experiments/tracking-initial-model.json). On 200 paired missions (20970001–20970200), release detection was 60.5% versus 64.5%, custody 22.53% versus 23.34%, and longest gap 135.73 versus 127.30 seconds. All three paired confidence intervals included zero improvement. These missions were excluded from subsequent evaluation. The archived model supplies warm-start parameters only; its source hashes predate the camera-footprint patrol fix and it is not replayable with current source.
+
+For the final revision, development used missions 20770001–20770048 and separate validation used 20780001–20780048. Full training then used seed 32000000, with 256 motion trajectories, 12 candidates on 24 training missions, and three finalists on 24 validation missions. The selected policy was frozen before its 200 test missions and a separate 400-mission paired comparison against release 0.2. Previously viewed comparison and training ranges are explicitly excluded. No further strategy changes were selected using the final test results.
+
+The [400-mission paired comparison](frontend/public/experiments/release-comparison.json), on seeds 21070001–21070400, measures the released optimized strategy against this revision:
+
+| Metric | Release 0.2 optimized | Current revision | Paired improvement, 95% interval |
+| --- | ---: | ---: | --- |
+| Confirmed ship detection | 68.75% | 70.00% | +1.25 percentage points [−4.25, +6.75] |
+| Aircraft custody, all sampled mission time | 24.07% | 29.80% | +5.73 percentage points [+3.46, +8.05] |
+| Mean longest contact gap | 113.98 s | 106.28 s | 7.70 s saved [−7.49, +23.04] |
+| Position RMSE | 237.91 m | 268.83 m | Increased; no uncertainty interval estimated |
+| False confirmed contacts, total | 7 | 12 | Increased; no uncertainty interval estimated |
+| Mean aircraft travel | 7.113 km | 7.059 km | Decreased; no uncertainty interval estimated |
+
+Aircraft custody improved by about 24% relative to release 0.2, with its paired interval excluding zero. A large detection improvement or reliably shorter gaps was not established. More false contacts and higher position error are material tradeoffs; this is not evidence of uniformly better reliability. Intervals use 2,000 paired whole-mission bootstrap samples and retain all misses. The original 66.5% detection figure used a different mission set and must not be substituted for the paired reference above.
+
+The dashboard's [200-mission report](frontend/public/experiments/surveillance-report.json) uses a separate test set, 32400000–32400199. Historical tower-first/default sites, current default coordinated settings, and the final trained policy respectively achieved detection of 26.0%, 59.0%, and 70.0%; aircraft custody of 9.09%, 29.27%, and 31.93%; and mean longest gaps of 228.25, 139.45, and 106.25 seconds. Candidate 6 was selected on validation before these tests. These figures describe a different comparison from the 400-mission release check.
+
+To reproduce the paired comparison, place a checkout of `release/0.2` beside this checkout (for example, `git worktree add ../release-0.2 release/0.2` from the repository root), then run from `backend/`:
+
+```powershell
+python -B compare_simulation.py --reference-root ../../release-0.2 --reference-model ../../release-0.2/frontend/public/experiments/surveillance-model.json --candidate-model ../frontend/public/experiments/surveillance-model.json --seed-start 21070001 --episodes 400 --exclude-range 20770001:20770048 --exclude-range 20780001:20780048 --exclude-range 20970001:20970200 --exclude-range 31100000:31400199 --output ../.qa/reproduced-release-comparison.json
+```
+
+This replays a published benchmark; reusing these missions after further tuning would no longer be a fresh evaluation. Validation passed 257 backend tests, 118 dashboard tests and TypeScript checking. All 13 protected world, sensor, movement and scoring sections match release 0.2, and four legacy replay hashes match exactly.
+
 ## Release 0.2
 
 The `release/0.2` branch bundles the current dashboard, backend, saved experiment evidence, and `cant-catch-me/` game, including badge controls and the Freeze submission documents. It preserves the existing strategy and benchmark results. The game is included in this checkout; the Windows launcher locates it automatically and retains support for a sibling game checkout. Development and production dashboard builds use separate output directories, with `NEXT_DIST_DIR` available as an override.
@@ -127,13 +164,13 @@ Metrics distinguish raw contact confirmation from evaluator-verified boat detect
 
 The historical tower-first run (seed 191926, 200 held-out missions numbered 591926–592125) uses the verified fixed camera mounts and a fresh scenario family. Selected sites increased true tower acquisition from 29.0% to 40.0% and confirmed aircraft handoff from 26.5% to 31.0% compared with the default sites under the same tower-first controller. Position RMSE fell from 415 m to 323 m and false confirmed cues fell from 3 to 2. However, custody outside tower view fell from 58.6% to 24.4%. Selection prioritized acquisition on validation data; the result improves detection but does not establish better tracking continuity. Mean capped detection delay fell by 21.3 seconds, with paired 95% bootstrap interval 0.59–41.93 seconds. Test 30 (seed 591955) illustrates a successful chain: tower confirmation at 70 s, aircraft confirmation at 115 s, and custody during 21 of 25 eligible samples outside tower view. It is an example, not the aggregate result. These numbers describe the historical algorithm, not coordinated surveillance.
 
-The current coordinated run (seed 20260921, camera-aware support passes) compared all three strategies on the same 200 held-out missions: tower-first/default sites detected **25.0%**, default coordinated flights/default sites **46.0%**, and trained flights/selected sites **66.5%**. Aircraft tracking custody increased from **9.4% → 21.1% → 23.9%**; mean longest contact gap decreased from **228.7 → 169.6 → 118.9 seconds**. The trained strategy saved 82.9 seconds of capped detection delay against tower-first (paired 95% bootstrap interval 62.35–102.55 seconds), but increased mean aircraft travel from **4.74 to 7.12 km**. Position RMSE was **396 → 400 → 154 m**, and false confirmed contacts totaled **5 → 9 → 4** over those 200 missions. These are combined tower-and-flight-policy results under the synthetic sensor model, not an isolated comparison against the previous flight controller or proof of real-camera performance. A separate deterministic 300-second geometry regression keeps the same 100 m support offset, aircraft speed and moving vessel: the new pass controller raises camera time in view from 22.3% to 37.0% and keeps the closest pass at 324 m instead of 77 m. That fixture isolates the camera-overflight fix but does not establish general mission performance. The frozen [model](frontend/public/experiments/surveillance-model.json) and [complete results](frontend/public/experiments/surveillance-report.json) retain all misses and source fingerprints.
+The frozen release 0.2 coordinated run (seed 20260921, camera-aware support passes) compared all three strategies on the same 200 held-out missions: tower-first/default sites detected **25.0%**, default coordinated flights/default sites **46.0%**, and trained flights/selected sites **66.5%**. Aircraft tracking custody increased from **9.4% → 21.1% → 23.9%**; mean longest contact gap decreased from **228.7 → 169.6 → 118.9 seconds**. The trained strategy saved 82.9 seconds of capped detection delay against tower-first (paired 95% bootstrap interval 62.35–102.55 seconds), but increased mean aircraft travel from **4.74 to 7.12 km**. Position RMSE was **396 → 400 → 154 m**, and false confirmed contacts totaled **5 → 9 → 4** over those 200 missions. These are combined tower-and-flight-policy results under the synthetic sensor model, not an isolated comparison against the previous flight controller or proof of real-camera performance. A separate deterministic 300-second geometry regression keeps the same 100 m support offset, aircraft speed and moving vessel: the new pass controller raises camera time in view from 22.3% to 37.0% and keeps the closest pass at 324 m instead of 77 m. That fixture isolates the camera-overflight fix but does not establish general mission performance. Its frozen [model](https://github.com/Yd025/HTNV1/blob/release/0.2/frontend/public/experiments/surveillance-model.json) and [complete results](https://github.com/Yd025/HTNV1/blob/release/0.2/frontend/public/experiments/surveillance-report.json) retain all misses and source fingerprints. The current branch artifacts contain the later noncombat simulation revision described at the top of this README.
 
 Train coordinated surveillance from `backend/` without replacing the historical artifacts:
 
 ```powershell
 python -m pip install -r requirements-training.txt
-python -B train_graph_search.py --algorithm coordinated-surveillance-v1 --seed 20260921 --output ../frontend/public/experiments/surveillance-report.json --model-output ../frontend/public/experiments/surveillance-model.json --progress ../frontend/public/experiments/surveillance-progress.json
+python -B train_graph_search.py --algorithm coordinated-surveillance-v1 --seed 32000000 --initial-model ../frontend/public/experiments/tracking-initial-model.json --output ../frontend/public/experiments/surveillance-report.json --model-output ../frontend/public/experiments/surveillance-model.json --progress ../frontend/public/experiments/surveillance-progress.json
 python -B -m unittest discover -s tests -p 'test_graph*.py' -v
 ```
 

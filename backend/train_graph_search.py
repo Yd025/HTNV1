@@ -79,6 +79,38 @@ def snap_towers(terrain,values):
     return towers_for(terrain,output)
 
 
+def load_initial_model(path, terrain):
+    """Import parameters only; historical scores and learned motion stay unused."""
+    artifact = Path(path).read_bytes()
+    model = json.loads(artifact)
+    if not isinstance(model, dict):
+        raise ValueError("Initial model must be an object")
+    if model.get("profileHash") != profile_hash(terrain.profile):
+        raise ValueError("Initial model does not match the terrain profile")
+    trained = model.get("trained")
+    if not isinstance(trained, dict):
+        raise ValueError("Initial model must contain trained parameters")
+    algorithms = [model.get("algorithm", model.get("missionVersion"))]
+    algorithms.extend(value for value in (model.get("missionVersion"), trained.get("algorithm")) if value is not None)
+    if any(value != COORDINATED_ALGORITHM for value in algorithms):
+        raise ValueError("Initial model must use coordinated-surveillance-v1")
+    values, flight_policy = trained.get("towers"), trained.get("flightPolicy")
+    if not isinstance(values, list) or not all(isinstance(value, dict) for value in values):
+        raise ValueError("Initial model towers must be a list of tower objects")
+    if not isinstance(flight_policy, dict):
+        raise ValueError("Initial model must contain a flightPolicy object")
+    seed = model.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**31-1:
+        raise ValueError("Initial model seed must be between 0 and 2147483647")
+    try:
+        towers = snap_towers(terrain, values)
+    except (KeyError, TypeError) as error:
+        raise ValueError("Initial model towers need numeric coordinates and headings") from error
+    config = {"towers":towers, "weights":list(DEFAULT_WEIGHTS),
+              "algorithm":COORDINATED_ALGORITHM, "flightPolicy":normalize_flight_policy(flight_policy)}
+    return config, {"sha256":hashlib.sha256(artifact).hexdigest(), "seed":seed}
+
+
 def propose_tower_pair(terrain,motion,rng):
     """Greedy training-prior optical opportunity; final selection uses missions.
 
@@ -178,6 +210,11 @@ def train(args):
     if coordinated:
         protocol["flightPolicyBounds"] = FLIGHT_POLICY_BOUNDS
         protocol["selectionObjective"] = "2*(100-detectionRate)+1.2*(100-anySensorCustodyPct)+.8*(100-custodyPct)+.2*longestGapS+.15*meanCappedS+.002*distanceM+100*falseConfirmations"
+    initial_config = None
+    if getattr(args, "initial_model", None):
+        if not coordinated:
+            raise ValueError("An initial model requires coordinated-surveillance-v1 training")
+        initial_config, protocol["initialModel"] = load_initial_model(args.initial_model, terrain)
     seed=int(args.seed)
     if seed<0 or seed>2**31-1: raise ValueError("Seed must be between0 and2147483647")
     protocol["seedRanges"]={label:[seed+offset,seed+offset+protocol[count]-1]
@@ -198,7 +235,7 @@ def train(args):
     untrained={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS,"algorithm":algorithm}
     if coordinated:
         untrained["flightPolicy"] = dict(DEFAULT_FLIGHT_POLICY)
-    initial=dict(untrained)
+    initial=dict(untrained) if initial_config is None else initial_config
     rng=np.random.default_rng(seed)
     history=[]
     best_config=initial
@@ -342,6 +379,7 @@ def train(args):
                                   "trained":"Selected towers + trained coordinated surveillance"}
         report["metricDefinitions"]["detectionRate"] = "Percentage of all missions with two consistent distinct-time sensor observations confirming an estimate within 150 m of evaluator truth; any tower or aircraft may acquire first."
         report["metricDefinitions"]["handoffRate"] = "Percentage of missions with two accepted fresh observations from the same aircraft and a correct estimate; an aircraft may also be the first acquiring sensor. This measures aircraft custody acquisition, not necessarily transfer from a tower."
+        report["metricDefinitions"]["postTowerCustodyPct"] = "Pooled true-target aircraft custody samples divided by samples after true acquisition by any sensor when both towers geometrically lack view of evaluator truth; null if no eligible samples. The field name is retained for compatibility."
         report["metricDefinitions"]["falseConfirmations"] = "Mean confirmed contacts per mission farther than 150 m from evaluator truth; labels are scoring-only."
         report["limitations"] = report["limitations"][:3]+[
             "Aircraft start airborne. Both search before a cue, using complementary water lanes; a quad searches within a fitted launch radius, then faces the estimated contact from a camera-depression standoff. Plane flies continuous supporting passes with a bounded 15 deg/s body turn; quad yaw is bounded to 45 deg/s. Terrain-following altitude is kinematic; acceleration, climb, bank, wind, endurance and battery reserve require live validation.",
@@ -403,6 +441,7 @@ def main():
     parser.add_argument("--progress")
     parser.add_argument("--seed",type=int,default=190926)
     parser.add_argument("--quick",action="store_true")
+    parser.add_argument("--initial-model", help="Use a matching coordinated model's parameters as the first training candidate")
     parser.add_argument("--algorithm",choices=(LEGACY_ALGORITHM,COORDINATED_ALGORITHM),
                         help="Training defaults to coordinated-surveillance-v1; replay defaults to its saved algorithm")
     parser.add_argument("--replay")

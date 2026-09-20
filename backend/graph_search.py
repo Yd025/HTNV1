@@ -415,6 +415,7 @@ class TowerMission:
         self.reacquisitions = 0
         self.losses = 0
         self._seen = set()
+        self._pending_candidates = []
         self.drone_pending = {}
         self.receiver_confirmed_sources = []
 
@@ -436,9 +437,14 @@ class TowerMission:
 
     def update(self, observations, now):
         self.events, self.accepted, self.receiver_confirmed_sources = [], [], []
+        considered, observed_frames = set(), set()
+        if self.any_sensor:
+            self._pending_candidates = [candidate for candidate in self._pending_candidates
+                                        if now-candidate.timestamp <= SENSOR_MODEL["confirmationWindowS"]+SENSOR_MODEL["freshnessS"]]
         if self.point is not None and now-self.last_observed > SENSOR_MODEL["lostAfterS"]:
             self.point = None
             self.pending = None
+            self._pending_candidates = []
             self.drone_pending = {}
             self.custodian = None
             self.phase = "lost"
@@ -451,21 +457,45 @@ class TowerMission:
                     or not math.isfinite(obs.sigma_m) or obs.sigma_m <= 0):
                 self.rejected += 1
                 continue
-            self._seen.add(identity)
+            if self.any_sensor:
+                # A camera may report clutter and a genuine return in one frame.
+                # Rejected candidates must not hide another compatible return.
+                candidate_id = (identity, tuple(obs.point), obs.sigma_m, obs.confidence)
+                if candidate_id in considered:
+                    self.rejected += 1
+                    continue
+                considered.add(candidate_id)
+                observed_frames.add(identity)
+            else:
+                self._seen.add(identity)
             is_tower = obs.source.startswith("tower-")
             point = np.asarray(obs.point)
             if self.point is None:
                 if not is_tower and not self.any_sensor:
                     continue
                 prior = self.pending
+                if self.any_sensor:
+                    # Keep a bounded set of independent cues so unrelated clutter
+                    # cannot replace the only copy of earlier matching evidence.
+                    compatible = [candidate for candidate in self._pending_candidates
+                                  if 0 < obs.timestamp-candidate.timestamp <= SENSOR_MODEL["confirmationWindowS"]
+                                  and np.linalg.norm(point-candidate.point)
+                                  <= 40+6*(obs.timestamp-candidate.timestamp)+3*math.hypot(obs.sigma_m,candidate.sigma_m)]
+                    prior = min(compatible, key=lambda candidate: np.linalg.norm(point-candidate.point)
+                                / (40+6*(obs.timestamp-candidate.timestamp)+3*math.hypot(obs.sigma_m,candidate.sigma_m)),
+                                default=None)
                 if (prior is None or obs.timestamp-prior.timestamp > SENSOR_MODEL["confirmationWindowS"]
                         or np.linalg.norm(point-prior.point) > 40+6*max(0,obs.timestamp-prior.timestamp)+3*math.hypot(obs.sigma_m,prior.sigma_m)):
                     self.pending = obs
+                    if self.any_sensor:
+                        self._pending_candidates = (self._pending_candidates+[obs])[-32:]
                     continue
                 # Separate frames are required; a command/ACK is never evidence.
                 if obs.timestamp <= prior.timestamp:
                     continue
                 self.point = point.copy()
+                if self.any_sensor:
+                    self._pending_candidates = []
                 dt = obs.timestamp-prior.timestamp
                 velocity = (point-np.asarray(prior.point))/dt
                 speed = np.linalg.norm(velocity)
@@ -502,6 +532,8 @@ class TowerMission:
                     self.velocity *= min(1.,6/max(speed,1e-9))
                 self.sigma = max(2.,math.sqrt((1-gain)*prior_variance))
                 self.last_observed = obs.timestamp
+            if self.any_sensor:
+                self._seen.add(identity)
             self.accepted.append(obs)
             if is_tower:
                 self.last_tower = obs.timestamp
@@ -522,6 +554,10 @@ class TowerMission:
                     self.events.append({"type":"drone_reacquired", "t":now, "source":obs.source})
                 self.last_drone = obs.timestamp
                 self.custodian = obs.source
+        if self.any_sensor:
+            # Close every examined frame after all candidates were considered.
+            # Neither rejected frames nor pending cues can be replayed next tick.
+            self._seen.update(observed_frames)
         if self.point is not None:
             if now-self.last_drone <= SENSOR_MODEL["freshnessS"]:
                 self.phase = "drone_track"
@@ -619,9 +655,16 @@ class CoordinatedPlanner(BeliefPlanner):
         if not measurements:
             self.belief = .65*before+.35*self.belief
             self.belief /= self.belief.sum()
+        # run_episode supplies tower, tower, plane, quad masks. Advance search
+        # from own-camera coverage, including distant route cells seen en route.
+        for kind, mask in zip(("plane", "quad"), masks[2:]):
+            self.visited[kind].update(node for node in self.patrol[kind]
+                                      if mask[self.water_index[node]])
 
     def patrol_goal(self, drone, other_goal=None):
         kind = drone["id"]
+        if self.goals.get(kind) in self.visited[kind]:
+            self.goals.pop(kind, None)
         route = self.patrol[kind]
         current = np.array([drone["x"], drone["y"]])
         old = self.goals.get(kind)
@@ -647,14 +690,24 @@ class CoordinatedPlanner(BeliefPlanner):
     def mission_goal(self, drone, mission, now, other_goal=None):
         point = mission.predict(now)
         kind = drone["id"]
+        provisional = False
+        if point is None and mission.pending is not None and mission.pending.source == kind:
+            # Keep the discovering camera on its own recent sighting while a
+            # later frame verifies it. This cue is not a confirmed track and
+            # never changes confirmation, handoff or evaluator evidence.
+            point = mission.aim_point(now)
+            provisional = point is not None
         if point is None:
             if kind == "plane":
                 self.plane_shadow.reset()
             drone["missionRole"] = "wide_search" if kind == "plane" else "gap_search"
             return self.patrol_goal(drone, other_goal)
+        velocity = np.zeros(2) if provisional else mission.velocity
         lead = min(self.policy["lookaheadS"], np.linalg.norm(point-[drone["x"], drone["y"]])/self.terrain.profile["speedsMps"][kind])
-        point = point+mission.velocity*lead
-        if mission.phase == "reacquire":
+        point = point+velocity*lead
+        searching_contact = (mission.phase == "reacquire"
+                             and now-mission.last_observed > SENSOR_MODEL["freshnessS"])
+        if searching_contact:
             width = min(self.policy["reacquireWidthM"], mission.uncertainty(now) or 50.)
             angle = math.radians(now*7+(180 if kind == "quad" else 0))
             point = point+width*np.array([math.sin(angle), math.cos(angle)])
@@ -671,18 +724,25 @@ class CoordinatedPlanner(BeliefPlanner):
             # Use the current estimate here: PlaneShadow applies its own
             # bounded lead. Double-leading would put the real contact behind
             # the chosen camera footprint when the learned horizon is long.
-            estimate = point - mission.velocity*lead
+            estimate = point - velocity*lead
             point = self.plane_shadow.waypoint(
                 (drone["x"], drone["y"]), drone["heading"], self.terrain.profile["speedsMps"][kind],
-                drone["z"], estimate, mission.velocity, self.policy, self.terrain.profile["sensors"][kind])
-            if mission.phase != "reacquire":
+                drone["z"], estimate, velocity, self.policy, self.terrain.profile["sensors"][kind])
+            if not searching_contact:
                 drone["missionRole"] = "support_pass" if self.plane_shadow.phase == "observe" else "support_reposition"
             self.goals[kind] = self.terrain.node(*point)
+            if provisional:
+                drone["missionRole"] = "verify_contact"
             # Heading waypoints remain continuous: snapping them to a coarse
             # terrain cell would defeat the camera margin on close passes.
             return point
         self.goals[kind] = self.terrain.node(*point)
-        return self.goals[kind]
+        if provisional:
+            drone["missionRole"] = "verify_contact"
+        # Keep the camera viewing distance continuous. Snapping a following
+        # position to the terrain grid introduces up to half a cell of error
+        # on each axis; the grid index remains available for overlap costs.
+        return self.goals[kind] if provisional else point
 
 
 def move_surveillance_drone(terrain, drone, goal, step, look_at=None):
@@ -863,8 +923,12 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
                     goal=mission_goal(terrain,drone,mission,t,launch_xy[drone["id"]])
                 if goal is not None:
                     move = move_surveillance_drone if coordinated else move_drone
+                    look_at = mission.predict(t+step) if not config.get("baseline") else None
+                    if (coordinated and look_at is None and mission.pending is not None
+                            and mission.pending.source == drone["id"]):
+                        look_at = mission.aim_point(t+step)
                     moved = move(terrain,drone,goal,step,
-                                 look_at=mission.predict(t+step) if not config.get("baseline") else None)
+                                 look_at=look_at)
                     distance += moved
                     flight_distance[drone["id"]] += moved
                 else:

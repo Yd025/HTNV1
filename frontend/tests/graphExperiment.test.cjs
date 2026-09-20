@@ -203,6 +203,23 @@ test("algorithm and flight policy validation rejects invalid replay configuratio
   h.child.emit("close", 0);
 });
 
+test("coordinated training re-evaluates saved settings while legacy training stays independent", async () => {
+  for (const algorithm of ["coordinated-surveillance-v1", "tower-first-v2"]) {
+    const h = harness();
+    const result = await h.invoke(h.request({ body: { kind: "train", seed: 31, algorithm } }));
+    assert.equal(result.status, 202);
+    const args = h.spawns[0][1];
+    const initial = args.indexOf("--initial-model");
+    if (algorithm === "coordinated-surveillance-v1") {
+      assert.ok(initial >= 0);
+      assert.ok(args[initial + 1].endsWith("surveillance-model.json"));
+    } else {
+      assert.equal(initial, -1);
+    }
+    h.child.emit("close", 0);
+  }
+});
+
 test("replay serializes coordinates as data and reports Python launch failure", async () => {
   const h = harness();
   const result = await h.invoke(h.request({ body: { kind: "replay", seed: 42, towers: [{ x: 100, y: 200, heading: 725 }, { x: -100, y: -200 }] } }));
