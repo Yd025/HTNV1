@@ -12,6 +12,16 @@ export function swellHeight(x: number, z: number, time: number) {
     + Math.sin(x * .026 + z * .019 - time * 1.05) * .08;
 }
 
+/** Four points under the hull provide its waterline and local wave slope. */
+export function hullWaterPose(x: number, z: number, heading: number, time: number) {
+  const forwardX=Math.sin(heading),forwardZ=Math.cos(heading);
+  const bow=swellHeight(x+forwardX*28,z+forwardZ*28,time);
+  const stern=swellHeight(x-forwardX*28,z-forwardZ*28,time);
+  const port=swellHeight(x+forwardZ*11,z-forwardX*11,time);
+  const starboard=swellHeight(x-forwardZ*11,z+forwardX*11,time);
+  return {height:(bow+stern+port+starboard)/4,pitch:Math.atan2(stern-bow,56),roll:Math.atan2(port-starboard,22)};
+}
+
 export function Ocean({ level, clock, pose }: { level: number; clock: MutableRefObject<number>; pose: MutableRefObject<BoatPose> }) {
   const surface = useRef<THREE.Mesh>(null);
   const material = useMemo(() => new THREE.ShaderMaterial({

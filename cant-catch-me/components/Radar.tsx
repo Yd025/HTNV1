@@ -3,17 +3,21 @@ import { GAME_RULES, sampleRiverHeight, type GameState, type WorldData } from '.
 
 export default function Radar({ world, state }: { world: WorldData; state: GameState }) {
   const ref=useRef<HTMLCanvasElement>(null);
-  const centerX=state.sectorX*world.half*2,centerZ=state.sectorZ*world.half*2;
+  const centerX=state.boat.x,centerZ=state.boat.z;
+  // Overscan the terrain texture so the chart can slide smoothly with the boat;
+  // regenerate only every 250m rather than rebuilding it for every HUD update.
+  const chartX=Math.round(centerX/250)*250,chartZ=Math.round(centerZ/250)*250;
+  const chartSpan=world.half*2+500;
   const terrain=useMemo(()=>{
     const c=document.createElement('canvas');c.width=world.size;c.height=world.size;
     const ctx=c.getContext('2d')!, image=ctx.createImageData(c.width,c.height);
     for(let row=0;row<world.size;row++)for(let col=0;col<world.size;col++){
-      const h=sampleRiverHeight(world,centerX-world.half+col/(world.size-1)*world.half*2,centerZ-world.half+row/(world.size-1)*world.half*2);
+      const h=sampleRiverHeight(world,chartX-chartSpan/2+col/(world.size-1)*chartSpan,chartZ-chartSpan/2+row/(world.size-1)*chartSpan);
       const land=h>world.waterLevel,shade=Math.max(0,Math.min(h/252,1));
       image.data.set(land?[98+shade*68,134+shade*54,139+shade*48,255]:[29,68,81,255],(row*world.size+col)*4);
     }
     ctx.putImageData(image,0,0);return c;
-  },[world,centerX,centerZ]);
+  },[world,chartX,chartZ,chartSpan]);
   useEffect(()=>{
     const ctx=ref.current?.getContext('2d');if(!ctx)return;
     const size=440, margin=12, span=size-margin*2, ratio=span/(world.half*2);
@@ -27,14 +31,18 @@ export default function Radar({ world, state }: { world: WorldData; state: GameS
       ctx.fillStyle='#153642e8';ctx.fillRect(left,top,width,34);
       ctx.fillStyle=color;ctx.textBaseline='middle';ctx.fillText(text,left+6,top+17);ctx.textBaseline='alphabetic';
     };
-    ctx.clearRect(0,0,size,size);ctx.fillStyle='#173d4c';ctx.fillRect(0,0,size,size);ctx.drawImage(terrain,margin,margin,span,span);
+    ctx.clearRect(0,0,size,size);ctx.fillStyle='#173d4c';ctx.fillRect(0,0,size,size);
+    const pixels=terrain.width/chartSpan;
+    ctx.drawImage(terrain,(centerX-chartX+250)*pixels,(centerZ-chartZ+250)*pixels,world.half*2*pixels,world.half*2*pixels,margin,margin,span,span);
+    ctx.save();ctx.beginPath();ctx.rect(margin,margin,span,span);ctx.clip();
     state.towers.forEach((t,i)=>{
       if(!inView(t.x,t.z))return;
       const [x,y]=point(t.x,t.z),r=t.range*ratio;
       const angle=Math.PI/2-t.heading;
       ctx.beginPath();ctx.moveTo(x,y);ctx.arc(x,y,r,angle-GAME_RULES.radarFov/2,angle+GAME_RULES.radarFov/2);ctx.closePath();ctx.fillStyle=t.detecting?'#f4ad4d4d':'#a8dcbd25';ctx.fill();
       ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle='#bee9cb66';ctx.setLineDash([5,6]);ctx.lineWidth=1.5;ctx.stroke();ctx.setLineDash([]);
-      ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.fillStyle='#c9f1cc';ctx.fill();label(`T${i+1}`,x,y,'#c9f1cc');
+      const towerColor=t.detecting?'#ffc17e':'#c9f1cc';
+      ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.fillStyle=towerColor;ctx.fill();label(`T${i+1}`,x,y,towerColor);
     });
     if(inView(state.plane.x,state.plane.z)){
     const [px,py]=point(state.plane.x,state.plane.z);
@@ -57,6 +65,7 @@ export default function Radar({ world, state }: { world: WorldData; state: GameS
     });
     const [x,y]=point(state.boat.x,state.boat.z),h=state.boat.heading;ctx.save();ctx.translate(x,y);ctx.rotate(-h);ctx.beginPath();ctx.moveTo(0,12);ctx.lineTo(-7,-8);ctx.lineTo(0,-4);ctx.lineTo(7,-8);ctx.closePath();ctx.fillStyle='#fffaf0';ctx.strokeStyle='#153642';ctx.lineWidth=2;ctx.fill();ctx.stroke();ctx.restore();
     if(state.lastKnown && state.alert==='searching'){const [kx,ky]=point(state.lastKnown.x,state.lastKnown.z);ctx.strokeStyle='#ffbb7499';ctx.setLineDash([3,4]);ctx.beginPath();ctx.arc(kx,ky,13,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);}
-  },[world,state,terrain,centerX,centerZ]);
-  return <div className="radar"><div className="radar-heading"><span>{state.escaped?'Open river':'Fort Ross'}</span><span>{(world.half*2/1000).toFixed(1)} km</span></div><canvas width="440" height="440" ref={ref} role="img" aria-label={state.escaped?'River map showing your boat, nearby coastline and orange speed boosts. The patrol stays behind.':`Radar map: your boat, orange speed boosts, two tower coverage areas, drones ${state.drones.map(drone=>`${drone.id} at ${Math.round(drone.distanceToBoat)} metres`).join(' and ')}, and scout plane ${state.plane.id}.`}/><div className="radar-legend"><span><i className="boat-dot"/>You</span><span><i className="boost-dot"/>Boost</span>{!state.escaped&&<><span><i className="tower-dot"/>Towers</span><span><i className="drone-dot"/>Drones</span><span><i className="plane-dot"/>{state.plane.id} scout</span></>}</div></div>;
+    ctx.restore();
+  },[world,state,terrain,centerX,centerZ,chartX,chartZ,chartSpan]);
+  return <div className="radar"><div className="radar-heading"><span>{state.loop?'Downriver':'Fort Ross'}</span><span>{(world.half*2/1000).toFixed(1)} km</span></div><canvas width="440" height="440" ref={ref} role="img" aria-label={`Radar centered on your boat in stretch ${state.loop+1}: orange speed boosts, two tower coverage areas, drones ${state.drones.map(drone=>`${drone.id} at ${Math.round(drone.distanceToBoat)} metres`).join(' and ')}, and scout plane ${state.plane.id}.`}/><div className="radar-legend"><span><i className="boat-dot"/>You</span><span><i className="boost-dot"/>Boost</span><span><i className="tower-dot"/>Towers</span><span><i className="drone-dot"/>Drones</span><span><i className="plane-dot"/>{state.plane.id} scout</span></div></div>;
 }

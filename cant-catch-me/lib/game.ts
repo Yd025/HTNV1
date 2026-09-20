@@ -32,7 +32,11 @@ export type GameState = {
   time: number;
   /** Accelerated seconds, used for movement, radar, search, and difficulty. */
   simulationTime: number;
-  boat: { x: number; z: number; heading: number; speed: number; roll: number };
+  boat: {
+    x: number; z: number; heading: number; speed: number; roll: number; pitch: number;
+    /** World-space momentum persists as the hull turns. Speed is its magnitude. */
+    velocityX: number; velocityZ: number; yawRate: number; rudder: number; enginePower: number;
+  };
   drones: DroneState[];
   plane: AircraftState;
   towers: (WorldData["towers"][number] & { detecting: boolean; baseHeading: number })[];
@@ -45,8 +49,12 @@ export type GameState = {
   collision: boolean;
   sectorX: number;
   sectorZ: number;
-  /** Leaving the original patrol area permanently ends this run's pursuit. */
-  escaped: boolean;
+  /** Zero is the original map; each new downriver patrol is a harder loop. */
+  loop: number;
+  loopStartProgress: number;
+  nextLoopProgress: number;
+  patrolOrigin: { x: number; z: number };
+  patrolStartedAt: number;
   distanceTraveled: number;
   /** Active real seconds, unaffected by pause or the simulation pace. */
   boostRemaining: number;
@@ -57,6 +65,8 @@ export type GameState = {
   initialBoat: { x: number; z: number; heading: number };
   initialDrones: AircraftLaunch[];
   initialPlane: AircraftLaunch;
+  initialTowers: WorldData["towers"];
+  initialPatrolPoints: { x: number; z: number }[];
   patrolPoints: { x: number; z: number }[];
   randomState: number;
   initialRandomState: number;
@@ -68,6 +78,16 @@ export type GameState = {
 export const GAME_RULES = {
   pace: 2,
   maxSpeed: 60,
+  boatMass: 900,
+  engineThrust: 36000,
+  waterLinearDrag: 72,
+  waterQuadraticDrag: 8.8,
+  lateralWaterDamping: 3.6,
+  brakeDeceleration: 42,
+  rudderResponse: 6,
+  yawResponse: 3.8,
+  engineResponse: 4.5,
+  turnDrag: 0.22,
   // The escape course always progresses downriver; steering cannot become a U-turn.
   maxCourseDeviation: (75 * Math.PI) / 180,
   // Camera HFOVs from ArcticSim, page 18. Ranges and speeds are game tuning.
@@ -75,6 +95,9 @@ export const GAME_RULES = {
   droneFov: (114.6 * Math.PI) / 180,
   droneVision: 600,
   droneMaxSpeed: 84,
+  droneDetectedSpeed: 96,
+  droneAcceleration: 19,
+  droneDetectedAcceleration: 30,
   planeFov: (69 * Math.PI) / 180,
   planeVision: 1100,
   planeSpeed: 100,
@@ -86,6 +109,9 @@ export const GAME_RULES = {
   boostMultiplier: 1.65,
   pickupRadius: 45,
   maxPickups: 4,
+  loopLength: 6500,
+  droneDifficultyPerLoop: 0.03,
+  maxDroneDifficulty: 0.3,
 } as const;
 
 export const SIMULATION_STEP = 1 / 60;
@@ -94,6 +120,21 @@ const TAU = Math.PI * 2;
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const angleDifference = (a: number, b: number) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const approach = (a: number, b: number, amount: number) => a + clamp(b - a, -amount, amount);
+const restingBoat = () => ({ speed: 0, roll: 0, pitch: 0, velocityX: 0, velocityZ: 0, yawRate: 0, rudder: 0, enginePower: 0 });
+
+export function getDroneTopSpeed(loop: number, detected = false): number {
+  return (detected ? GAME_RULES.droneDetectedSpeed : GAME_RULES.droneMaxSpeed)
+    * (1 + Math.min(GAME_RULES.maxDroneDifficulty, Math.max(0, loop) * GAME_RULES.droneDifficultyPerLoop));
+}
+
+function riverCenter(progress: number): number {
+  return 210 * Math.sin(progress / 1550) + 110 * Math.sin(progress / 670);
+}
+
+function coursePoint(world: WorldData, progress: number, across = riverCenter(progress)): { x: number; z: number } {
+  const forwardX = Math.sin(world.spawn.heading), forwardZ = Math.cos(world.spawn.heading);
+  return { x: world.spawn.x + forwardX * progress + forwardZ * across, z: world.spawn.z + forwardZ * progress - forwardX * across };
+}
 
 /** Bilinear terrain sampling; points outside the playable world are impassable. */
 export function sampleHeight(world: WorldData, x: number, z: number): number {
@@ -127,7 +168,7 @@ export function sampleRiverHeight(world: WorldData, x: number, z: number): numbe
   const across = dx * forwardZ - dz * forwardX;
   // The main channel stays wide enough for the forward-only course. Longer
   // waves shape its banks, while smaller raised patches form coastal islands.
-  const center = 210 * Math.sin(along / 1550) + 110 * Math.sin(along / 670);
+  const center = riverCenter(along);
   const width = 650 + 95 * Math.sin(along / 1180) + 45 * Math.cos(along / 470);
   const bank = Math.abs(across - center) - width;
   const relief = 18 * Math.sin(x / 180) * Math.cos(z / 210) + 12 * Math.sin((x + z) / 340);
@@ -188,6 +229,73 @@ function spawnPickup(state: GameState, world: WorldData, first = false): void {
   }
 }
 
+/** Replace the bounded patrol, while retaining continuous boat/world coordinates. */
+function beginNextPatrol(state: GameState, world: WorldData, progress: number): void {
+  state.loop++;
+  state.loopStartProgress = progress;
+  state.nextLoopProgress = progress + GAME_RULES.loopLength;
+  state.patrolOrigin = coursePoint(world, progress + GAME_RULES.loopLength / 2);
+  state.patrolStartedAt = state.simulationTime;
+  state.lastKnown = null;
+  state.lostFor = 0;
+  state.detected = false;
+  state.tagProgress = 0;
+  state.alert = "clear";
+
+  // These routes depend only on the river and the section's fixed start. The
+  // patrol never consults hidden boat motion to choose its search waypoints.
+  state.patrolPoints = [300, 1100, 2100, 3200, 4300, 5400, 6150].map((ahead, i) => {
+    const along = progress + ahead;
+    const across = riverCenter(along) + (i % 2 ? 180 : -180);
+    const candidate = coursePoint(world, along, across);
+    return isNavigable(world, candidate.x, candidate.z) ? candidate : coursePoint(world, along);
+  });
+
+  state.towers = Array.from({ length: 2 }, (_, i) => {
+    const along = progress + 1550 + i * 3200;
+    const side = i === 0 ? -1 : 1;
+    let location = coursePoint(world, along, riverCenter(along) + side * 1300);
+    let channel = coursePoint(world, along);
+    // Choose the first usable bank with a clear sightline across the channel,
+    // instead of translating towers onto arbitrary water or behind a ridge.
+    search: for (let shift = 0; shift <= 300; shift += 75) {
+      const target = coursePoint(world, along + shift);
+      for (let offset = 400; offset <= 1400; offset += 20) {
+        const point = coursePoint(world, along + shift, riverCenter(along + shift) + side * offset);
+        const height = sampleRiverHeight(world, point.x, point.z);
+        if (height > world.waterLevel + 4 && hasLineOfSight(world, point.x, point.z, height + 55, target.x, target.z, world.waterLevel + 5)) {
+          location = point;
+          channel = target;
+          break search;
+        }
+      }
+    }
+    const heading = Math.atan2(channel.x - location.x, channel.z - location.z);
+    return {
+      id: state.initialTowers[i]?.id ?? `tower-${i + 1}`,
+      ...location, height: sampleRiverHeight(world, location.x, location.z),
+      heading, baseHeading: heading, range: 1500, detecting: false,
+    };
+  });
+  const launch = (ahead: number, across: number, patrolIndex: number, altitude: number) => {
+    const point = coursePoint(world, progress + ahead, riverCenter(progress + ahead) + across);
+    const target = state.patrolPoints[patrolIndex];
+    return {
+      ...point, patrolIndex, heading: Math.atan2(target.x - point.x, target.z - point.z),
+      altitude: Math.max(world.waterLevel + altitude, sampleRiverHeight(world, point.x, point.z) + 70),
+      detecting: false, mode: "patrol" as const, searchPhase: 0,
+    };
+  };
+  state.drones.forEach((drone, i) => {
+    Object.assign(drone, launch(1450 + i * 1100, i === 0 ? -240 : 240, i === 0 ? 0 : 2, 105 + i * 15), {
+      speed: 0, tagProgress: 0,
+    });
+    drone.distanceToBoat = Math.hypot(drone.x - state.boat.x, drone.z - state.boat.z);
+  });
+  Object.assign(state.plane, launch(3400, 0, 3, 235), { speed: GAME_RULES.planeSpeed });
+  state.distanceToDrone = Math.min(...state.drones.map((drone) => drone.distanceToBoat));
+}
+
 export function createGame(world: WorldData, seed = 0x51a7): GameState {
   const spawn = { ...world.spawn };
   const limit = world.half - 160;
@@ -238,15 +346,18 @@ export function createGame(world: WorldData, seed = 0x51a7): GameState {
   const drones = initialDrones.map((initial) => ({ ...resetAircraft(initial), tagProgress: 0, distanceToBoat: Math.hypot(initial.x - spawn.x, initial.z - spawn.z) }));
   const state: GameState = {
     status: "ready", time: 0, simulationTime: 0,
-    boat: { ...spawn, speed: 0, roll: 0 },
+    boat: { ...spawn, ...restingBoat() },
     drones, plane: { ...resetAircraft(initialPlane), speed: GAME_RULES.planeSpeed },
     towers: world.towers.map((tower) => ({ ...tower, baseHeading: tower.heading, detecting: false })),
     detected: false, alert: "clear", tagProgress: 0,
     distanceToDrone: Math.min(...drones.map((drone) => drone.distanceToBoat)),
     lastKnown: null, lostFor: 0, collision: false,
-    ...getSector(world, spawn.x, spawn.z), escaped: false, distanceTraveled: 0, boostRemaining: 0, pickups: [],
+    ...getSector(world, spawn.x, spawn.z), loop: 0, loopStartProgress: 0, nextLoopProgress: Infinity,
+    patrolOrigin: { x: 0, z: 0 }, patrolStartedAt: 0, distanceTraveled: 0, boostRemaining: 0, pickups: [],
     accumulator: 0, collisionFor: 0,
     initialBoat: spawn, initialDrones, initialPlane, patrolPoints,
+    initialTowers: world.towers.map((tower) => ({ ...tower })),
+    initialPatrolPoints: patrolPoints.map((point) => ({ ...point })),
     randomState: seed >>> 0, initialRandomState: seed >>> 0, initialPickups: [], nextPickupId: 1, nextPickupAt: 7,
   };
   spawnPickup(state, world, true);
@@ -256,18 +367,20 @@ export function createGame(world: WorldData, seed = 0x51a7): GameState {
 }
 
 export function startGame(state: GameState): void {
-  Object.assign(state.boat, state.initialBoat, { speed: 0, roll: 0 });
+  Object.assign(state.boat, state.initialBoat, restingBoat());
   state.drones.forEach((drone, i) => Object.assign(drone, state.initialDrones[i], {
     speed: 0, detecting: false, mode: "patrol", searchPhase: 0, tagProgress: 0,
     distanceToBoat: Math.hypot(state.initialDrones[i].x - state.boat.x, state.initialDrones[i].z - state.boat.z),
   }));
   Object.assign(state.plane, state.initialPlane, { speed: GAME_RULES.planeSpeed, detecting: false, mode: "patrol", searchPhase: 0 });
-  for (const tower of state.towers) { tower.heading = tower.baseHeading; tower.detecting = false; }
+  state.towers = state.initialTowers.map((tower) => ({ ...tower, baseHeading: tower.heading, detecting: false }));
+  state.patrolPoints = state.initialPatrolPoints.map((point) => ({ ...point }));
   Object.assign(state, {
     status: "playing", time: 0, simulationTime: 0, detected: false, alert: "clear", tagProgress: 0,
     distanceToDrone: Math.min(...state.drones.map((drone) => drone.distanceToBoat)),
     lastKnown: null, lostFor: 0, collision: false, accumulator: 0, collisionFor: 0,
-    sectorX: 0, sectorZ: 0, escaped: false, distanceTraveled: 0, boostRemaining: 0,
+    sectorX: 0, sectorZ: 0, loop: 0, loopStartProgress: 0, nextLoopProgress: Infinity,
+    patrolOrigin: { x: 0, z: 0 }, patrolStartedAt: 0, distanceTraveled: 0, boostRemaining: 0,
     pickups: state.initialPickups.map((pickup) => ({ ...pickup })), randomState: state.initialRandomState,
     nextPickupId: state.initialPickups.length + 1, nextPickupAt: 7,
   });
@@ -279,6 +392,86 @@ export function togglePause(state: GameState): void {
   state.accumulator = 0;
 }
 
+/** Arcade hydrodynamics in the fixed simulation clock: thrust, drag, rudder and momentum. */
+function moveBoat(state: GameState, world: WorldData, throttle: number, steer: number): void {
+  const boat = state.boat;
+  const previousSpeed = Math.hypot(boat.velocityX, boat.velocityZ);
+  const previousHeading = boat.heading;
+  const boost = state.boostRemaining > 0 ? GAME_RULES.boostMultiplier : 1;
+  const topSpeed = GAME_RULES.maxSpeed * boost;
+  boat.enginePower += (Math.max(0, throttle) - boat.enginePower) * (1 - Math.exp(-GAME_RULES.engineResponse * STEP));
+  boat.rudder += (steer - boat.rudder) * (1 - Math.exp(-GAME_RULES.rudderResponse * STEP));
+  // A little prop/rudder authority remains at rest so a grounded boat can steer free.
+  const steeringPower = 0.28 + Math.min(previousSpeed / 30, 1) * 0.72;
+  const desiredYaw = -boat.rudder * steeringPower * 0.95;
+  boat.yawRate += (desiredYaw - boat.yawRate) * (1 - Math.exp(-GAME_RULES.yawResponse * STEP));
+  const unconstrainedHeading = boat.heading + boat.yawRate * STEP;
+  boat.heading = clamp(unconstrainedHeading,
+    state.initialBoat.heading - GAME_RULES.maxCourseDeviation,
+    state.initialBoat.heading + GAME_RULES.maxCourseDeviation);
+  if (boat.heading !== unconstrainedHeading) boat.yawRate = 0;
+  // Rotating the long bow must not put it through a bank even while stationary.
+  if (!boatFits(world, boat.x, boat.z, boat.heading) && boatFits(world, boat.x, boat.z, previousHeading)) {
+    boat.heading = previousHeading;
+    boat.yawRate = 0;
+  }
+
+  const forwardX = Math.sin(boat.heading), forwardZ = Math.cos(boat.heading);
+  let forwardSpeed = Math.max(0, boat.velocityX * forwardX + boat.velocityZ * forwardZ);
+  let sidewaysSpeed = boat.velocityX * forwardZ - boat.velocityZ * forwardX;
+  // At full power, thrust balances the linear + quadratic resistance at 60 m/s.
+  // Boost adds thrust (with the same hull drag), rather than teleporting velocity.
+  const boostThrust = GAME_RULES.waterLinearDrag * topSpeed + GAME_RULES.waterQuadraticDrag * topSpeed * topSpeed;
+  const thrust = (throttle < 0 ? 0 : boat.enginePower) * (boost > 1 ? boostThrust : GAME_RULES.engineThrust);
+  const drag = GAME_RULES.waterLinearDrag * forwardSpeed + GAME_RULES.waterQuadraticDrag * forwardSpeed * forwardSpeed;
+  forwardSpeed = Math.max(0, forwardSpeed + ((thrust - drag) / GAME_RULES.boatMass
+    - Math.max(0, -throttle) * GAME_RULES.brakeDeceleration
+    - Math.abs(boat.yawRate) * forwardSpeed * GAME_RULES.turnDrag) * STEP);
+  sidewaysSpeed *= Math.exp(-(GAME_RULES.lateralWaterDamping + Math.max(0, -throttle) * 5) * STEP);
+  sidewaysSpeed = clamp(sidewaysSpeed, -forwardSpeed * 0.34, forwardSpeed * 0.34);
+  boat.velocityX = forwardX * forwardSpeed + forwardZ * sidewaysSpeed;
+  boat.velocityZ = forwardZ * forwardSpeed - forwardX * sidewaysSpeed;
+  const speed = Math.hypot(boat.velocityX, boat.velocityZ);
+  // Let surplus boost momentum decay naturally; new thrust cannot exceed its cap.
+  const speedCap = Math.min(GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier, Math.max(topSpeed, previousSpeed));
+  if (speed > speedCap) { boat.velocityX *= speedCap / speed; boat.velocityZ *= speedCap / speed; }
+  const courseX = Math.sin(state.initialBoat.heading), courseZ = Math.cos(state.initialBoat.heading);
+  const progressSpeed = boat.velocityX * courseX + boat.velocityZ * courseZ;
+  if (progressSpeed < 0) { boat.velocityX -= progressSpeed * courseX; boat.velocityZ -= progressSpeed * courseZ; }
+  if (Math.hypot(boat.velocityX, boat.velocityZ) < 0.015 && boat.enginePower < 0.001) {
+    boat.velocityX = 0; boat.velocityZ = 0;
+  }
+
+  state.collisionFor = Math.max(0, state.collisionFor - STEP);
+  const canMove = (vx: number, vz: number) => vx * courseX + vz * courseZ >= -1e-10
+    && boatFits(world, boat.x + vx * STEP * 0.5, boat.z + vz * STEP * 0.5, boat.heading)
+    && boatFits(world, boat.x + vx * STEP, boat.z + vz * STEP, boat.heading);
+  if (!canMove(boat.velocityX, boat.velocityZ)) {
+    if (Math.hypot(boat.velocityX, boat.velocityZ) > 0.05) state.collisionFor = 0.4;
+    // Scrubbing along a bank loses momentum; each candidate still checks the
+    // complete hull and bow. Never nudge the boat onto land to free it.
+    const slideX = boat.velocityX * 0.45, slideZ = boat.velocityZ * 0.45;
+    const canSlideX = canMove(slideX, 0), canSlideZ = canMove(0, slideZ);
+    if (canSlideX && (!canSlideZ || Math.abs(slideX) > Math.abs(slideZ))) {
+      boat.velocityX = slideX; boat.velocityZ = 0;
+    } else if (canSlideZ) {
+      boat.velocityX = 0; boat.velocityZ = slideZ;
+    } else { boat.velocityX = 0; boat.velocityZ = 0; }
+    boat.yawRate *= 0.5;
+  }
+  boat.x += boat.velocityX * STEP;
+  boat.z += boat.velocityZ * STEP;
+  boat.speed = Math.hypot(boat.velocityX, boat.velocityZ);
+  state.distanceTraveled += boat.speed * STEP;
+  state.collision = state.collisionFor > 0;
+  const appliedYaw = (boat.heading - previousHeading) / STEP;
+  const targetRoll = appliedYaw * (boat.speed / GAME_RULES.maxSpeed) * 0.16;
+  const acceleration = (boat.speed - previousSpeed) / STEP;
+  const targetPitch = clamp(acceleration / 40 * 0.075 + boat.speed / GAME_RULES.maxSpeed * 0.018, -0.1, 0.12);
+  boat.roll += (targetRoll - boat.roll) * (1 - Math.exp(-STEP * 5));
+  boat.pitch += (targetPitch - boat.pitch) * (1 - Math.exp(-STEP * 3));
+}
+
 function tick(state: GameState, world: WorldData, input: InputState): void {
   const realStep = STEP / GAME_RULES.pace;
   state.time += realStep;
@@ -287,34 +480,15 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
   const throttle = clamp(Number.isFinite(input.throttle) ? input.throttle : 0, -1, 1);
   const steer = clamp(Number.isFinite(input.steer) ? input.steer : 0, -1, 1);
   state.boostRemaining = Math.max(0, state.boostRemaining - realStep);
-  const topSpeed = GAME_RULES.maxSpeed * (state.boostRemaining > 0 ? GAME_RULES.boostMultiplier : 1);
-  boat.speed = Math.max(0, approach(boat.speed, Math.max(0, throttle) * topSpeed, (throttle === 0 ? 13 : 27) * STEP));
-  const steeringPower = 0.27 + Math.min(boat.speed / 25, 1) * 0.73;
-  const previousHeading = boat.heading;
-  boat.heading = clamp(boat.heading - steer * steeringPower * 0.95 * STEP,
-    state.initialBoat.heading - GAME_RULES.maxCourseDeviation,
-    state.initialBoat.heading + GAME_RULES.maxCourseDeviation);
-  const appliedSteer = clamp((previousHeading - boat.heading) / (steeringPower * 0.95 * STEP), -1, 1);
-  boat.roll += (-appliedSteer * (boat.speed / GAME_RULES.maxSpeed) * 0.15 - boat.roll) * (1 - Math.exp(-STEP * 5));
-  const nx = boat.x + Math.sin(boat.heading) * boat.speed * STEP;
-  const nz = boat.z + Math.cos(boat.heading) * boat.speed * STEP;
-  state.collisionFor = Math.max(0, state.collisionFor - STEP);
-  if (boatFits(world, nx, nz, boat.heading)) {
-    state.distanceTraveled += Math.hypot(nx - boat.x, nz - boat.z);
-    boat.x = nx; boat.z = nz;
-  } else if (Math.abs(boat.speed) > 0.5) {
-    boat.speed *= 0.28;
-    state.collisionFor = 0.4;
-  }
-  state.collision = state.collisionFor > 0;
+  moveBoat(state, world, throttle, steer);
 
   Object.assign(state, getSector(world, boat.x, boat.z));
-  state.escaped ||= state.sectorX !== 0 || state.sectorZ !== 0;
-  if (state.escaped) {
-    state.lastKnown = null;
-    state.lostFor = 0;
-  }
   const forwardX = Math.sin(state.initialBoat.heading), forwardZ = Math.cos(state.initialBoat.heading);
+  const progress = (boat.x - state.initialBoat.x) * forwardX + (boat.z - state.initialBoat.z) * forwardZ;
+  // Only the first crossing uses the original square. Afterwards a monotonically
+  // advancing course threshold prevents boundary jitter from respawning patrols.
+  if (state.loop === 0 ? progress > 0 && (Math.abs(boat.x) >= world.half || Math.abs(boat.z) >= world.half)
+    : progress >= state.nextLoopProgress) beginNextPatrol(state, world, progress);
   state.pickups = state.pickups.filter((pickup) => {
     const dx = pickup.x - boat.x, dz = pickup.z - boat.z;
     if (Math.hypot(dx, dz) <= GAME_RULES.pickupRadius) {
@@ -328,10 +502,11 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
     state.nextPickupAt = state.time + 6 + random(state) * 4;
   }
 
-  const active = !state.escaped && state.simulationTime >= GAME_RULES.graceSeconds;
+  const patrolTime = state.simulationTime - state.patrolStartedAt;
+  const active = patrolTime >= GAME_RULES.graceSeconds;
   let towerSeesBoat = false;
   state.towers.forEach((tower, i) => {
-    tower.heading = tower.baseHeading + Math.sin(state.simulationTime * 0.27 + i * 1.7) * 1.08;
+    tower.heading = tower.baseHeading + Math.sin(patrolTime * 0.27 + i * 1.7) * 1.08;
     const dx = boat.x - tower.x;
     const dz = boat.z - tower.z;
     tower.detecting = active && Math.hypot(dx, dz) <= tower.range
@@ -374,12 +549,14 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
     }
     return waypoint;
   };
-  const limit = world.half - 80;
+  const limit = state.loop === 0 ? world.half - 80 : GAME_RULES.loopLength / 2 + 450;
+  const minX = state.patrolOrigin.x - limit, maxX = state.patrolOrigin.x + limit;
+  const minZ = state.patrolOrigin.z - limit, maxZ = state.patrolOrigin.z + limit;
   const moveAircraft = (aircraft: AircraftState, target: { x: number; z: number }, turnRate: number, altitude: number) => {
-    const desiredHeading = Math.atan2(clamp(target.x, -limit, limit) - aircraft.x, clamp(target.z, -limit, limit) - aircraft.z);
+    const desiredHeading = Math.atan2(clamp(target.x, minX, maxX) - aircraft.x, clamp(target.z, minZ, maxZ) - aircraft.z);
     aircraft.heading += clamp(angleDifference(desiredHeading, aircraft.heading), -STEP * turnRate, STEP * turnRate);
-    aircraft.x = clamp(aircraft.x + Math.sin(aircraft.heading) * aircraft.speed * STEP, -limit, limit);
-    aircraft.z = clamp(aircraft.z + Math.cos(aircraft.heading) * aircraft.speed * STEP, -limit, limit);
+    aircraft.x = clamp(aircraft.x + Math.sin(aircraft.heading) * aircraft.speed * STEP, minX, maxX);
+    aircraft.z = clamp(aircraft.z + Math.cos(aircraft.heading) * aircraft.speed * STEP, minZ, maxZ);
     const ground = sampleRiverHeight(world, aircraft.x, aircraft.z);
     aircraft.altitude = Math.max(ground + 30, aircraft.altitude + (Math.max(world.waterLevel + altitude, ground + 70) - aircraft.altitude) * (1 - Math.exp(-STEP * 1.8)));
     aircraft.mode = state.lastKnown ? state.detected ? "pursuit" : "searching" : "patrol";
@@ -396,16 +573,19 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
         z: state.lastKnown.z + Math.cos(drone.searchPhase + i * Math.PI) * orbit,
       };
     } else target = patrolTarget(drone, 100);
-    const chaseSpeed = Math.min(GAME_RULES.droneMaxSpeed, 52 + state.simulationTime * 0.25);
+    const chaseSpeed = getDroneTopSpeed(state.loop, state.detected);
+    const difficulty = getDroneTopSpeed(state.loop) / GAME_RULES.droneMaxSpeed;
     // Boat velocity and distance may influence pursuit only while a sensor has
     // an actual observation. Hidden movement never changes the search flight.
-    let desiredSpeed = state.lastKnown ? 53 : Math.min(70, 38 + state.simulationTime * 0.07);
+    let desiredSpeed = (state.lastKnown ? 53 : Math.min(70, 38 + patrolTime * 0.07)) * difficulty;
     if (state.detected) {
       const observedDistance = Math.hypot(drone.x - boat.x, drone.z - boat.z);
       const approachSpeed = Math.max(18, Math.abs(boat.speed) + Math.max(0, observedDistance - 25) * 0.65);
       desiredSpeed = Math.min(chaseSpeed, approachSpeed);
     }
-    drone.speed = approach(drone.speed, desiredSpeed, STEP * 19);
+    const acceleration = (state.detected ? GAME_RULES.droneDetectedAcceleration : GAME_RULES.droneAcceleration)
+      * (1 + Math.min(0.2, state.loop * 0.02));
+    drone.speed = approach(drone.speed, desiredSpeed, STEP * acceleration);
     moveAircraft(drone, target, 1.2, 105 + i * 15);
     drone.distanceToBoat = Math.hypot(drone.x - boat.x, drone.z - boat.z);
     const tagging = active && drone.distanceToBoat < GAME_RULES.tagRadius

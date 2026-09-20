@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { GAME_RULES, SIMULATION_STEP, getSector, sampleRiverHeight, stepGame, type GameState, type InputState, type WorldData } from '../lib/game';
-import { Ocean, FoamWake, swellHeight, type BoatPose } from './Ocean';
+import { Ocean, FoamWake, hullWaterPose, type BoatPose } from './Ocean';
 
 type Part = { name: string; type: string; material: string; color?: string; positions?: number[]; indices?: number[]; matrix?: number[]; size?: number[]; radius?: number; length?: number };
 export type Models = Record<string, { parts: Part[] }>;
@@ -129,6 +129,7 @@ function BoostPickups({ state, world, clock, reducedMotion }: { state: MutableRe
 }
 
 function RadarBeam({ tower, state }: { tower: WorldData['towers'][number]; state: MutableRefObject<GameState> }) {
+  const group = useRef<THREE.Group>(null);
   const fan = useRef<THREE.Mesh>(null);
   const material = useRef<THREE.MeshBasicMaterial>(null);
   const geometry = useMemo(() => {
@@ -139,13 +140,23 @@ function RadarBeam({ tower, state }: { tower: WorldData['towers'][number]; state
   useEffect(() => () => geometry.dispose(), [geometry]);
   useFrame(() => {
     const t = state.current.towers.find(t => t.id === tower.id)!;
+    if(group.current)group.current.position.set(t.x,3,t.z);
     if (fan.current) fan.current.rotation.y = t.heading;
     if (material.current) { material.current.color.set(t.detecting ? '#f1bd67' : '#b1e9c8'); material.current.opacity = t.detecting ? 0.20 : 0.105; }
   });
-  return <group position={[tower.x,3,tower.z]}>
+  return <group ref={group} position={[tower.x,3,tower.z]}>
     <mesh ref={fan} geometry={geometry}><meshBasicMaterial ref={material} color="#b1e9c8" transparent opacity={0.105} side={THREE.DoubleSide} depthWrite={false}/></mesh>
     <mesh rotation={[-Math.PI/2,0,0]}><ringGeometry args={[tower.range-3,tower.range,100]}/><meshBasicMaterial color="#b8e9d1" transparent opacity={0.28} depthWrite={false}/></mesh>
   </group>;
+}
+
+function SurveillanceTower({tower,model,state}:{tower:WorldData['towers'][number];model:Models[string];state:MutableRefObject<GameState>}){
+  const group=useRef<THREE.Group>(null);
+  useFrame(()=>{
+    const current=state.current.towers.find(t=>t.id===tower.id);
+    if(group.current&&current)group.current.position.set(current.x,current.height,current.z);
+  });
+  return <><group ref={group} position={[tower.x,tower.height,tower.z]}><Vehicle model={model} kind="tower"/><mesh position={[0,65,0]}><sphereGeometry args={[5,12,8]}/><meshBasicMaterial color="#b7ebc6"/></mesh></group><RadarBeam tower={tower} state={state}/></>;
 }
 
 /** A ground-projected silhouette makes the drone's position legible on the water. */
@@ -183,7 +194,9 @@ function World(props: Props) {
   const clock=useRef(0),report=useRef(0),previousTime=useRef(0),previousStatus=useRef('ready');
   const previousPose=useRef(copyPose(game.current)),pose=useRef(copyPose(game.current));
   const boatPose=useRef(pose.current.boat);
+  const buoyancy=useRef({height:0,heightVelocity:0,pitch:0,pitchVelocity:0,roll:0,rollVelocity:0});
   const previousView=useRef(cameraMode),previousLook=useRef(false);
+  const previousLoop=useRef(game.current.loop);
   const readiness=useRef(0);
   const {camera,gl}=useThree();
   const target=useMemo(()=>new THREE.Vector3(),[]);
@@ -201,17 +214,39 @@ function World(props: Props) {
       s.drones.forEach((d,i)=>Object.assign(previousPose.current.drones[i],d));
       Object.assign(previousPose.current.plane,s.plane);
     });
+    if(s.loop!==previousLoop.current){
+      // Patrols are replaced at a new stretch; never interpolate their flight
+      // across kilometres. The boat and its camera remain continuous.
+      s.drones.forEach((drone,i)=>Object.assign(previousPose.current.drones[i],drone));
+      Object.assign(previousPose.current.plane,s.plane);
+      previousLoop.current=s.loop;
+    }
     const alpha=s.status==='playing'?Math.min(1,s.accumulator/SIMULATION_STEP):1;
     const p=pose.current,old=previousPose.current;
-    for(const key of ['x','z','heading','speed','roll'] as const)p.boat[key]=blend(old.boat[key],s.boat[key],alpha);
+    for(const key of ['x','z','heading','speed','roll','pitch','velocityX','velocityZ','yawRate','rudder','enginePower'] as const)p.boat[key]=blend(old.boat[key],s.boat[key],alpha);
     s.drones.forEach((d,i)=>blendAircraft(p.drones[i],old.drones[i],d,alpha));
     blendAircraft(p.plane,old.plane,s.plane,alpha);
     boatPose.current=p.boat;
     const b=p.boat,speed=Math.min(1,Math.abs(b.speed)/GAME_RULES.maxSpeed),moving=s.status==='playing';
-    const surface=swellHeight(b.x,b.z,clock.current);
-    const roll=reducedMotion?0:b.roll*.45;
-    const pitch=reducedMotion?0:Math.sin(clock.current*.83+b.z*.002)*.003*speed;
-    if(boat.current){boat.current.position.set(b.x,world.waterLevel+surface,b.z);boat.current.rotation.set(pitch,b.heading,roll);}
+    const water=hullWaterPose(b.x,b.z,b.heading,clock.current),float=buoyancy.current;
+    const targetPitch=reducedMotion?0:water.pitch-b.pitch;
+    const targetRoll=reducedMotion?0:water.roll+b.roll*.6;
+    if(reset){Object.assign(float,{height:water.height,heightVelocity:0,pitch:targetPitch,pitchVelocity:0,roll:targetRoll,rollVelocity:0});}
+    if(moving||s.status==='ready'){
+      // Damped buoyancy springs follow the sampled surface, rather than attaching
+      // the hull rigidly to each wave. Small substeps keep a slow frame stable.
+      const steps=Math.max(1,Math.ceil(dt*120)),step=dt/steps;
+      for(let i=0;i<steps;i++){
+        float.heightVelocity+=((water.height-float.height)*36-float.heightVelocity*9)*step;
+        float.height+=float.heightVelocity*step;
+        float.pitchVelocity+=((targetPitch-float.pitch)*42-float.pitchVelocity*11)*step;
+        float.pitch+=float.pitchVelocity*step;
+        float.rollVelocity+=((targetRoll-float.roll)*38-float.rollVelocity*10)*step;
+        float.roll+=float.rollVelocity*step;
+      }
+    }
+    const surface=float.height,roll=reducedMotion?0:float.roll,pitch=reducedMotion?0:float.pitch;
+    if(boat.current){boat.current.position.set(b.x,world.waterLevel+surface,b.z);boat.current.rotation.set(pitch,b.heading,roll,'YXZ');}
     p.drones.forEach((d,i)=>{const model=drones.current[i];if(model){model.position.set(d.x,d.altitude,d.z);model.rotation.set(-.055,d.heading,0);}});
     if(plane.current){const a=p.plane;plane.current.position.set(a.x,a.altitude,a.z);plane.current.rotation.set(0,a.heading,0);}
     let fov=48;
@@ -251,10 +286,7 @@ function World(props: Props) {
     <directionalLight position={[-1900,3000,1500]} intensity={2.6} color="#fff4dc"/>
     <Ocean level={world.waterLevel} clock={clock} pose={boatPose}/><RiverTerrain world={world} state={game}/>
     <BoostPickups state={game} world={world} clock={clock} reducedMotion={reducedMotion}/>
-    {world.towers.map(t=><group key={t.id}>
-      <group position={[t.x,t.height,t.z]}><Vehicle model={models.tower} kind="tower"/><mesh position={[0,65,0]}><sphereGeometry args={[5,12,8]}/><meshBasicMaterial color="#b7ebc6"/></mesh></group>
-      <RadarBeam tower={t} state={game}/>
-    </group>)}
+    {world.towers.map(t=><SurveillanceTower key={t.id} tower={t} model={models.tower} state={game}/>)}
     <group ref={boat}><Vehicle model={models.boat} kind="boat"/></group>
     {game.current.drones.map((d,i)=><group key={d.id} ref={node=>{drones.current[i]=node;}}><Vehicle model={models.copter} kind="copter"/><mesh position={[0,-9,6]}><sphereGeometry args={[2.5,12,8]}/><meshBasicMaterial color={i===0?'#f79a61':'#ffd79b'}/></mesh></group>)}
     <group ref={plane}><Vehicle model={models.plane} kind="plane"/></group>

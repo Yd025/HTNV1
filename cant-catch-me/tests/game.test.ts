@@ -2,14 +2,36 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { GAME_RULES, SIMULATION_STEP, createGame, formatTime, getSector, hasLineOfSight, isNavigable, sampleHeight, sampleRiverHeight, startGame, stepGame, togglePause, type GameState, type InputState, type WorldData } from "../lib/game";
+import { GAME_RULES, SIMULATION_STEP, createGame, formatTime, getDroneTopSpeed, getSector, hasLineOfSight, isNavigable, sampleHeight, sampleRiverHeight, startGame, stepGame, togglePause, type GameState, type InputState, type WorldData } from "../lib/game";
 
 function ocean(): WorldData {
   return { size: 131, half: 3250, heights: Array(131 * 131).fill(-20), waterLevel: 1, towers: [], spawn: { x: 0, z: 0, heading: 0 }, source: "test" };
 }
 function play(world: WorldData): GameState { const game = createGame(world); startGame(game); return game; }
+function setBoatSpeed(game: GameState, speed: number, enginePower = 1): void {
+  Object.assign(game.boat, { speed, enginePower, velocityX: Math.sin(game.boat.heading) * speed, velocityZ: Math.cos(game.boat.heading) * speed });
+}
 function advance(game: GameState, world: WorldData, seconds: number, input: InputState = { throttle: 0, steer: 0 }): void {
   for (let i = 0; i < Math.round(seconds * 60); i++) stepGame(game, world, input, 1 / 60);
+}
+/** A reproducible skilled route: weave toward visible boosts, then rejoin the river axis. */
+function escapeCourse(game: GameState, world: WorldData): InputState {
+  const boat = game.boat;
+  const forwardX = Math.sin(world.spawn.heading), forwardZ = Math.cos(world.spawn.heading);
+  const clamp = (n: number, low: number, high: number) => Math.max(low, Math.min(high, n));
+  let targetHeading = world.spawn.heading - 0.025 + 0.74 * Math.sin(game.time * 0.375 + 3.607);
+  if (game.loop > 0) {
+    const across = (boat.x - world.spawn.x) * forwardZ - (boat.z - world.spawn.z) * forwardX;
+    targetHeading = world.spawn.heading + clamp(-across / 350, -0.5, 0.5);
+  } else {
+    const pickup = game.pickups.filter((p) => (p.x - boat.x) * forwardX + (p.z - boat.z) * forwardZ > -5)
+      .sort((a, b) => Math.hypot(a.x - boat.x, a.z - boat.z) - Math.hypot(b.x - boat.x, b.z - boat.z))[0];
+    if (pickup) {
+      const pickupHeading = Math.atan2(pickup.x - boat.x, pickup.z - boat.z);
+      if (Math.abs(pickupHeading - boat.heading) < 1.5) targetHeading = pickupHeading;
+    }
+  }
+  return { throttle: 1, steer: clamp(-2.5 * (targetHeading - boat.heading) + 0.45 * boat.yawRate, -1, 1) };
 }
 
 test("bilinear terrain sampling and world boundaries", () => {
@@ -53,7 +75,7 @@ test("2x pace advances motion, acceleration, turns and radar twice per real seco
   const world = ocean();
   world.towers = [{ id: "T1", x: 2000, z: 2000, height: 0, heading: 0.3, range: 1500 }];
   const cruising = play(world);
-  cruising.boat.speed = GAME_RULES.maxSpeed;
+  setBoatSpeed(cruising, GAME_RULES.maxSpeed);
   advance(cruising, world, 1, { throttle: 1, steer: 0 });
   assert.equal(GAME_RULES.pace, 2);
   assert.ok(Math.abs(cruising.time - 1) < 1e-8);
@@ -64,11 +86,11 @@ test("2x pace advances motion, acceleration, turns and radar twice per real seco
 
   const accelerating = play(world);
   advance(accelerating, world, 1, { throttle: 1, steer: 0 });
-  assert.ok(Math.abs(accelerating.boat.speed - 54) < 1e-8);
+  assert.ok(accelerating.boat.speed > 40 && accelerating.boat.speed < GAME_RULES.maxSpeed, "Thrust accelerates against increasing water drag");
   const turning = play(world);
-  turning.boat.speed = GAME_RULES.maxSpeed;
+  setBoatSpeed(turning, GAME_RULES.maxSpeed);
   advance(turning, world, 1, { throttle: 1, steer: 0.3 });
-  assert.ok(Math.abs(turning.boat.heading + 0.57) < 1e-8);
+  assert.ok(turning.boat.heading < -0.4 && turning.boat.heading > -0.57, "Rudder and angular inertia ramp into the turn");
 });
 
 test("right steering turns toward boat starboard and fixed steps are frame independent", () => {
@@ -87,12 +109,12 @@ test("right steering turns toward boat starboard and fixed steps are frame indep
 
 test("negative throttle brakes faster than coasting and never produces reverse travel", () => {
   const world = ocean(); const braking = play(world); const coasting = play(world);
-  braking.boat.speed = GAME_RULES.maxSpeed;
-  coasting.boat.speed = GAME_RULES.maxSpeed;
+  setBoatSpeed(braking, GAME_RULES.maxSpeed);
+  setBoatSpeed(coasting, GAME_RULES.maxSpeed);
   advance(braking, world, 0.5, { throttle: -1, steer: 0 });
   advance(coasting, world, 0.5, { throttle: 0, steer: 0 });
-  assert.ok(Math.abs(braking.boat.speed - 33) < 1e-8);
-  assert.ok(Math.abs(coasting.boat.speed - 47) < 1e-8);
+  assert.ok(braking.boat.speed < 15);
+  assert.ok(coasting.boat.speed > 30 && coasting.boat.speed < GAME_RULES.maxSpeed);
   assert.ok(braking.boat.z < coasting.boat.z);
   advance(braking, world, 1, { throttle: -1, steer: 0 });
   assert.equal(braking.boat.speed, 0);
@@ -100,6 +122,63 @@ test("negative throttle brakes faster than coasting and never produces reverse t
   advance(braking, world, 2, { throttle: -1, steer: 0 });
   assert.equal(braking.boat.speed, 0);
   assert.deepEqual({ x: braking.boat.x, z: braking.boat.z }, stoppedAt);
+});
+
+test("engine thrust builds momentum and quadratic water resistance grows with speed", () => {
+  const world = ocean(); const powered = play(world); const halfPower = play(world);
+  stepGame(powered, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.ok(powered.boat.enginePower > 0 && powered.boat.enginePower < 0.1, "Engine power must spool up over more than one tick");
+  assert.ok(powered.boat.speed > 0 && powered.boat.speed < 1, "Thrust cannot jump to cruising velocity");
+  advance(powered, world, 2, { throttle: 1, steer: 0 });
+  advance(halfPower, world, 2, { throttle: 0.5, steer: 0 });
+  assert.ok(powered.boat.speed > halfPower.boat.speed + 10);
+  assert.ok(powered.boat.speed < GAME_RULES.maxSpeed);
+  assert.ok(powered.boat.pitch > 0, "Acceleration lifts the bow");
+  assert.equal(powered.boat.speed, Math.hypot(powered.boat.velocityX, powered.boat.velocityZ));
+
+  const fast = play(world); const slow = play(world);
+  setBoatSpeed(fast, 60, 0); setBoatSpeed(slow, 20, 0);
+  advance(fast, world, 0.2); advance(slow, world, 0.2);
+  assert.ok(60 - fast.boat.speed > (20 - slow.boat.speed) * 3, "High-speed coasting must lose more momentum to water resistance");
+  assert.ok(slow.boat.speed > 0, "Letting go of the accelerator keeps the hull coasting");
+  advance(powered, world, 0.3, { throttle: -1, steer: 0 });
+  assert.ok(powered.boat.pitch < 0, "Braking settles the bow forward");
+});
+
+test("rudder and yaw ramp smoothly, turning loses speed and hull momentum slips then settles", () => {
+  const world = ocean(); const turning = play(world); const straight = play(world);
+  setBoatSpeed(turning, 60); setBoatSpeed(straight, 60);
+  stepGame(turning, world, { throttle: 1, steer: 1 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.ok(turning.boat.rudder > 0 && turning.boat.rudder < 0.2);
+  assert.ok(turning.boat.yawRate < 0 && turning.boat.yawRate > -0.02);
+  advance(turning, world, 0.4, { throttle: 1, steer: 1 });
+  advance(straight, world, 0.4, { throttle: 1, steer: 0 });
+  const slip = (game: GameState) => Math.abs(game.boat.velocityX * Math.cos(game.boat.heading) - game.boat.velocityZ * Math.sin(game.boat.heading));
+  const turnSlip = slip(turning);
+  const yawAtRelease = Math.abs(turning.boat.yawRate);
+  const headingAtRelease = turning.boat.heading;
+  assert.ok(turnSlip > 3, "A turning hull must not rotate its entire velocity instantaneously");
+  assert.ok(turning.boat.speed < straight.boat.speed - 3, "Turning should scrub speed against the water");
+  assert.ok(turning.boat.roll < 0, "The hull banks with its turn");
+  stepGame(turning, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.ok(turning.boat.heading < headingAtRelease, "Angular momentum persists just after the rudder is released");
+  assert.ok(turning.boat.rudder > 0);
+  advance(turning, world, 1, { throttle: 1, steer: 0 });
+  assert.ok(Math.abs(turning.boat.yawRate) < yawAtRelease * 0.02);
+  assert.ok(slip(turning) < turnSlip * 0.03, "Water damps lateral sliding once the hull straightens");
+  assert.ok(turning.boat.rudder < 0.001);
+});
+
+test("restart clears every momentum and attitude field while pause preserves them", () => {
+  const world = ocean(); const game = play(world);
+  advance(game, world, 0.8, { throttle: 1, steer: -0.6 });
+  assert.ok(game.boat.speed > 0 && game.boat.yawRate > 0 && game.boat.pitch > 0);
+  const moving = structuredClone(game.boat);
+  togglePause(game);
+  advance(game, world, 2, { throttle: -1, steer: 1 });
+  assert.deepEqual(game.boat, moving);
+  startGame(game);
+  assert.deepEqual(game.boat, { ...world.spawn, speed: 0, roll: 0, pitch: 0, velocityX: 0, velocityZ: 0, yawRate: 0, rudder: 0, enginePower: 0 });
 });
 
 test("steering in place remains available but cannot turn upstream even with held controls", () => {
@@ -140,7 +219,7 @@ test("adversarial throttle and steering cannot move the boat backwards along its
     stepGame(game, world, input, 1 / 60);
     const progress = (game.boat.x - previous.x) * forwardX + (game.boat.z - previous.z) * forwardZ;
     assert.ok(progress >= -1e-10, `Frame ${frame} moved upstream by ${-progress}`);
-    assert.ok(game.boat.speed >= 0 && game.boat.speed <= GAME_RULES.maxSpeed);
+    assert.ok(game.boat.speed >= 0 && game.boat.speed <= GAME_RULES.maxSpeed + 1e-8);
     const deviation = Math.abs(game.boat.heading - world.spawn.heading);
     assert.ok(deviation <= GAME_RULES.maxCourseDeviation + 1e-10);
     reachedLimit ||= Math.abs(deviation - GAME_RULES.maxCourseDeviation) < 1e-10;
@@ -153,7 +232,7 @@ test("adversarial throttle and steering cannot move the boat backwards along its
 test("boat cannot cross the shoreline but can cross the original map edge", () => {
   const world = ocean();
   for (let row = 69; row < world.size; row++) for (let col = 0; col < world.size; col++) world.heights[row * world.size + col] = 200;
-  const game = play(world); game.boat.speed = 60;
+  const game = play(world); setBoatSpeed(game, 60);
   advance(game, world, 20, { throttle: 1, steer: 0 });
   assert.ok(game.boat.z < 160);
   assert.equal(isNavigable(world, game.boat.x, game.boat.z), true);
@@ -163,8 +242,33 @@ test("boat cannot cross the shoreline but can cross the original map edge", () =
   advance(edge, edgeWorld, 10, { throttle: 1, steer: 0 });
   assert.ok(edge.boat.z > edgeWorld.half + 1000);
   assert.equal(edge.collision, false);
-  assert.equal(edge.escaped, true);
+  assert.equal(edge.loop, 1);
   assert.deepEqual(getSector(edgeWorld, edge.boat.x, edge.boat.z), { sectorX: 0, sectorZ: 1 });
+});
+
+test("a glancing shoreline collision sheds velocity without pushing the hull or bow onto land", () => {
+  const world = ocean(); world.spawn.heading = 0.65;
+  for (let row = 0; row < world.size; row++) for (let col = 67; col < world.size; col++) world.heights[row * world.size + col] = 200;
+  const game = play(world); setBoatSpeed(game, 60);
+  let touchedBank = false;
+  let collisionSpeed = 0;
+  const initialSpeed = game.boat.speed;
+  for (let tick = 0; tick < 120; tick++) {
+    stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+    const { x, z, heading } = game.boat;
+    assert.equal(isNavigable(world, x, z), true);
+    for (let i = 0; i < 8; i++) {
+      const angle = i / 8 * Math.PI * 2;
+      assert.equal(isNavigable(world, x + Math.sin(angle) * GAME_RULES.boatRadius, z + Math.cos(angle) * GAME_RULES.boatRadius), true);
+    }
+    assert.equal(isNavigable(world, x + Math.sin(heading) * 31, z + Math.cos(heading) * 31), true);
+    assert.equal(isNavigable(world, x - Math.sin(heading) * 31, z - Math.cos(heading) * 31), true);
+    if (game.collision && !touchedBank) { touchedBank = true; collisionSpeed = game.boat.speed; }
+  }
+  assert.equal(touchedBank, true);
+  assert.ok(collisionSpeed < initialSpeed * 0.6, "Bank contact must dissipate momentum");
+  assert.ok(game.boat.z > 20, "A glancing impact should permit conservative travel along the bank");
+  assert.equal(game.boat.speed, Math.hypot(game.boat.velocityX, game.boat.velocityZ));
 });
 
 test("land blocks radar while clear terrain permits observation", () => {
@@ -183,6 +287,52 @@ test("land blocks radar while clear terrain permits observation", () => {
   assert.ok(game.lastKnown);
 });
 
+test("actual tower contact accelerates both drones to a higher cap and losing contact ends the surge", () => {
+  const world = ocean();
+  world.towers = [{ id: "T1", x: 0, z: -300, height: 0, heading: 0, range: 1000 }];
+  const detected = play(world); const unseen = play(world);
+  unseen.towers[0].range = 0;
+  for (const game of [detected, unseen]) {
+    game.time = 3; game.simulationTime = 6;
+    game.drones.forEach((drone, i) => Object.assign(drone, { x: i * 50, z: -1800, heading: 0, speed: 0 }));
+    Object.assign(game.plane, { x: 3000, z: 3000, heading: Math.PI / 2 });
+  }
+  const tickTower = (game: GameState) => {
+    game.towers[0].baseHeading = -Math.sin((game.simulationTime + SIMULATION_STEP) * 0.27) * 1.08;
+    stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  };
+  tickTower(detected); tickTower(unseen);
+  assert.equal(detected.towers[0].detecting, true);
+  assert.equal(unseen.detected, false);
+  assert.ok(detected.drones.every((drone) => !drone.detecting && drone.mode === "pursuit"), "The tower's real observation is shared with both drones");
+  assert.equal(detected.drones[0].speed, GAME_RULES.droneDetectedAcceleration * SIMULATION_STEP);
+  assert.equal(unseen.drones[0].speed, GAME_RULES.droneAcceleration * SIMULATION_STEP);
+  for (let tick = 0; tick < 240; tick++) { tickTower(detected); tickTower(unseen); }
+  assert.ok(detected.drones.every((drone) => drone.speed === GAME_RULES.droneDetectedSpeed && drone.speed > GAME_RULES.droneMaxSpeed));
+  assert.ok(detected.drones[0].speed > unseen.drones[0].speed + 30);
+  detected.towers[0].range = 0;
+  tickTower(detected);
+  assert.equal(detected.detected, false);
+  assert.equal(detected.towers[0].detecting, false);
+  assert.ok(detected.drones.every((drone) => drone.mode === "searching" && drone.speed < GAME_RULES.droneDetectedSpeed));
+  advance(detected, world, 1.5);
+  assert.ok(detected.drones.every((drone) => drone.speed < GAME_RULES.droneMaxSpeed));
+  assert.equal(detected.detected, false, "A remembered position cannot sustain detection speed");
+});
+
+test("detected drones still slow near the hull instead of blowing past the capture radius", () => {
+  const world = ocean(); const game = play(world);
+  game.time = 3; game.simulationTime = 6;
+  Object.assign(game.drones[0], { x: 0, z: -35, heading: 0, speed: 0 });
+  Object.assign(game.drones[1], { x: -3000, z: -3000 });
+  Object.assign(game.plane, { x: 3000, z: 3000 });
+  advance(game, world, 0.3);
+  assert.equal(game.detected, true);
+  assert.ok(game.drones[0].speed <= 18.1);
+  assert.ok(game.drones[0].tagProgress > 0);
+  assert.ok(game.drones[0].distanceToBoat < GAME_RULES.tagRadius);
+});
+
 test("hidden boat positions and speeds cannot affect either drone or the scouting plane", () => {
   const world = ocean(); const a = play(world); const b = play(world);
   for (const game of [a, b]) {
@@ -190,8 +340,8 @@ test("hidden boat positions and speeds cannot affect either drone or the scoutin
     game.drones.forEach((drone, i) => Object.assign(drone, { x: 1200, z: i * 300, heading: -Math.PI / 2, speed: 30 }));
     Object.assign(game.plane, { x: 1000, z: -1000, heading: -Math.PI / 4 });
   }
-  a.boat.x = -2500; a.boat.z = -2400; a.boat.speed = 23;
-  b.boat.x = 2500; b.boat.z = 2400; b.boat.speed = 54;
+  a.boat.x = -2500; a.boat.z = -2400; setBoatSpeed(a, 23);
+  b.boat.x = 2500; b.boat.z = 2400; setBoatSpeed(b, 54);
   advance(a, world, 3); advance(b, world, 3);
   const flight = (game: GameState) => game.drones.map(({ distanceToBoat: _distance, ...drone }) => drone);
   assert.deepEqual(flight(a), flight(b));
@@ -284,7 +434,7 @@ test("render snapshots bracket fixed simulation ticks and are never called while
 
 test("interpolated constant-speed boat motion stays continuous across irregular and sub-tick render frames", () => {
   const world = ocean(); world.spawn.heading = 1.1;
-  const game = play(world); game.boat.speed = GAME_RULES.maxSpeed;
+  const game = play(world); setBoatSpeed(game, GAME_RULES.maxSpeed);
   let previous = { ...game.boat };
   let snapshotCount = 0;
   const renderFrame = (dt: number) => {
@@ -374,7 +524,7 @@ test("grace period prevents immediate tags and score formatting is stable", () =
   assert.equal(formatTime(-10), "00:00");
 });
 
-test("the full fleet finds an idle boat and the supplied Fort Ross route permits forward-only navigation", () => {
+test("the full fleet finds an idle boat while following boosts permits a forward-only Fort Ross escape", () => {
   const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
   const idle = play(world);
   advance(idle, world, 30);
@@ -384,8 +534,11 @@ test("the full fleet finds an idle boat and the supplied Fort Ross route permits
   const moving = play(world);
   let previousProgress = 0;
   let navigatedDistance = 0;
-  for (let frame = 0; frame < 45 * 60 && moving.status === "playing"; frame++) {
-    stepGame(moving, world, { throttle: 1, steer: 0 }, 1 / 60);
+  let boostsCollected = 0;
+  for (let frame = 0; frame < 45 * 60 && moving.status === "playing" && moving.loop === 0; frame++) {
+    const previousBoost = moving.boostRemaining;
+    stepGame(moving, world, escapeCourse(moving, world), 1 / 60);
+    if (moving.boostRemaining > previousBoost) boostsCollected++;
     const { x, z, heading } = moving.boat;
     assert.equal(isNavigable(world, x, z), true);
     assert.equal(isNavigable(world, x + Math.sin(heading) * 31, z + Math.cos(heading) * 31), true);
@@ -395,9 +548,10 @@ test("the full fleet finds an idle boat and the supplied Fort Ross route permits
     if (!moving.collision) navigatedDistance = progress;
     previousProgress = progress;
   }
-  assert.ok(navigatedDistance > 5000, "The route must continue downriver through the former map boundary");
+  assert.ok(navigatedDistance > 4000, "The route must continue downriver through the former map boundary");
   assert.equal(moving.status, "playing");
-  assert.equal(moving.escaped, true);
+  assert.equal(moving.loop, 1);
+  assert.ok(boostsCollected >= 3, "A viable escape uses real pickups while steering around the patrol");
 });
 
 test("generated terrain joins every original edge continuously while preserving interior geography", () => {
@@ -415,59 +569,123 @@ test("generated terrain joins every original edge continuously while preserving 
   assert.deepEqual(getSector(world, -world.half - 1, world.half + 1), { sectorX: -1, sectorZ: 1 });
 });
 
-test("Fort Ross flows through several connected sectors without teleporting or duplicating the original fleet", () => {
+test("each connected loop replaces a finite patrol without teleporting the boat or resetting its run", () => {
   const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
   const game = play(world);
   const originalTowers = game.towers.map(({ id, x, z }) => ({ id, x, z }));
   const originalAircraft = [...game.drones, game.plane].map(({ id }) => id);
-  let crossed = false;
-  let traveled = 0;
-  for (let frame = 0; frame < 180 * 60; frame++) {
-    const previous = { x: game.boat.x, z: game.boat.z };
-    stepGame(game, world, { throttle: 1, steer: 0 }, 1 / 60);
-    const displacement = Math.hypot(game.boat.x - previous.x, game.boat.z - previous.z);
-    assert.ok(displacement <= GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier * GAME_RULES.pace / 60 + 1e-8, "Crossing sectors cannot jump world coordinates");
-    traveled += displacement;
+  const forwardX = Math.sin(world.spawn.heading), forwardZ = Math.cos(world.spawn.heading);
+  const firstBoundary = Math.min((world.half - world.spawn.x) / forwardX, (world.half - world.spawn.z) / forwardZ);
+  let previousTowers = originalTowers;
+  game.time = 40; game.simulationTime = 80; game.distanceTraveled = 4000;
+  for (let loop = 1; loop <= 5; loop++) {
+    const boundary = loop === 1 ? firstBoundary : game.nextLoopProgress;
+    Object.assign(game.boat, { x: world.spawn.x + forwardX * (boundary - 0.5), z: world.spawn.z + forwardZ * (boundary - 0.5) });
+    setBoatSpeed(game, GAME_RULES.maxSpeed);
+    game.boostRemaining = 2;
+    const before = { ...game.boat, time: game.time, distance: game.distanceTraveled };
+    stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+    const displacement = Math.hypot(game.boat.x - before.x, game.boat.z - before.z);
+    assert.ok(displacement > 0 && displacement <= GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier * SIMULATION_STEP, "Crossing loops cannot jump world coordinates");
+    assert.ok(Math.abs(game.distanceTraveled - before.distance - displacement) < 1e-8);
+    assert.ok(Math.abs(game.time - before.time - SIMULATION_STEP / GAME_RULES.pace) < 1e-8);
+    assert.ok(Math.abs(game.boostRemaining - (2 - SIMULATION_STEP / GAME_RULES.pace)) < 1e-8);
+    assert.ok(game.boat.speed >= GAME_RULES.maxSpeed, "New patrols retain the moving hull's momentum");
+    assert.equal(game.loop, loop);
     assert.equal(game.collision, false);
     assert.equal(game.status, "playing");
     assert.equal(isNavigable(world, game.boat.x, game.boat.z), true);
-    if (game.escaped) {
-      crossed = true;
-      assert.equal(game.detected, false);
-      assert.equal(game.lastKnown, null);
-      assert.equal(game.tagProgress, 0);
-      assert.equal(game.alert, "clear");
-      assert.ok([...game.drones, game.plane].every((craft) => !craft.detecting && craft.mode === "patrol"));
+    assert.equal(game.detected, false);
+    assert.equal(game.lastKnown, null);
+    assert.equal(game.tagProgress, 0);
+    assert.equal(game.alert, "clear");
+    assert.equal(game.towers.length, 2);
+    assert.equal(game.drones.length, 2);
+    assert.deepEqual([...game.drones, game.plane].map(({ id }) => id), originalAircraft);
+    assert.deepEqual(game.towers.map(({ id }) => id), originalTowers.map(({ id }) => id));
+    assert.notDeepEqual(game.towers.map(({ id, x, z }) => ({ id, x, z })), previousTowers);
+    assert.ok(game.distanceToDrone > 900, "Every fresh pair launches safely ahead of the crossing");
+    assert.equal(game.patrolStartedAt, game.simulationTime);
+    assert.ok(Math.abs(game.nextLoopProgress - game.loopStartProgress - GAME_RULES.loopLength) < 1e-8);
+    assert.ok(game.patrolPoints.every((point) => isNavigable(world, point.x, point.z)));
+    for (const tower of game.towers) {
+      assert.ok(tower.height > world.waterLevel, "Respawned towers must stand on the generated banks");
+      assert.equal(tower.height, sampleRiverHeight(world, tower.x, tower.z));
+      const target = { x: tower.x + Math.sin(tower.baseHeading) * 650, z: tower.z + Math.cos(tower.baseHeading) * 650 };
+      assert.equal(isNavigable(world, target.x, target.z), true);
+      assert.equal(hasLineOfSight(world, tower.x, tower.z, tower.height + 55, target.x, target.z, world.waterLevel + 5), true);
     }
-    assert.ok([...game.drones, game.plane].every((craft) => Math.abs(craft.x) < world.half && Math.abs(craft.z) < world.half));
+    assert.ok([...game.drones, game.plane].every((craft) => !craft.detecting && craft.mode === "patrol"
+      && Math.hypot(craft.x - game.patrolOrigin.x, craft.z - game.patrolOrigin.z) < GAME_RULES.loopLength));
+    previousTowers = game.towers.map(({ id, x, z }) => ({ id, x, z }));
     assert.ok(game.pickups.length <= GAME_RULES.maxPickups);
   }
-  assert.equal(crossed, true);
-  assert.ok(game.sectorX >= 3 && game.sectorZ >= 1);
-  assert.ok(Math.abs(game.distanceTraveled - traveled) < 1e-7);
+  togglePause(game);
+  const paused = JSON.stringify(game);
+  advance(game, world, 5, { throttle: 1, steer: 0 });
+  assert.equal(JSON.stringify(game), paused);
+  startGame(game);
+  assert.equal(game.loop, 0);
+  assert.equal(game.patrolStartedAt, 0);
   assert.deepEqual(game.towers.map(({ id, x, z }) => ({ id, x, z })), originalTowers);
-  assert.deepEqual([...game.drones, game.plane].map(({ id }) => id), originalAircraft);
+  assert.deepEqual(game.patrolPoints, game.initialPatrolPoints);
+  assert.deepEqual(game.patrolOrigin, { x: 0, z: 0 });
 });
 
-test("crossing the patrol boundary immediately clears an existing tag and all shared sightings", () => {
+test("fresh patrols clear old locks, cannot rapidly repeat at a map edge, and detect again after grace", () => {
   const world = ocean();
   const game = play(world);
-  Object.assign(game.boat, { z: world.half - 0.2, speed: GAME_RULES.maxSpeed });
+  game.boat.z = world.half - 0.2; setBoatSpeed(game, GAME_RULES.maxSpeed);
   game.simulationTime = 30;
   game.lastKnown = { x: game.boat.x, z: game.boat.z };
   game.detected = true;
   game.tagProgress = 0.99;
   game.drones.forEach((drone) => Object.assign(drone, { x: 0, z: world.half - 1, heading: 0, detecting: true, tagProgress: 0.99 }));
   stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
-  assert.equal(game.escaped, true);
+  assert.equal(game.loop, 1);
   assert.equal(game.status, "playing");
   assert.equal(game.lastKnown, null);
   assert.equal(game.detected, false);
   assert.equal(game.tagProgress, 0);
   assert.ok(game.drones.every((drone) => drone.tagProgress === 0 && drone.mode === "patrol"));
-  game.boat.z = 0;
+  const towers = structuredClone(game.towers);
+  const nextBoundary = game.nextLoopProgress;
+  game.boat.z = world.half - 0.1;
   stepGame(game, world, { throttle: -1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
-  assert.equal(game.escaped, true, "The escaped state persists for the rest of the run");
+  assert.equal(game.loop, 1, "Crossing back over an old map edge cannot load another patrol");
+  assert.equal(game.nextLoopProgress, nextBoundary);
+  assert.deepEqual(game.towers.map(({ x, z }) => ({ x, z })), towers.map(({ x, z }) => ({ x, z })));
+  Object.assign(game.drones[0], { x: game.boat.x, z: game.boat.z - 10, heading: 0, speed: 0 });
+  stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.detected, false);
+  assert.equal(game.tagProgress, 0, "A fresh patrol always receives a full grace period");
+  game.simulationTime = game.patrolStartedAt + GAME_RULES.graceSeconds;
+  Object.assign(game.drones[0], { x: game.boat.x, z: game.boat.z - 10, heading: 0, speed: 0 });
+  stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.detected, true, "New drones must be able to acquire the boat again");
+  assert.ok(game.tagProgress > 0);
+});
+
+test("each loop makes the drones a little faster, with a bounded difficulty cap", () => {
+  assert.equal(getDroneTopSpeed(0), GAME_RULES.droneMaxSpeed);
+  assert.equal(getDroneTopSpeed(0, true), GAME_RULES.droneDetectedSpeed);
+  for (let loop = 1; loop <= 10; loop++) {
+    assert.ok(getDroneTopSpeed(loop, true) > getDroneTopSpeed(loop - 1, true));
+    assert.ok(Math.abs(getDroneTopSpeed(loop, true) - GAME_RULES.droneDetectedSpeed * (1 + loop * 0.03)) < 1e-8);
+  }
+  assert.equal(getDroneTopSpeed(1000, true), GAME_RULES.droneDetectedSpeed * 1.3);
+  const world = ocean();
+  const speeds = [1, 2].map((loop) => {
+    const game = play(world);
+    game.loop = loop;
+    game.nextLoopProgress = 10000;
+    game.simulationTime = 10;
+    Object.assign(game.drones[0], { x: 0, z: -450, heading: 0, speed: 0 });
+    stepGame(game, world, { throttle: 0, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+    assert.equal(game.detected, true);
+    return game.drones[0].speed;
+  });
+  assert.ok(speeds[1] > speeds[0], "The later patrol must actually accelerate harder during the simulation");
 });
 
 test("speed pickups collect once, last four real seconds, respect braking and pause, and reset on retry", () => {
@@ -492,17 +710,28 @@ test("speed pickups collect once, last four real seconds, respect braking and pa
   togglePause(game);
   const speed = game.boat.speed;
   advance(game, world, 0.5, { throttle: -1, steer: 0 });
-  assert.ok(Math.abs(game.boat.speed - (speed - 27)) < 1e-8, "The accelerator effect must not override braking");
+  assert.ok(game.boat.speed < speed * 0.45, "The accelerator effect must not override braking and water resistance");
   advance(game, world, 2.1, { throttle: -1, steer: 0 });
   assert.equal(game.boostRemaining, 0);
   assert.equal(game.boat.speed, 0);
   startGame(game);
   assert.equal(game.boostRemaining, 0);
   assert.equal(game.distanceTraveled, 0);
-  assert.equal(game.escaped, false);
+  assert.equal(game.loop, 0);
   assert.equal(game.sectorX, 0);
   assert.equal(game.sectorZ, 0);
   assert.deepEqual(game.pickups, firstPickups);
+});
+
+test("boost expiration loses excess momentum through water drag instead of snapping to normal speed", () => {
+  const world = ocean(); const game = play(world);
+  setBoatSpeed(game, GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier);
+  game.boostRemaining = SIMULATION_STEP / GAME_RULES.pace;
+  stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.boostRemaining, 0);
+  assert.ok(game.boat.speed > 95 && game.boat.speed < 99);
+  advance(game, world, 1, { throttle: 1, steer: 0 });
+  assert.ok(game.boat.speed > GAME_RULES.maxSpeed && game.boat.speed < 65);
 });
 
 test("pickup placement is seeded, navigable, bounded and expires behind the boat", () => {
@@ -515,10 +744,13 @@ test("pickup placement is seeded, navigable, bounded and expires behind the boat
   startGame(a); startGame(b);
   for (const game of [a, b]) {
     game.boat.z = 7000;
-    game.boat.speed = GAME_RULES.maxSpeed;
+    setBoatSpeed(game, GAME_RULES.maxSpeed);
   }
   let highestId = 0;
   for (let frame = 0; frame < 120 * 60; frame++) {
+    // Isolate the continuous pickup stream from capture, which is covered by
+    // dedicated fleet tests; the newly respawned patrols remain active/moving.
+    a.patrolStartedAt = a.simulationTime; b.patrolStartedAt = b.simulationTime;
     stepGame(a, world, { throttle: 1, steer: 0 }, 1 / 60);
     stepGame(b, world, { throttle: 1, steer: 0 }, 1 / 60);
     assert.ok(a.pickups.length <= GAME_RULES.maxPickups);
@@ -530,7 +762,12 @@ test("pickup placement is seeded, navigable, bounded and expires behind the boat
     }
   }
   assert.ok(highestId > 10, "The random pickup stream must continue across sectors");
+  assert.ok(a.loop >= 3, "The deterministic run must cross several fresh patrols");
   assert.deepEqual(a.pickups, b.pickups);
   assert.deepEqual(a.boat, b.boat);
+  assert.deepEqual(a.towers, b.towers);
+  assert.deepEqual(a.drones, b.drones);
+  assert.deepEqual(a.plane, b.plane);
+  assert.deepEqual(a.patrolPoints, b.patrolPoints);
   assert.equal(a.randomState, b.randomState);
 });

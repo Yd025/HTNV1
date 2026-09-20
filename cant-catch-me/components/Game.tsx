@@ -2,6 +2,7 @@ import { Component, useCallback, useEffect, useRef, useState, type ReactNode } f
 import Scene, { type CameraMode, type Models } from './Scene';
 import Radar from './Radar';
 import LoadingScreen from './LoadingScreen';
+import TowerWarning from './TowerWarning';
 import { GAME_RULES, createGame, formatTime, startGame, togglePause, type GameState, type InputState, type WorldData } from '../lib/game';
 
 function Icon({name,...props}:{name:'boat'|'arrow'|'pause'|'play'|'retry'|'close'|'pin'|'expand'|'camera'|'look'|'boost';className?:string}) {
@@ -21,8 +22,8 @@ class SceneBoundary extends Component<{children:ReactNode},{failed:boolean}> {
 }
 
 const snapshot=(s:GameState):GameState=>({...s,boat:{...s.boat},drones:s.drones.map(drone=>({...drone})),plane:{...s.plane},towers:s.towers.map(t=>({...t})),pickups:s.pickups.map(pickup=>({...pickup})),lastKnown:s.lastKnown?{...s.lastKnown}:null});
-// Endless routes and boosts have their own record; previous scores stay intact.
-const BEST_KEY='cant-catch-me-best-endless-boost-pace2';
+// Boat dynamics and faster detected pursuit have their own score record.
+const BEST_KEY='cant-catch-me-best-physics-loop-patrol-pace2';
 const formatDistance=(metres:number)=>metres>=1000?`${(metres/1000).toFixed(1)} km`:`${Math.round(metres)} m`;
 
 function HowToPlay() {
@@ -37,10 +38,10 @@ function HowToPlay() {
     </dl>
     <p className="touch-guide">On touch screens, use the arrows along the bottom.</p>
     <div className="play-rules">
-      <div><h3>Keep moving downriver</h3><p>Slow down and steer across the channel. No reversing or U-turns.</p></div>
-      <div><h3>Break their view</h3><p>The towers and scout share your position; only drones can tag you. A drone within {GAME_RULES.tagRadius} m needs a clear view for {GAME_RULES.tagSeconds} uninterrupted seconds. Hide behind the coast to break its lock.</p></div>
+      <div><h3>Feel the weight</h3><p>Build speed with the throttle and brake early. The hull carries momentum, drifts through turns and slows against the water. Keep heading downriver: no reversing or U-turns.</p></div>
+      <div><h3>Break their view</h3><p>A tower warning means you’ve been spotted. Drones accelerate while the patrol can see you; the scout only shares sightings. A drone within {GAME_RULES.tagRadius} m needs a clear view for {GAME_RULES.tagSeconds} uninterrupted seconds to tag you. Find cover to break its lock.</p></div>
       <div className="boost-rule"><h3><Icon name="boost"/>Catch a speed boost</h3><p>Collect orange boosts for {GAME_RULES.boostDuration} seconds of extra speed. They appear in different places each run.</p></div>
-      <div><h3>Leave the patrol behind</h3><p>Cross beyond the first stretch to lose the drones. The towers stay there; new coast keeps unfolding ahead.</p></div>
+      <div><h3>Outrun the next patrol</h3><p>Every new stretch brings fresh towers and drones. Each patrol is a little faster than the last. The river and radar follow you; your run keeps going.</p></div>
     </div>
     <p className="rules-note">Your time is your score. The chase runs at {GAME_RULES.pace}× pace; timers count real seconds. Camera sway is optional in the pause menu.</p>
   </div>;
@@ -66,7 +67,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   const [cameraMode,setCameraMode]=useState<CameraMode>('helm'),[motionEnabled,setMotionEnabled]=useState(true);
   const [hud,setHud]=useState(()=>snapshot(game.current)),[best,setBest]=useState(0),[sceneReady,setSceneReady]=useState(false),[reducedMotion,setReducedMotion]=useState(false),[controls,setControls]=useState(false);
   const keys=useRef(new Set<string>()),touch=useRef(new Set<string>()),newBest=useRef(false),main=useRef<HTMLElement>(null),action=useRef<HTMLButtonElement>(null),guideButton=useRef<HTMLButtonElement>(null),guideClose=useRef<HTMLButtonElement>(null);
-  const [escapeNotice,setEscapeNotice]=useState(false);
+  const [loopNotice,setLoopNotice]=useState(false);
   const reported=useRef('ready'),bestRecord=useRef(0),bestAtRunStart=useRef(0);
   const saveBest=useCallback((updateDisplay=true)=>{
     const score=game.current.time;
@@ -104,7 +105,7 @@ function Session({world,models}:{world:WorldData;models:Models}) {
     return ()=>mq.removeEventListener('change',motion);
   },[]);
   useEffect(()=>{
-    // Escaped runs have no capture screen: keep their record while they continue.
+    // Keep long-running records even before the next capture screen.
     const interval=window.setInterval(()=>{if(game.current.status==='playing')saveBest();},5000);
     const leaving=()=>saveBest(false);
     window.addEventListener('pagehide',leaving);
@@ -130,20 +131,22 @@ function Session({world,models}:{world:WorldData;models:Models}) {
   useEffect(()=>{if(hud.status==='paused'||hud.status==='caught')action.current?.focus();},[hud.status]);
   useEffect(()=>{if(controls&&hud.status==='ready')guideClose.current?.focus();},[controls,hud.status]);
   useEffect(()=>{
-    if(!hud.escaped){setEscapeNotice(false);return;}
-    setEscapeNotice(true);
-    const timer=window.setTimeout(()=>setEscapeNotice(false),6500);
+    if(!hud.loop){setLoopNotice(false);return;}
+    setLoopNotice(true);
+    const timer=window.setTimeout(()=>setLoopNotice(false),5500);
     return ()=>window.clearTimeout(timer);
-  },[hud.escaped]);
+  },[hud.loop]);
   const touchButton=(code:string,label:string,className:string)=><button className={`touch-button ${className}`} aria-label={label} onContextMenu={e=>e.preventDefault()} onPointerDown={e=>{e.preventDefault();e.currentTarget.setPointerCapture(e.pointerId);touch.current.add(code);refreshInput();}} onPointerUp={()=>{touch.current.delete(code);refreshInput();}} onPointerCancel={()=>{touch.current.delete(code);refreshInput();}} onLostPointerCapture={()=>{touch.current.delete(code);refreshInput();}}><Icon name="arrow"/></button>;
   const isIntro=hud.status==='ready';
   const nearestDrone=hud.drones.reduce((nearest,drone)=>drone.distanceToBoat<nearest.distanceToBoat?drone:nearest);
   const lockingDrone=hud.drones.reduce((closest,drone)=>drone.tagProgress>closest.tagProgress?drone:closest);
-  const statusText=hud.escaped?'Patrol left behind':hud.alert==='tagging'?`${lockingDrone.id} locking on`:hud.alert==='detected'?(hud.plane.detecting?'Scout sharing your position':'You’ve been spotted'):hud.alert==='searching'?'They lost your trail':'Out of sight';
+  const spottingTowers=hud.towers.flatMap((tower,i)=>tower.detecting?[`T${i+1}`]:[]);
+  const towerWarning=hud.status==='playing'&&spottingTowers.length>0;
+  const statusText=hud.alert==='tagging'?`${lockingDrone.id} locking on`:hud.alert==='detected'?(spottingTowers.length?'Tower contact · fast pursuit':hud.plane.detecting?'Scout contact · fast pursuit':'Spotted · fast pursuit'):hud.alert==='searching'?'They lost your trail':'Out of sight';
   const relativeDrone=Math.atan2(nearestDrone.x-hud.boat.x,nearestDrone.z-hud.boat.z)-hud.boat.heading;
   const droneBearing=Math.atan2(Math.sin(relativeDrone),Math.cos(relativeDrone));
   const droneDirection=Math.abs(droneBearing)<Math.PI/4?'ahead':Math.abs(droneBearing)>Math.PI*3/4?'astern':droneBearing>0?'to port':'to starboard';
-  return <main ref={main} tabIndex={-1} className={`game-shell ${cameraMode==='helm'?'helm-view':''} ${isIntro?'is-intro':''} ${controls&&isIntro?'guide-open':''} ${hud.status==='caught'?'is-caught':''}`} aria-label="Can't Catch Me boat survival game">
+  return <main ref={main} tabIndex={-1} className={`game-shell ${cameraMode==='helm'?'helm-view':''} ${isIntro?'is-intro':''} ${controls&&isIntro?'guide-open':''} ${towerWarning?'has-tower-contact':''} ${hud.status==='caught'?'is-caught':''}`} aria-label="Can't Catch Me boat survival game">
     <div className="scene"><Scene world={world} models={models} game={game} input={input} onUpdate={update} onReady={ready} reducedMotion={reducedMotion||!motionEnabled} cameraMode={cameraMode} lookBack={lookBack}/></div>
     <div className="vignette"/>
     <header className="topbar">
@@ -158,26 +161,27 @@ function Session({world,models}:{world:WorldData;models:Models}) {
     {isIntro ? <>
       <section className="intro">
         <h1>can’t<br/>catch me<span>.</span></h1>
-        <p className="intro-copy">Two towers. Two drones. One endless escape.<br/>Catch a boost. Outrun the patrol. Find what’s beyond.</p>
+        <p className="intro-copy">Two towers. Two drones. One endless escape.<br/>Fresh patrols. Faster drones. Keep going.</p>
         <button className="primary start" disabled={!sceneReady} onClick={begin}>{sceneReady?'Make your escape':'Preparing the water…'}<Icon name="arrow"/></button>
         <button ref={guideButton} className="text-button intro-help" disabled={!sceneReady} onClick={()=>setControls(previous=>!previous)} aria-expanded={controls} aria-controls="play-guide">{controls?'Hide guide':'How to play'}</button>
         <div className="intro-meta"><span>{GAME_RULES.pace}× pace</span><span className="meta-dot"/><span>Survive as long as you can</span>{best>0&&<><span className="meta-dot"/><span>Best {formatTime(best)}</span></>}</div>
       </section>
-      {controls?<aside className="intro-guide" aria-labelledby="guide-title"><div className="guide-heading"><h2 id="guide-title">Make a clean escape.</h2><button ref={guideClose} className="icon-button" aria-label="Close how to play" onClick={()=>{setControls(false);guideButton.current?.focus();}}><Icon name="close"/></button></div><HowToPlay/></aside>:<aside className="field-note"><span className="note-line"/><p>The coast keeps going.<br/>Their patrol doesn’t.<br/><strong>Get beyond their reach.</strong></p></aside>}
+      {controls?<aside className="intro-guide" aria-labelledby="guide-title"><div className="guide-heading"><h2 id="guide-title">Make a clean escape.</h2><button ref={guideClose} className="icon-button" aria-label="Close how to play" onClick={()=>{setControls(false);guideButton.current?.focus();}}><Icon name="close"/></button></div><HowToPlay/></aside>:<aside className="field-note"><span className="note-line"/><p>The river keeps going.<br/>So does the chase.<br/><strong>Outrun the next patrol.</strong></p></aside>}
       <footer className="intro-footer"><div className="keyboard-hint"><span className="key-group"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>or arrow keys to steer</span></div><span className="world-caption">The waters of Fort Ross · 71.99° N</span></footer>
     </> : <>
       <section className="score" aria-label="Survival time"><span>Still free</span><strong>{formatTime(hud.time)}</strong>{best>0&&<small>Best {formatTime(best)}</small>}</section>
-      <div className={`contact-status ${hud.escaped?'escaped':hud.alert}`} role="status" aria-live="polite"><span className="status-light"/><span>{statusText}</span></div>
-      {escapeNotice&&<div className="escape-notice" role="status"><strong>You’re beyond their reach.</strong><span>Fresh coast ahead. Keep going.</span></div>}
+      <div className={`contact-status ${hud.alert}`} role="status" aria-live="polite"><span className="status-light"/><span>{statusText}</span></div>
+      {towerWarning&&<TowerWarning towers={spottingTowers}/>}
+      {loopNotice&&hud.status==='playing'&&!towerWarning&&hud.tagProgress===0&&<div className="loop-notice" role="status"><strong>Stretch {hud.loop+1}. New patrol ahead.</strong><span>Fresh towers. Tougher drones.</span></div>}
       {hud.tagProgress>0&&<div className="tag-warning"><span>Break {lockingDrone.id}’s lock</span><div className="tag-track"><i style={{width:`${hud.tagProgress*100}%`}}/></div><small>{Math.max(0,GAME_RULES.tagSeconds-hud.tagProgress*GAME_RULES.tagSeconds).toFixed(1)}s until tagged</small></div>}
       {hud.collision&&<div className="collision-warning" role="status">Shallow water — brake and steer toward the channel</div>}
       <div className={`instruments ${hud.boostRemaining>0?'is-boosting':''}`}>
         <div className="speed"><strong>{Math.round(Math.abs(hud.boat.speed)*1.94384)}</strong><span>knots</span></div>
         <div className="speed-track"><i style={{height:`${Math.min(100,Math.abs(hud.boat.speed)/(GAME_RULES.maxSpeed*(hud.boostRemaining>0?GAME_RULES.boostMultiplier:1))*100)}%`}}/></div>
-        <div className="drone-distance" aria-label={hud.escaped?'Patrol left behind':`Nearest drone ${nearestDrone.id}, ${droneDirection}, ${Math.round(nearestDrone.distanceToBoat)} metres`}><span>{hud.escaped?'Clear water':`${nearestDrone.id} ${droneDirection}`}</span><strong>{hud.escaped?'Keep exploring':formatDistance(nearestDrone.distanceToBoat)}</strong><small>{hud.escaped?'Patrol left behind':'Nearest drone'}</small></div>
+        <div className="drone-distance" aria-label={`Nearest drone ${nearestDrone.id}, ${droneDirection}, ${Math.round(nearestDrone.distanceToBoat)} metres`}><span>{`${nearestDrone.id} ${droneDirection}`}</span><strong>{formatDistance(nearestDrone.distanceToBoat)}</strong><small>{hud.detected?'Fast pursuit':'Nearest drone'}</small></div>
         <div className={`boost-instrument ${hud.boostRemaining>0?'active':''}`}><Icon name="boost"/>{hud.boostRemaining>0?<><span>Boost<strong>{hud.boostRemaining.toFixed(1)}<small> s</small></strong></span><div className="boost-track"><i style={{width:`${hud.boostRemaining/GAME_RULES.boostDuration*100}%`}}/></div></>:<span>Collect orange boosts</span>}</div>
       </div>
-      <div className="radar-position"><div className="route-progress"><span>{hud.sectorX===0&&hud.sectorZ===0?'Home waters':`Reach ${Math.max(Math.abs(hud.sectorX),Math.abs(hud.sectorZ))+1}`}</span><strong>{formatDistance(hud.distanceTraveled)}<span> traveled</span></strong></div><Radar world={world} state={hud}/></div>
+      <div className="radar-position"><div className="route-progress"><span>Stretch {hud.loop+1}</span><strong>{formatDistance(hud.distanceTraveled)}<span> traveled</span></strong></div><Radar world={world} state={hud}/></div>
       <div className="desktop-controls"><span><kbd>W</kbd> accelerate</span><span><kbd>S</kbd> brake</span><span><kbd>A</kbd><kbd>D</kbd> turn</span><span><kbd>Space</kbd> look back</span><span><kbd>C</kbd> view</span><span><kbd>Esc</kbd> pause</span></div>
       {hud.status==='playing'&&<div className="touch-controls"><div>{touchButton('KeyA','Steer left','left')}{touchButton('KeyD','Steer right','right')}</div><div>{touchButton('KeyS','Brake','down')}{touchButton('KeyW','Accelerate','up')}</div></div>}
     </>}
