@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { assetLabel, type GraphReplay } from "../lib/graphExperiment";
-import { computeLiveMetrics, liveSeries } from "../lib/graphLiveMetrics";
+import { computeLiveMetrics, liveSeries, missionStatusAt } from "../lib/graphLiveMetrics";
 import styles from "./GraphTrainingDemo.module.css";
 
 const percent = (value: number) => `${value.toFixed(1)}%`;
@@ -35,6 +35,7 @@ export default function LiveMissionInsights({ replay, elapsedS, horizonS, stepS,
 }) {
   const observedTime = Math.floor(elapsedS / stepS) * stepS;
   const metrics = useMemo(() => computeLiveMetrics(replay, observedTime, freshnessS), [replay, observedTime, freshnessS]);
+  const mission = useMemo(() => missionStatusAt(replay, observedTime), [replay, observedTime]);
   const series = useMemo(() => liveSeries(replay, observedTime, freshnessS), [replay, observedTime, freshnessS]);
   const count = Object.values(metrics.bySource).reduce((sum, value) => sum + value, 0);
   const errorScale = Math.max(40, Math.ceil(Math.max(0, ...series.map(point => point.rmseM ?? 0)) / 20) * 20);
@@ -45,8 +46,16 @@ export default function LiveMissionInsights({ replay, elapsedS, horizonS, stepS,
     { label: "Position error", value: format(metrics.rmseM, " m") },
     { label: "Estimate available", value: percent(metrics.estimateAvailabilityPct) },
     { label: "Drone travel", value: format(metrics.distanceM / 1000, " km") },
-    { label: "Reporting-source changes", value: String(metrics.handoffs) },
-    { label: "Positive sensor samples", value: String(count) },
+    { label: mission.frame?.phase ? "Confirmed drone handoffs" : "Reporting-source changes", value: String(metrics.handoffs) },
+    { label: "Raw sensor reports", value: String(count) },
+    ...(mission.frame?.phase ? [
+      { label: "Tower confirmation", value: mission.towerConfirmed ? "Confirmed" : "Waiting for evidence" },
+      { label: "Drone handoff", value: mission.handoffConfirmed ? "Confirmed by aircraft" : "Pending aircraft sighting" },
+      { label: "Boat match (evaluation only)", value: mission.frame.targetHandoffConfirmed ? "Aircraft track verified" : mission.frame.targetConfirmed ? "Tower acquisition verified" : "Not verified" },
+      { label: "Tower view (evaluation only)", value: mission.frame.towerVisible == null ? "Unavailable" : mission.frame.towerVisible ? "Within tower view" : "Outside both tower views" },
+      { label: "Current observer", value: mission.frame.custodian ? assetLabel(mission.frame.custodian) : "None" },
+      { label: "Custody outside tower view", value: metrics.postTowerCustodyPct === null ? "No qualifying samples" : percent(metrics.postTowerCustodyPct) },
+    ] : []),
   ];
   return <section className={styles.liveInsights} aria-label="Live mission statistics">
     <div className={styles.liveHeader}>
@@ -59,9 +68,10 @@ export default function LiveMissionInsights({ replay, elapsedS, horizonS, stepS,
         <LivePlot title="Position error — live" rows={series.map(point => ({ t: point.t, values: [point.rmseM] }))} series={[{ name: "Observed RMSE", color: "var(--text)" }]} horizonS={horizonS} elapsedS={elapsedS} maxY={errorScale} unit=" m" />
       </div>
       <label className={styles.liveTimeline}>Scrub the mission · charts and values follow<input aria-label="Live charts time" type="range" min="0" max={horizonS} step={stepS} value={elapsedS} onChange={event => onSeek(Number(event.target.value))} /></label>
+      {mission.events.length > 0 && <ol className={styles.missionEvents} aria-label="Mission events so far">{mission.events.slice(-6).map((event, index) => <li key={`${event.t}-${event.type}-${index}`}><strong>{event.t} s</strong> · {event.type.replaceAll("_", " ")}{event.source ? ` · ${assetLabel(event.source)}` : ""}{event.receivers?.length ? ` → ${event.receivers.map(assetLabel).join(", ")}` : ""}</li>)}</ol>}
       <div className={styles.liveData}>
         <div className={styles.tableWrap}><table aria-label="Current mission measurements"><caption>Measured through {metrics.observedThroughS} s · {metrics.samples} observation steps</caption><thead><tr><th scope="col">Measure</th><th scope="col">This run so far</th></tr></thead><tbody>{rows.map(row => <tr key={row.label}><th scope="row">{row.label}</th><td>{row.value}</td></tr>)}</tbody></table></div>
-        <div className={styles.liveSources}><h4>Reporting sensors, so far</h4><p>Share of this mission’s positive observations.</p>{Object.entries(metrics.bySource).map(([id, total]) => {
+        <div className={styles.liveSources}><h4>Reporting sensors, so far</h4><p>Share of raw reports, including possible clutter. Custody requires accepted aircraft evidence.</p>{Object.entries(metrics.bySource).map(([id, total]) => {
           const share = count ? total / count * 100 : 0;
           return <div key={id} className={styles.liveSourceRow}><div><span>{assetLabel(id)}</span><span>{total} samples · {percent(share)}</span></div><div className={styles.shareTrack}><i style={{ width: `${share}%` }} /></div></div>;
         })}<p className={styles.metricNote}>Readings update every {stepS} simulation seconds. Custody uses a {freshnessS}-second observation freshness limit. Rewinding removes later observations from every chart and value.</p></div>

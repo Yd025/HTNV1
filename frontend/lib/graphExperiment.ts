@@ -1,9 +1,16 @@
 export interface XY { x: number; y: number }
 export interface GraphTower extends XY { id: string; z: number; heading: number }
-export interface GraphDrone extends XY { id: string; z: number; heading: number; goal?: XY; path?: XY[] }
+export interface GraphDrone extends XY { id: string; z: number; heading: number; pitch?: number; cameraHeading?: number; cameraPitch?: number; missionRole?: string; goal?: XY; path?: XY[] }
+export interface MissionEvent { type: string; t: number; source?: string; receivers?: string[] }
 export interface GraphFrame {
   t: number; boat: XY; drones: GraphDrone[]; sources: string[];
   coveragePct?: number; estimate?: XY | null; trackingSource?: string | null; towerHeadings?: number[];
+  phase?: string; custodian?: string | null; uncertaintyM?: number | null;
+  towerConfirmed?: boolean; handoffConfirmed?: boolean; events?: MissionEvent[];
+  acceptedSources?: string[]; towerPitches?: number[]; observationAgeS?: number | null;
+  towerVisible?: boolean;
+  observations?: { source: string; x: number; y: number; sigmaM: number; confidence: number; timestamp: number; accepted: boolean }[];
+  targetConfirmed?: boolean; targetHandoffConfirmed?: boolean; targetCustody?: boolean;
 }
 export interface GraphMetrics {
   episodes?: number;
@@ -11,8 +18,10 @@ export interface GraphMetrics {
   coveragePct: number; custodyPct: number; rmseM: number | null;
   estimateAvailabilityPct: number; distanceM: number; handoffs: number;
   bySource?: Record<string, number>;
+  towerAcquisitionRate?: number; handoffRate?: number; postTowerCustodyPct?: number | null;
+  falseConfirmations?: number; handoffDelayS?: number | null;
 }
-export interface GraphReplay { seed: number; towers?: GraphTower[]; frames: GraphFrame[]; metrics: GraphMetrics; firstDetectionS?: number | null }
+export interface GraphReplay { seed: number; condition?: string; towers?: GraphTower[]; frames: GraphFrame[]; metrics: GraphMetrics; firstDetectionS?: number | null }
 export interface GraphTrainingPreview {
   id: string; phase: "training" | "validation" | "test"; candidateIndex: number | null;
   episodeIndex: number; episodeTotal: number; policy?: "baseline" | "untrained" | "trained";
@@ -21,6 +30,7 @@ export interface GraphTrainingPreview {
 export interface GraphCandidate { index: number; towers: GraphTower[]; weights?: number[]; train: GraphMetrics; validation?: GraphMetrics; accepted?: boolean; preview?: GraphTrainingPreview }
 export interface GraphReport {
   schemaVersion: number; seed: number; profileHash: string;
+  missionVersion?: string;
   selectedIndex: number;
   protocol: { motionTrajectories: number; trainEpisodes: number; validationEpisodes: number; testEpisodes: number; candidates: number; horizonS: number; stepS: number; freshnessS: number };
   trained: { towers: GraphTower[]; weights: number[]; candidateIndex?: number };
@@ -64,9 +74,16 @@ export function nearestCell(profile: ArcticProfile, point: XY, water: boolean): 
   }, candidates[0]);
 }
 export function nearestSource(frame: GraphFrame, towers: GraphTower[], visibleOnly: boolean) {
-  const candidates = [...towers, ...frame.drones].filter(source => !visibleOnly || frame.sources.includes(source.id));
-  return candidates.map(source => ({ source, distanceM: Math.hypot(source.x - frame.boat.x, source.y - frame.boat.y) }))
+  const contact = visibleOnly && frame.phase ? frame.estimate : frame.boat;
+  if (!contact) return null;
+  const candidates = [...towers, ...frame.drones].filter(source => !visibleOnly || (frame.acceptedSources ?? frame.sources).includes(source.id));
+  return candidates.map(source => ({ source, distanceM: Math.hypot(source.x - contact.x, source.y - contact.y) }))
     .sort((a, b) => a.distanceM - b.distanceM || a.source.id.localeCompare(b.source.id))[0] ?? null;
+}
+
+export function isTowerFirstReport(value: GraphReport): boolean {
+  return value?.missionVersion === "tower-first-v2" && Array.isArray(value.replays)
+    && value.replays.length > 0 && value.replays.every(replay => replay.frames.length > 0 && typeof replay.frames[0].targetConfirmed === "boolean");
 }
 
 /** Interpolate drawing positions only; detections and estimates remain at the last observed sample. */
@@ -86,8 +103,8 @@ export function drawFrame(replay: GraphReplay, elapsedS: number): GraphFrame {
 
 /** Camera frustum intersected with the sea plane, before terrain occlusion.
  * Far clipping is optical-axis depth, not a circular distance guarantee. */
-export function cameraFootprint(pose: XY & { z: number; heading: number }, sensor: ArcticSensor, halfM = 3250): XY[] {
-  const heading = pose.heading * Math.PI / 180, pitch = sensor.pitchDeg * Math.PI / 180;
+export function cameraFootprint(pose: XY & { z: number; heading: number; pitch?: number }, sensor: ArcticSensor, halfM = 3250): XY[] {
+  const heading = pose.heading * Math.PI / 180, pitch = (pose.pitch ?? sensor.pitchDeg) * Math.PI / 180;
   const horizontal = Math.tan(sensor.hfovDeg * Math.PI / 360), vertical = Math.tan(sensor.vfovDeg * Math.PI / 360);
   const coordinates = (p: XY) => {
     const dx = p.x - pose.x, dy = p.y - pose.y, dz = 1.5 - pose.z;

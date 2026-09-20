@@ -2,6 +2,10 @@
 
 Read this before editing. This file is the project scope for coding agents (Cursor, Codex, Claude, etc.). Humans: start with [README.md](README.md). Saturday sim contract: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
 
+## Current user-authorized mission (September 19, 2026)
+
+The current task supersedes the historical plane-always-search and pre-cue drone-search doctrine below. Optimize and freeze two tower sites first; require repeated fresh tower evidence to dispatch the quadcopter and fixed-wing; confirm handoff only from fresh accepted aircraft detections; continue aircraft tracking outside tower view; coast/reacquire with bounded uncertainty and expire lost contacts. Grounded aircraft must not receive an arming/takeoff-triggering command before a confirmed cue. No truth coordinates enter decision logic. The optional image-model path must remain separate from the fast control loop and fail visibly if configured weights/dependencies are missing. The offline graph sensor model is explicitly synthetic; physical sensor calibration and actual image training require data.
+
 ## Current four-person team assignment
 
 The user has assigned four workstreams in [docs/team/README.md](docs/team/README.md): UI (`codex/ui`), backend/integration (`codex/backend`), vision/tracking (`codex/vision-tracking`), and simulator/autonomy (`codex/simulator-autonomy`). These file-ownership assignments supersede the historical A/B/C/D labels and earlier visual-only teammate assignment below. Runtime invariants still apply. Read your handoff and [shared contract](docs/team/CONTRACT.md), reuse the existing code, and open small PRs into `dev`.

@@ -79,6 +79,8 @@ class KinematicCraft:
             return
         if self.cmd.lat is None or self.cmd.lon is None:
             return
+        if self.vehicle_class == "copter" and self.cmd.yaw_deg is not None:
+            self.heading = wrap_heading(self.cmd.yaw_deg)
         origin = (self.arena.origin_lat, self.arena.origin_lon) if self.arena else (ORIGIN_LAT, ORIGIN_LON)
         tn, te = ll_to_ne(self.cmd.lat, self.cmd.lon, *origin)
         dn, de = tn - self.north, te - self.east
@@ -93,7 +95,8 @@ class KinematicCraft:
         self.north += dn / dist * step
         self.east += de / dist * step
         self.north, self.east = clamp_arena(self.north, self.east, self.arena.half_m if self.arena else ARENA_HALF_M)
-        self.heading = wrap_heading(math.degrees(math.atan2(de, dn)))
+        if self.vehicle_class != "copter" or self.cmd.yaw_deg is None:
+            self.heading = wrap_heading(math.degrees(math.atan2(de, dn)))
         if self.cmd.alt is not None:
             self.alt += (self.cmd.alt - self.alt) * min(1.0, dt * 0.6)
         if self.vehicle_class == "rover":
@@ -113,6 +116,7 @@ class KinematicCraft:
             heading=self.heading,
             groundspeed=self.groundspeed,
             mavlink=mavlink,
+            alt_msl=self.alt if not mavlink else None,
         )
 
 
@@ -217,6 +221,7 @@ class LocalSitlAdapter:
                     st.battery_remaining = float(snap.get("battery_remaining") or 100.0)
                     st.armed = bool(snap.get("armed"))
                     st.mode = str(snap.get("mode") or "GUIDED")
+                    st.alt_msl = float(snap["alt_msl"]) if snap.get("alt_msl") is not None else None
                     st.sysid = int(snap.get("sysid") or spec["sysid"])
                     vehicles.append(st)
                     continue
@@ -272,7 +277,12 @@ class LocalSitlAdapter:
         bridge = self._bridges.get(command.vehicle_id)
         if bridge and bridge.is_connected() and command.lat is not None and command.lon is not None:
             alt = command.alt if command.alt is not None else CRUISE_ALT.get(kin.vehicle_class if kin else "copter", 40.0)
-            await bridge.send_goto(command.lat, command.lon, alt)
+            if kin and kin.vehicle_class == "plane":
+                await bridge.send_plane_goto(command.lat, command.lon, alt)
+            elif kin and kin.vehicle_class == "copter" and command.yaw_deg is not None:
+                await bridge.send_goto(command.lat, command.lon, alt, yaw_deg=command.yaw_deg)
+            else:
+                await bridge.send_goto(command.lat, command.lon, alt)
 
     def comms_ok(self, vehicle_id: str) -> bool:
         return self._comms.get(vehicle_id, True)

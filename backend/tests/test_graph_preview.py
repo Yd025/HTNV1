@@ -19,7 +19,7 @@ def small_profile():
     sensor={"hfovDeg":60.,"vfovDeg":50.,"farClipM":1500.,"nearClipM":.1,"pitchDeg":0}
     return {"halfM":300.,"grid":{"size":size,"cellM":150.,"xMin":-300.,"yMin":-300.,
              "elevations":[0.]*(size*size),"water":water,"waterEdges":edges,"landCandidates":[0,4]},
-            "sensors":{"tower":sensor,"plane":dict(sensor,pitchDeg=-8),"quad":dict(sensor,hfovDeg=114.6,pitchDeg=-45)},
+            "sensors":{"tower":sensor,"plane":dict(sensor,pitchDeg=-8),"quad":dict(sensor,hfovDeg=114.6,pitchDeg=-20,mountType="fixed")},
             "assetHeightsM":{"tower":2.7,"plane":120.,"quad":60.},"speedsMps":{"boat":3.,"plane":15.,"quad":10.},
             "towerDefaults":[{"x":-300.,"y":-300.,"heading":0},{"x":300.,"y":-300.,"heading":0}]}
 

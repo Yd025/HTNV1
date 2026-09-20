@@ -154,24 +154,44 @@ class SwarmBrain:
             }
             self.world.vehicles = {v.vehicle_id: v for v in vehicles}
             self.world.detections = detections
+            self.world.observation_now = receipt_time
+            self.world.comms = comms
             if detections:
                 self.last_detect_at = time.time()
-                if self.search_planner:
+                if self.search_planner and any(self.world.vehicles.get(d.source_id) and self.world.vehicles[d.source_id].vehicle_class == "tower" for d in detections):
                     self._search_detected = True
                     self._search_commands.clear()
 
             with sentry_sdk.start_span(op="track.update", name="target_track"):
-                self.world.track = self.tracker.update(detections, now=self._started + elapsed_s)
+                expired = self.c2.expire_if_stale(receipt_time, self.world)
+                tentative = self.world.track if not self.c2.active else None
+                tentative_stamp = tentative.last_observation_timestamp if tentative else None
+                if expired or (tentative_stamp is not None and receipt_time - tentative_stamp > self.c2.confirmation_window_s):
+                    self.tracker.reset()
+                    self.world.track = None
+                # Before the first confirmed tower cue, airborne observations
+                # cannot initialize the mission or poison its target association.
+                mission_detections = [d for d in detections
+                                      if d.source_id in self.world.vehicles
+                                      and comms.get(d.source_id, False)
+                                      and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower")]
+                self.world.track = self.tracker.update(mission_detections, now=self._started + elapsed_s,
+                                                       observation_now=receipt_time)
+                self.world.accepted_detections = list(self.tracker.accepted_detections)
 
+            mission_was_active = self.c2.active
             roles = self.c2.tick(vehicles, self.world.track, self.world.advisor, self.world)
+            if mission_was_active and not self.c2.active:
+                self.tracker.reset()
+                self.world.track = None
             self.world.set_roles(roles)
             for v in vehicles:
                 v.role = roles.get(v.vehicle_id, v.role)
 
             cmds: list[Command] = []
             self.command_outcomes = []
-            # Placement experiments affect FIND only. Existing C2 and platform
-            # agents retain acquisition/handoff/tracking, through this dispatcher.
+            # Legacy placement-policy experiments may point towers, but never
+            # bypass the tower-confirmation gate by sending aircraft searching.
             search_commands = {}
             if self.search_planner and not (self._search_detected or self.world.track or self.world.detections or self.world.last_cue):
                 sample_time_s = getattr(self.adapter, "search_sample_time_s", None)
@@ -180,7 +200,8 @@ class SwarmBrain:
                     self._search_sample_time_s = sample_time_s
                 # Empty polls between sampled observations are not negative
                 # evidence. Existing dispatch suppression handles cached goals.
-                search_commands = self._search_commands
+                search_commands = {vid: cmd for vid, cmd in self._search_commands.items()
+                                   if self.world.vehicles.get(vid) and self.world.vehicles[vid].vehicle_class == "tower"}
             for v in vehicles:
                 if not comms[v.vehicle_id]:
                     continue
@@ -191,7 +212,7 @@ class SwarmBrain:
                 if cmd:
                     cmds.append(cmd)
             for cmd in cmds:
-                signature = (cmd.type, cmd.lat, cmd.lon, cmd.alt, cmd.sector)
+                signature = (cmd.type, cmd.lat, cmd.lon, cmd.alt, cmd.sector, cmd.yaw_deg)
                 previous = self._sent.get(cmd.vehicle_id)
                 desired = self._desired.get(cmd.vehicle_id)
                 now = time.monotonic()

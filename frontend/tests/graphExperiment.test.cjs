@@ -13,7 +13,21 @@ function load(file, globals = {}) {
   vm.runInNewContext(compiled, { exports, URL, ...globals });
   return exports;
 }
-const { nearestSource, cameraFootprint, nearestCell, gridPoint, drawFrame } = load("lib/graphExperiment.ts");
+const { nearestSource, cameraFootprint, nearestCell, gridPoint, drawFrame, isTowerFirstReport } = load("lib/graphExperiment.ts");
+
+test("legacy reports cannot be relabeled as verified tower-first evaluation", () => {
+  assert.equal(isTowerFirstReport({ replays: [{ frames: [{ t: 0 }] }] }), false);
+  assert.equal(isTowerFirstReport({ missionVersion: "tower-first-v2", replays: [{ frames: [{ t: 0 }] }] }), false);
+  assert.equal(isTowerFirstReport({ missionVersion: "tower-first-v2", replays: [{ frames: [{ targetConfirmed: false }] }] }), true);
+});
+
+test("an accepted false contact guide uses its estimate instead of the hidden true boat", () => {
+  const frame = { phase: "dispatch", boat: { x: 0, y: 0 }, estimate: { x: 1000, y: 0 }, acceptedSources: ["tower-1"], sources: ["tower-1"], drones: [] };
+  const towers = [{ id: "tower-1", x: 1100, y: 0 }];
+  assert.equal(nearestSource(frame, towers, true).distanceM, 100);
+  assert.equal(nearestSource(frame, towers, false).distanceM, 1100);
+  assert.equal(nearestSource({ ...frame, estimate: null }, towers, true), null);
+});
 
 test("smooth drawing interpolates position and wrapped headings without revealing future detections", () => {
   const first = { t: 0, boat: { x: 0, y: 0 }, drones: [{ id: "plane", x: 0, y: 0, z: 100, heading: 350 }], sources: [], towerHeadings: [350, 90], estimate: null };

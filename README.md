@@ -84,49 +84,67 @@ python -B eval.py --seconds 30 --profile all
 
 These local checks do not validate ArcticSim camera calibration or the live fleet; those still require the simulator integration pass.
 
-## ArcticSim slide-based fleet learning
+## Tower-first detection and drone handoff
 
-The main page now opens **Teach the fleet to search**, an offline experiment using the installed Fort Ross terrain and the four assets from the supplied ArcticSim slides: two towers, one quadcopter, and one fixed-wing aircraft. It learns a sparse boat-motion model and five search-priority weights, compares tower placements, and uses A* to route the drones to selected search points. It is a small statistical search model, not a language model or a globally optimal unknown-target planner. The existing live mission and camera panels remain below it.
+The main page **Place. Detect. Follow.** now implements the requested sequence: optimize two fixed tower sites, confirm a moving boat from tower observations, dispatch the quadcopter and fixed-wing, and maintain an aircraft track after the boat leaves tower view. The ArcticSim PDF supplies those four assets; tower-first response is our chosen strategy, not a mandatory rule in the slides.
 
-**Spawn random boat** generates a fresh route on connected water. **Run this placement** reuses the displayed mission seed and any explicit boat start, so tower changes can be compared against the same boat route. **Place boat / Move tower** supports map clicks and coordinate inputs, snapping to connected water or legal land; towers remain at least 250 m apart. The map displays both drone trails and planned graph routes, smooth curved scan guides, reporting sensors, and the shortest horizontal line to the nearest sensor reporting at the latest recorded observation. **Exact camera footprints** exposes the sea-plane frustum geometry as an optional layer. A dashed nearest-sensor line is only a distance guide. The displayed boat is evaluation truth and is never passed to the search policy. **Watch all tests** starts at the first saved unseen mission and plays the sequence.
+There are two executable paths:
 
-**This mission, as it happens** keeps graphs and numbers synchronized with playback. Coverage, tracking custody, RMSE, estimate availability, drone distance, reporting-source changes and sensor contributions use only observations through the current time. Pause holds the data; rewind removes later observations; changing missions or placements starts a fresh set of live values. The scene animates smoothly between recorded poses while measurements update at the declared 5-second simulation cadence. A separate, collapsed **Completed benchmark** contains the fixed 200-mission comparison. During retraining, candidate graphs update as results arrive and partial held-out comparison curves/tables update every ten completed missions, with per-policy sample counts and unstarted policies left blank.
+- **Offline placement experiment:** `graph_search.py` and `train_graph_search.py` evaluate legal Fort Ross tower positions using terrain occlusion, camera geometry, apparent boat size and varied synthetic conditions. They learn a sparse motion prior and select a tower pair on separate validation missions before freezing it for 200 untouched tests. The selected placement is the best tested candidate, not a guaranteed global optimum. The two towers remain fixed throughout every mission.
+- **Runtime controller:** `SwarmBrain` and `MissionCommand` consume actual adapter observations. Two fresh consistent tower frames authorize dispatch; two distinct-time observations from the receiving aircraft confirm its handoff. Before a cue, grounded aircraft receive no command that would arm/take off. Airborne aircraft reserve/loiter. The quad follows the estimate, the fixed-wing provides forward coverage/reacquisition, and fresh aircraft observations sustain tracking without tower visibility. Gaps lead to coasting, reacquisition and eventual track expiry.
 
-**Retrain model** runs the actual local Python experiment with progress and candidate placements on the page. **Watch the model learn** shows each proposed tower pair and coordinates immediately, then plays the first actual evaluated mission at 32× with its boat, drone paths, reporting line and synchronized charts. This is a recorded example; the aggregate results update independently after completed missions. Select a finished candidate to inspect its example while training continues, then choose **Follow current training**. Refreshing reconnects to the latest training job in the same running frontend server. It fits motion counts from 256 independent trajectories (15,360 transitions), evaluates 12 joint placement/policy candidates on 24 training missions, validates the initial candidate and up to three training finalists on 24 separate missions, and freezes the selected policy before evaluating 200 untouched missions per method. Every mission lasts 300 seconds with observations sampled every 5 seconds. The sweep baseline, untrained graph search, and trained model use the same 200 test boats and four assets. The two baseline tower mounts are the source positions snapped onto the sampled land grid. No test result selects the winner. Training is seeded elitist parameter search; it is not neural-network fine-tuning.
+The learned water-occupancy prior guides tower-placement proposals. During pursuit, position and velocity come from fresh sensor observations and a conventional target filter; this is not a trained neural flight policy. The image detector has its own separate training path below.
 
-The saved [model](frontend/public/experiments/graph-model.json), [full report and 200 mission replays](frontend/public/experiments/graph-report.json), and [source-derived profile](frontend/public/experiments/arctic-profile.json) include source fingerprints, protocol, every candidate, per-mission results and limitations. Graphs show training detection and cumulative held-out detection; misses stay in the denominator and receive the 300-second time cap. The comparison includes coverage, custody, observation-derived position RMSE, estimate availability, horizontal drone travel, and reporting-source changes. These are defined local measures, not the unpublished official scoring formula. Reporting-source changes include reacquisition after gaps, not confirmed live handoffs. Detection and localization use explicit synthetic assumptions (90% detection probability when geometrically visible, 15 m coordinate noise); real camera accuracy remains uncalibrated.
+Commands, proximity to a waypoint and predicted positions never count as camera acquisition. Duplicate frames, stale data, outliers and disconnected sources cannot establish custody. The target filter handles actual elapsed time, asynchronous sensor timestamps, observation identity, uncertainty and loss. MJPEG frame receipt time is preserved rather than re-labeling cached images as new frames.
 
-Saved seed **190926** found **198/200 boats (99%)**, versus 182/200 (91%) for the untrained graph and 164/200 (82%) for the sweep baseline. Capped mean delay was **73.725 s**, versus 79.500 s and 94.425 s respectively. The paired mean saving versus the sweep is 20.7 s (95% bootstrap interval 6.999–32.679 s). Selected tower coordinates in world X/Y are **(−1625, 0)** and **(2031.25, 1083.33)**; headings are 57.17° and 203.48° clockwise from +Y. Coverage and position RMSE slightly regressed versus the untrained graph. Tower 2 contributed only two positive samples in this benchmark; the drones do most of the observed tracking, so these results do not establish the best tower-only layout. The page exposes each platform's contribution and all regressions.
+The runtime also respects the inspected aircraft interfaces. The quad has a fixed camera angled 20 degrees down, so it follows at a viewing distance derived from camera height and turns its body toward the estimated vessel. Live camera following waits for sea-level altitude telemetry. The plane uses ArduPlane's supported guided waypoint message, including its initial climb waypoint. Mock transport tests exercise both launch sequences and continued commands after tower loss; no actual aircraft was armed or flown during these checks.
 
-Verified values and their limits:
+**Play mission** shows recorded phases, current observer, uncertainty and events. **Watch handoff example** selects a successful held-out example with aircraft custody outside tower visibility; it is labeled as an example, while the benchmark retains every miss. **Optimize tower placement** runs the local numerical experiment and streams candidate results. **Run this placement** freezes edited tower sites for the selected boat route. Charts use only samples through playback time; rewinding removes later evidence.
 
-| Item | Value used | Source / interpretation |
-| --- | --- | --- |
-| Terrain | 6,500 m square; 49² grid, 135.42 m spacing | Installed Fort Ross DEM and Gazebo heightmap; 746 navigable nodes with 2,609 checked water edges |
-| Water / tower sites | DEM water ≤0.05 m; shore buffer; land slope ≤15° | Water threshold from `terrain/course.py`; buffer, slope and grid are explicit planning constraints |
-| Tower camera | 59.989° HFOV, 35.976° VFOV, 1280×720 | Installed `terrain/tower.py`; camera center 2.7 m above base |
-| Quadcopter camera | 114.592° HFOV, 98.865° VFOV, 960×720 | Installed gimbal SDF; −45° pitch is an experiment assumption |
-| Plane camera | 68.984° HFOV, 42.261° VFOV, 1280×720 | Installed skywalker SDF; pitch ≈−8° |
-| Camera limit | 1,500 m optical-axis depth | SDF clipping plane, **not a guaranteed circular detection radius**; displayed rings are distance references |
-| Speeds | Boat 3 m/s; quad 10 m/s; plane 15 m/s | Generated vessel world and ArduPilot cruise/waypoint parameters |
-| Aircraft height | Quad 60 m / plane 120 m terrain clearance | Experimental assumptions, not source flight commands; turns and climbs are simplified |
+The saved [model](frontend/public/experiments/graph-model.json) and [complete report](frontend/public/experiments/graph-report.json) are versioned `tower-first-v2` with source/terrain hashes. Old models are rejected for new replays. Metrics distinguish raw contact confirmation from evaluator-verified boat detection and aircraft custody; false contacts earn no boat-success credit. Offline success uses a declared 150 m truth-association tolerance. This is an evaluation tolerance, not a claim of 150 m real-camera accuracy. Truth is used only inside sensor simulation and scoring, never by the mission policy.
 
-The slides list lower camera image resolutions (640×480 quad, 640×360 plane/towers) and approximately the same horizontal views. The export records the installed source configuration rather than silently mixing slide and source resolutions. Coordinates are ArcticSim **world X/Y**, rotated relative to true north; see the profile's convergence and scale metadata. Terrain occlusion is sampled, and narrow obstacles below grid resolution remain unresolved. Source camera rates are 10 Hz; the offline evaluator deliberately samples at 0.2 Hz. This experiment does not claim live frame-rate performance or detection from every possible water position.
+The saved run (seed 191926, 200 held-out missions numbered 591926–592125) uses the verified fixed camera mounts and a fresh scenario family. Selected sites increased true tower acquisition from 29.0% to 40.0% and confirmed aircraft handoff from 26.5% to 31.0% compared with the default sites under the same tower-first controller. Position RMSE fell from 415 m to 323 m and false confirmed cues fell from 3 to 2. However, custody outside tower view fell from 58.6% to 24.4%. Selection prioritized acquisition on validation data; the result improves detection but does not establish better tracking continuity. Mean capped detection delay fell by 21.3 seconds, with paired 95% bootstrap interval 0.59–41.93 seconds. Test 30 (seed 591955) illustrates a successful chain: tower confirmation at 70 s, aircraft confirmation at 115 s, and custody during 21 of 25 eligible samples outside tower view. It is an example, not the aggregate result.
 
-The slide's coverage, detection speed, search efficiency, tracking duration/accuracy, autonomy and collaboration categories are represented by the graphs and local metrics. Slide 24 documents `POST /api/tracks` on simulator port 8010 (name, lat, lon; optional heading and speed). Synthetic evaluation truth is **not** uploaded as a real detection. Live submission and deployment still require verified camera pose/altitude and detector calibration; this model remains an offline experiment and never sends fleet commands.
+Reproduce the placement experiment from `backend/`:
 
-Research: [Hart, Nilsson & Raphael's A*](https://ai.stanford.edu/~nilsson/OnlinePubs-Nils/PublishedPapers/astar.pdf) supplies the shortest-graph-route foundation. [Obstacle-aware informative target search](https://arxiv.org/abs/1902.10182) motivates balancing coverage, information and obstacles; [cooperative sensor planning](https://publications.ri.cmu.edu/sensor-planning-for-large-numbers-of-robots) motivates avoiding redundant search. A shortest route to one selected search point does not establish globally optimal search or tower placement. Maze wall-following/Trémaux/Pledge do not solve probabilistic unknown-target placement; BFS is suitable for equal-cost graph edges, while this terrain graph has unequal 3D travel costs.
-
-Reproduce from `backend/` (Python 3.12+, optional dependencies isolated from live control):
-
-```bash
+```powershell
 python -m pip install -r requirements-training.txt
-python -B export_arctic_profile.py --help
-python -B train_graph_search.py --seed 190926
-python -B -m unittest discover -s tests -p 'test_graph*.py'
+python -B train_graph_search.py --seed 191926
+python -B -m unittest discover -s tests -p 'test_tower*.py' -v
 ```
 
-The terrain export requires an adjacent ArcticSim source checkout with its generated Fort Ross assets; the checked-in profile is enough to rerun training. `--quick` is a smaller smoke run and is not the saved benchmark. Set the frontend server's `GRAPH_PYTHON` to the Python executable containing NumPy. In this workspace it is configured in ignored `frontend/.env.local`. Browser training runs only on loopback, uses fixed subprocess arguments without a shell, allows one job at a time, and saves separate sessions under ignored `frontend/.graph-jobs/`. Results and models can be downloaded. The live controller on port 8000 is unaffected. Run frontend checks with `node --test tests/*.test.cjs` and `node node_modules/typescript/bin/tsc --noEmit` from `frontend/`.
+For the dashboard's experiment buttons, start the frontend with `GRAPH_PYTHON` pointing to the Python environment where `requirements-training.txt` is installed. This variable configures the local experiment worker, independently of the backend API environment.
+
+The experiment uses projected ArcticSim world X/Y, fixed aircraft camera mounts, simplified aircraft dynamics and approximate tower pointing. Its 5-second sampling, condition-dependent detection/miss/clutter model, uncertainty and control thresholds are recorded in the output. Real camera detection rates, flight dynamics and operational reliability remain uncalibrated. Offline tower selection does not automatically reposition the live simulator; apply the selected sites through its placement configuration after verifying coordinate conversion and camera heights. Live submission remains a separate integration step (`POST /api/tracks`, simulator port 8010 in slide 24).
+
+## Actual camera perception and image-model training
+
+The real camera path is `MJPEG frame + own-platform pose → vessel detector → pixel-to-water projection → target filter → mission controller`. It supports an optional local object-detection model; a whole-image classifier is insufficient for localization. No radar, lidar or sonar feed is invented.
+
+The default `VESSEL_DETECTOR=blob` is explicitly a simulator color baseline. To use the neural path in a native Python environment, install `backend/requirements-vision.txt` alongside the base requirements and set:
+
+```powershell
+$env:VESSEL_DETECTOR = "yolo"
+$env:VESSEL_MODEL_PATH = "C:/models/trusted-vessel-model.onnx"
+$env:VESSEL_CLASSES = "boat,ship,vessel"
+$env:VESSEL_DEVICE = "cpu"
+```
+
+Supply an existing trusted `.pt` or `.onnx` detection model. Class names are read from model output, multiple vessel boxes are preserved, and the bottom-center water-contact point is projected. Inference runs outside the fast controller. A missing model, dependency or vessel class produces an explicit unavailable status, never silent fallback to invented observations. `/cameras` and the camera panel expose detector status. The standard Docker image installs only base dependencies; the optional model path requires a Python environment/image with the vision requirements and access to the supplied model.
+
+Training and evaluation are separately executable from `backend/`:
+
+```powershell
+python -B -m vision.train_vessel check --data C:/data/maritime.yaml
+python -B -m vision.train_vessel train --data C:/data/maritime.yaml --weights C:/models/trusted-initial.pt --epochs 50
+python -B -m vision.train_vessel evaluate --data C:/data/maritime.yaml --weights C:/models/best.pt --split test
+```
+
+Data must contain local YOLO-format images/labels and distinct train/validation/test sets. The checker rejects duplicate image content across splits; hold out whole recordings/sites to prevent adjacent-frame leakage too. No weights or labeled data were present in this workspace, so no neural training, neural accuracy or field readiness is claimed. The model interface is covered with controlled outputs, alongside actual image-baseline and projection tests.
+
+Camera projection now distinguishes sea-level and home-relative height. It still needs measured camera/gimbal alignment, calibrated height and frame/pose synchronization. Receipt time and commanded attitude are approximations. [Research and limitations](docs/research/TOWER_SEARCH_RESEARCH.md) explain the evidence and remaining validation.
+
+Verification for this revision: 171 backend tests and 72 frontend tests passed, including the actual telemetry serializer and all 200 replay/metric comparisons. TypeScript checks passed; desktop/mobile inspection verified the handoff and rewind states, and the local experiment button completed a replay. The frontend production build compiled, but this Windows checkout reported a symlink-permission warning when packaging its standalone server; standalone deployment packaging remains unverified.
 
 ## Historical flat-arena placement experiment
 

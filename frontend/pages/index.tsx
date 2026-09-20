@@ -34,7 +34,7 @@ const sections: {
     value: "overview",
     label: "Overview",
     icon: "arena",
-    description: "Train the search fleet, test unseen boats, then follow the live mission below.",
+    description: "Optimize tower sites, test detection and drone handoff, then follow the live mission below.",
   },
   {
     value: "fleet",
@@ -253,7 +253,7 @@ export default function CommandCenter() {
               <div className="mission-badges">
                 <span className="phase-badge">
                   {state.c2?.phase
-                    ? `Phase: ${state.c2.phase}`
+                    ? `Phase: ${state.c2.phase.replaceAll("_", " ")}`
                     : "Awaiting mission phase"}
                 </span>
                 <span className="read-only-badge">
@@ -444,6 +444,7 @@ export default function CommandCenter() {
                         {state.c2?.intent ??
                           "Waiting for the mission controller’s tasking."}
                       </p>
+                      {state.c2?.handoff && <p>Handoff: {state.c2.handoff.state ?? "waiting"}{state.c2.custody ? ` · Observer: ${state.c2.custody}` : " · No current observer"}{state.c2.metrics?.successful_handoffs !== undefined ? ` · ${state.c2.metrics.successful_handoffs} confirmed transfers` : ""}</p>}
                     </div>
                     <div className="roster-list">
                       {vehicles.length ? (

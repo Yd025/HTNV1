@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -27,7 +28,7 @@ VEHICLE_ID = os.getenv("VEHICLE_ID", "copter-1")
 CONNECT_RETRY_SEC = float(os.getenv("MAVLINK_RETRY_SEC", "3"))
 
 # Ignore velocity/accel/yaw; send only lat/lon/alt (see MAVLink type_mask).
-GOTO_TYPE_MASK = 0b0000_111_111_000
+GOTO_TYPE_MASK = 0b110111111000  # 3576: ignore velocity, acceleration, yaw and yaw rate.
 
 
 def _now() -> datetime:
@@ -49,6 +50,7 @@ class MavlinkBridge:
             "lat": None,
             "lon": None,
             "alt": None,
+            "alt_msl": None,
             "heading": None,
             "groundspeed": None,
             "roll": None,
@@ -248,6 +250,8 @@ class MavlinkBridge:
             self._state["lat"] = msg.lat / 1e7
             self._state["lon"] = msg.lon / 1e7
             self._state["alt"] = msg.relative_alt / 1000.0
+            if getattr(msg, "alt", None) is not None:
+                self._state["alt_msl"] = msg.alt / 1000.0
             self._state["heading"] = (msg.hdg / 100.0) if msg.hdg != 65535 else self._state["heading"]
         elif msg_type == "VFR_HUD":
             self._state["groundspeed"] = float(msg.groundspeed)
@@ -283,7 +287,7 @@ class MavlinkBridge:
             else:
                 logger.info("Unknown actuation type=%s cmd=%s", kind, cmd)
 
-    async def send_goto(self, lat: float, lon: float, alt: float) -> None:
+    async def send_goto(self, lat: float, lon: float, alt: float, yaw_deg: float | None = None) -> None:
         if self.conn is None:
             return
 
@@ -294,18 +298,40 @@ class MavlinkBridge:
                 self.conn.target_system,
                 self.conn.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                GOTO_TYPE_MASK,
-                int(lat * 1e7),
-                int(lon * 1e7),
+                GOTO_TYPE_MASK if yaw_deg is None else GOTO_TYPE_MASK & ~1024,
+                int(round(lat * 1e7)),
+                int(round(lon * 1e7)),
                 float(alt),
                 0, 0, 0,
                 0, 0, 0,
-                0, 0,
+                0 if yaw_deg is None else math.radians(yaw_deg % 360.0), 0,
             )
 
         async with self._io_lock:
             await asyncio.to_thread(_send)
         logger.info("Actuation goto lat=%.6f lon=%.6f alt=%.1f", lat, lon, alt)
+
+    async def send_plane_goto(self, lat: float, lon: float, alt: float) -> None:
+        """ArduPlane guided location; position-target messages only change altitude.
+
+        Official Plane guided API: NAV_WAYPOINT in MISSION_ITEM_INT, current=2.
+        MAVLink integer global coordinates are x=latitude, y=longitude; altitude
+        remains relative to home, matching the existing flight command contract.
+        """
+        if self.conn is None:
+            return
+
+        def _send() -> None:
+            assert self.conn is not None
+            self.conn.mav.mission_item_int_send(
+                self.conn.target_system, self.conn.target_component, 0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 2, 0,
+                0, 0, 0, 0, int(round(lat * 1e7)), int(round(lon * 1e7)), float(alt),
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_send)
 
     async def set_mode(self, mode: str) -> None:
         if self.conn is None:

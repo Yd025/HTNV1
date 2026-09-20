@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -41,8 +42,10 @@ class CameraSpec:
 
 
 # Official four-asset heat. Ports = 8600 + 10 * slot.
+# iris_with_ardupilot/model.sdf:10-31: fixed mount, 20 degrees below body forward.
+QUAD_CAMERA_PITCH_DEG = -20.0
 FLEET_CAMERAS: tuple[CameraSpec, ...] = (
-    CameraSpec("quadcopter", 8600, hfov_rad=2.0, pitch_bias_deg=0.0, label="quad gimbal"),
+    CameraSpec("quadcopter", 8600, hfov_rad=2.0, pitch_bias_deg=QUAD_CAMERA_PITCH_DEG, label="quad fixed camera"),
     CameraSpec("fixed-wing", 8610, hfov_rad=1.204, pitch_bias_deg=-8.0, label="plane FPV"),
     CameraSpec("tower-1", 8630, hfov_rad=1.047, pitch_bias_deg=0.0, label="tower-1 EO"),
     CameraSpec("tower-2", 8640, hfov_rad=1.047, pitch_bias_deg=0.0, label="tower-2 EO"),
@@ -73,6 +76,8 @@ class MjpegTap:
 
     def __init__(self) -> None:
         self.latest: dict[str, bytes] = {}
+        self._frames: dict[str, tuple[bytes, float, str]] = {}
+        self._sequence = 0
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def start(self, specs: tuple[CameraSpec, ...] | list[CameraSpec]) -> None:
@@ -89,12 +94,22 @@ class MjpegTap:
             return jpeg
         return None
 
+    def get_frame(self, vehicle_id: str) -> tuple[bytes, float, str] | None:
+        """Frame identity and receipt time; MJPEG supplies no capture clock."""
+        return self._frames.get(vehicle_id)
+
+    def _receive(self, vehicle_id: str, jpeg: bytes) -> None:
+        self._sequence += 1
+        self.latest[vehicle_id] = jpeg
+        self._frames[vehicle_id] = (jpeg, time.time(), f"{vehicle_id}:{self._sequence}")
+
     async def close(self) -> None:
         tasks, self._tasks = self._tasks, {}
         for task in tasks.values():
             task.cancel()
         await asyncio.gather(*tasks.values(), return_exceptions=True)
         self.latest.clear()
+        self._frames.clear()
 
     async def _pump(self, spec: CameraSpec) -> None:
         timeout = httpx.Timeout(None, connect=2.0)
@@ -112,7 +127,7 @@ class MjpegTap:
                                     if len(buf) > 2_000_000:
                                         del buf[:-8000]
                                     break
-                                self.latest[spec.vehicle_id] = bytes(buf[start : end + 2])
+                                self._receive(spec.vehicle_id, bytes(buf[start : end + 2]))
                                 del buf[: end + 2]
             except asyncio.CancelledError:
                 raise

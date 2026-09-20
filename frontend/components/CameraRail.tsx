@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-type Camera = { vehicle_id: string; label: string; snapshot: string };
+type Camera = { vehicle_id: string; label: string; snapshot: string; perception?: { backend?: string; state?: string; error?: string | null } };
 type CatalogState = "loading" | "ready" | "error";
 type FrameState = "waiting" | "ready" | "unavailable" | "paused";
 type Frame = { url: string; receivedAt: Date };
@@ -84,6 +84,7 @@ export default function CameraRail({
                   ? candidate.label
                   : candidate.vehicle_id,
               snapshot: candidate.snapshot,
+              perception: candidate.perception && typeof candidate.perception === "object" ? candidate.perception as Camera["perception"] : undefined,
             },
           ];
         });
@@ -167,6 +168,7 @@ export default function CameraRail({
             enabled={enabled}
           />
         ))}
+      {catalogState === "ready" && cameras.length > 0 && <button className="camera-retry" type="button" onClick={() => setAttempt(value => value + 1)}>Refresh camera and detector status</button>}
     </section>
   );
 }
@@ -284,6 +286,7 @@ function CameraFeed({
             : camera.vehicle_id}
         </span>
       </figcaption>
+      {camera.perception && <p className="camera-perception">{camera.perception.backend === "blob" ? "Simulator color detector" : "Vessel image model"} · {camera.perception.state ?? "status unavailable"}{camera.perception.error ? `: ${camera.perception.error}` : ""}</p>}
     </figure>
   );
 }

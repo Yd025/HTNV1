@@ -12,7 +12,7 @@ const MAP = { x: 24, y: 24, span: 552 };
 const percent = (value: number | undefined) => value === undefined ? "Awaiting results" : `${value.toFixed(1)}%`;
 const number = (value: number | null | undefined, suffix = "") => value == null ? "—" : `${value.toFixed(1)}${suffix}`;
 const color = (id: string) => id.includes("tower") ? "var(--status)" : isQuad(id) ? "var(--warning)" : "var(--text)";
-const policyLabel = (policy: string | undefined) => policy === "baseline" ? "Sweep baseline" : policy === "untrained" ? "Untrained graph" : "Trained model";
+const policyLabel = (policy: string | undefined) => policy === "baseline" ? "Sweep baseline" : policy === "untrained" ? "Unoptimized towers" : "Selected placement";
 
 function sweepPath(radius: number, fov: number) {
   const angle = fov * Math.PI / 360, x = Math.sin(angle) * radius, y = -Math.cos(angle) * radius;
@@ -34,6 +34,7 @@ function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = fa
   const reported = frame ? nearestSource(frame, towers, true) : null;
   const guide = reported ?? (frame ? nearestSource(frame, towers, false) : null);
   const boat = frame ? project(frame.boat) : null;
+  const guideEnd = reported && frame?.phase && frame.estimate ? project(frame.estimate) : boat;
   const sensorFor = (id: string) => profile.sensors[id.includes("tower") ? "tower" : isQuad(id) ? "quad" : "plane"];
   return <div className={styles.mapArea}>
     <div className={styles.mapHeading}><span>Fort Ross · {(widthM / 1000).toFixed(1)} × {(widthM / 1000).toFixed(1)} km</span><span>{frame ? `${Math.floor(elapsedS)} s · recorded example` : "Proposed tower positions"}</span></div>
@@ -49,7 +50,7 @@ function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = fa
           const p = project(source), sensor = sensorFor(source.id);
           if (!sensor) return null;
           const range = sensor.farClipM / widthM * MAP.span;
-          const heading = source.id.includes("tower") ? frame?.towerHeadings?.[i] ?? source.heading : source.heading;
+          const heading = source.id.includes("tower") ? frame?.towerHeadings?.[i] ?? source.heading : (source as { cameraHeading?: number }).cameraHeading ?? source.heading;
           return <g key={`${source.id}-view`} style={{ color: color(source.id) }}>
             {source.id.includes("tower") && <circle cx={p.x} cy={p.y} r={range} className={mapStyles.range} />}
             <g transform={`translate(${p.x} ${p.y}) rotate(${heading})`}>
@@ -64,7 +65,7 @@ function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = fa
           <polyline points={points(observedFrames.flatMap(item => { const match = item.drones.find(candidate => candidate.id === drone.id); return match ? [match] : []; }))} className={mapStyles.droneTrail} />
           {drone.path && <polyline points={points([drone, ...drone.path.slice(1)])} className={mapStyles.plannedPath} />}
         </g>)}
-        {guide && boat && <g className={reported ? mapStyles.sightLine : mapStyles.guideLine}><line x1={project(guide.source).x} y1={project(guide.source).y} x2={boat.x} y2={boat.y} /><text x={(project(guide.source).x + boat.x) / 2} y={(project(guide.source).y + boat.y) / 2 - 10}>{Math.round(guide.distanceM)} m</text></g>}
+        {guide && guideEnd && <g className={reported ? mapStyles.sightLine : mapStyles.guideLine}><line x1={project(guide.source).x} y1={project(guide.source).y} x2={guideEnd.x} y2={guideEnd.y} /><text x={(project(guide.source).x + guideEnd.x) / 2} y={(project(guide.source).y + guideEnd.y) / 2 - 10}>{Math.round(guide.distanceM)} m</text></g>}
         {towers.map((tower, i) => { const p = project(tower); return <g key={tower.id} transform={`translate(${p.x} ${p.y})`} className={mapStyles.tower}><circle r="13" /><path d="M-6 7 L0-9 L6 7 M-4 3 H4 M-2-2 H2" /><text x="18" y="4">T{i + 1}</text></g>; })}
         {drones.map(drone => { const p = project(drone); return <g key={drone.id} transform={`translate(${p.x} ${p.y})`} className={mapStyles.drone} style={{ color: color(drone.id) }}><circle r="12" /><g transform={`rotate(${drone.heading})`}>{isQuad(drone.id) ? <path d="M-6-6 L6 6 M-6 6 L6-6 M-7-8 H-4 M4-8 H7 M-7 8 H-4 M4 8 H7" /> : <path d="M0-10 L3-1 L10 4 L10 6 L2 3 L2 8 L5 10 L-5 10 L-2 8 L-2 3 L-10 6 L-10 4 L-3-1 Z" />}</g><text x="17" y="5">{isQuad(drone.id) ? "Q" : "F"}</text></g>; })}
         {boat && <g transform={`translate(${boat.x} ${boat.y})`} className={mapStyles.boat}><circle r="16" /><path d="M0-11 L6-4 L5 10 L-5 10 L-6-4 Z" /><text x="20" y="5">Boat</text></g>}
@@ -74,7 +75,7 @@ function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = fa
       <g className={mapStyles.scale}><path d={`M42 557 H${42 + MAP.span * 1000 / widthM} M42 553 V561 M${42 + MAP.span * 1000 / widthM} 553 V561`} /><text x="42" y="546">1 km</text></g>
       <text x="300" y="600" textAnchor="middle" className={mapStyles.axisText}>−X ← projected Arctic grid → +X · +Y is up</text>
     </svg>
-    {frame && <p className={styles.reportLine}>{reported ? `${assetLabel(reported.source.id)} reported the boat at the ${recordedFrame?.t ?? 0} s sample.` : `No sensor report at ${recordedFrame?.t ?? 0} s. Dashed line shows the nearest sensor.`}</p>}
+    {frame && <p className={styles.reportLine}>{reported ? `${assetLabel(reported.source.id)} supplied an accepted contact report at the ${recordedFrame?.t ?? 0} s sample.` : `No sensor report at ${recordedFrame?.t ?? 0} s. Dashed line shows the nearest sensor.`}</p>}
     <p className={styles.mapNote}>Sweeps show scan direction; rings are a distance guide. Detection uses camera geometry and terrain. Boat truth is visible here for evaluation only.</p>
   </div>;
 }

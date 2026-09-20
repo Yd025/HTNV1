@@ -15,17 +15,20 @@ Cameras run on a background grabber; poll_detections() drains each scan once.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
 import time
 from typing import Any
+from dataclasses import replace
 
 from geo import bearing_deg, haversine_m
 from mavlink_connection import MavlinkBridge
 from sim.cameras import FLEET_CAMERAS, MjpegTap, grab_jpeg
-from sim.detector import detect_jpeg, project_hit
+from sim.detector import project_hit
 from sim.types import Arena, Command, Detection, TowerMount, VehicleClass, VehicleState
+from vision.vessel import CameraDetector, DetectorUnavailable
 
 logger = logging.getLogger("overwatch.whiteout")
 
@@ -152,17 +155,23 @@ class WhiteoutAdapter:
         self._homes = {s["vehicle_id"]: s["home"] for s in self._spec}
         self._poses: dict[str, VehicleState] = {}
         self._attitude: dict[str, tuple[float, float]] = {}
+        self._alt_msl: dict[str, float] = {}
         self._dets: list[Detection] = []
         self._cam_task: asyncio.Task[None] | None = None
         self._look: dict[str, tuple[float, float]] = {}
         self._tower_cmd_at: dict[str, float] = {}
         self._tower_manual: set[str] = set()
         self._taps = MjpegTap()
+        self._detector = CameraDetector()
+        self._frame_ids: dict[str, str] = {}
+        self._camera_status: dict[str, dict[str, Any]] = {}
         self._reconnecting: set[str] = set()
         self._reconnect_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
 
     async def connect(self) -> None:
+        # Fail configured model errors before connecting/arming any vehicle.
+        await asyncio.to_thread(self._detector.initialize)
         import geo as geo_mod
 
         self._closed = False
@@ -191,6 +200,8 @@ class WhiteoutAdapter:
         self._dets = []
         self._poses.clear()
         self._attitude.clear()
+        self._alt_msl.clear()
+        self._frame_ids.clear()
         self._look.clear()
         self._tower_cmd_at.clear()
         self._tower_manual.clear()
@@ -247,10 +258,13 @@ class WhiteoutAdapter:
                     connected=mav_ok,
                     mavlink=mav_ok,
                     role="cue" if vclass == "tower" else None,
+                    alt_msl=float(snap["alt_msl"]) if snap.get("alt_msl") is not None else None,
                 )
             )
             self._poses[vid] = out[-1]
             if mav_ok:
+                if snap.get("alt_msl") is not None:
+                    self._alt_msl[vid] = float(snap["alt_msl"])
                 self._attitude[vid] = (
                     float(snap.get("roll") or 0.0),
                     float(snap.get("pitch") or 0.0),
@@ -263,7 +277,10 @@ class WhiteoutAdapter:
         return [d for d in detections if 0.0 <= now - d.timestamp < 4.0]
 
     def camera_catalog(self) -> list[dict[str, Any]]:
-        return [c.as_dict() for c in FLEET_CAMERAS]
+        return [{**c.as_dict(), "perception": self._detector.status(),
+                 "observation": self._camera_status.get(c.vehicle_id, {"state": "waiting_for_frame"}),
+                 "projection": "approximate flat sea; receipt-time pose; commanded tower/gimbal attitude"}
+                for c in FLEET_CAMERAS]
 
     async def send_command(self, command: Command) -> None:
         spec = next((s for s in self._spec if s["vehicle_id"] == command.vehicle_id), None)
@@ -285,7 +302,12 @@ class WhiteoutAdapter:
         alt = command.alt if command.alt is not None else CRUISE_ALT.get(vclass, 40.0)
         if vclass == "rover":
             alt = 0.0
-        await bridge.send_goto(command.lat, command.lon, alt)
+        if vclass == "plane":
+            await bridge.send_plane_goto(command.lat, command.lon, alt)
+        elif vclass == "copter" and command.yaw_deg is not None:
+            await bridge.send_goto(command.lat, command.lon, alt, yaw_deg=command.yaw_deg)
+        else:
+            await bridge.send_goto(command.lat, command.lon, alt)
 
     def comms_ok(self, vehicle_id: str) -> bool:
         return self._last_ok.get(vehicle_id, False)
@@ -384,48 +406,64 @@ class WhiteoutAdapter:
 
     async def _scan_cameras(self, client: Any) -> None:
         now = time.time()
-        found: list[Detection] = []
-        frames = []
-        for spec in FLEET_CAMERAS:
-            jpeg = self._taps.get(spec.vehicle_id)
-            if jpeg is None:
+        self._dets = [det for det in self._dets if 0 <= now - det.timestamp < 4.0][-256:]
+        # Fixed sensors provide the initial cue; publish each completed camera
+        # immediately instead of holding observations behind slower inference.
+        for spec in sorted(FLEET_CAMERAS, key=lambda camera: not camera.vehicle_id.startswith("tower")):
+            frame = self._taps.get_frame(spec.vehicle_id)
+            if frame is None:
                 jpeg = await grab_jpeg(spec, client)
-            frames.append(jpeg)
-        for spec, jpeg in zip(FLEET_CAMERAS, frames, strict=True):
-            if not jpeg:
+                if not jpeg:
+                    continue
+                # Snapshot HTTP carries no frame metadata; identical bytes are
+                # conservatively one observation until the stream is available.
+                frame = (jpeg, time.time(), "snapshot:" + hashlib.sha256(jpeg).hexdigest()[:24])
+            jpeg, received_at, frame_id = frame
+            if not 0 <= time.time() - received_at <= 4.0:
+                self._camera_status[spec.vehicle_id] = {"state": "stale_frame"}
                 continue
-            hit = await asyncio.to_thread(detect_jpeg, jpeg)
-            if hit is None:
+            if self._frame_ids.get(spec.vehicle_id) == frame_id:
                 continue
+            self._frame_ids[spec.vehicle_id] = frame_id
             pose = self._poses.get(spec.vehicle_id)
-            if pose is None:
+            if pose is None or not self._last_ok.get(spec.vehicle_id, False):
+                self._camera_status[spec.vehicle_id] = {"state": "pose_unavailable"}
                 continue
+            # Freeze own-sensor telemetry before inference yields to the loop.
+            alt_msl = CAM_ALT_MSL.get(spec.vehicle_id, self._alt_msl.get(spec.vehicle_id))
+            if alt_msl is None:
+                self._camera_status[spec.vehicle_id] = {"state": "sea_height_unavailable"}
+                continue
+            pose = replace(pose, alt=alt_msl)
             look = self._look.get(spec.vehicle_id)
             if look:
-                pose = VehicleState(
-                    vehicle_id=pose.vehicle_id,
-                    sysid=pose.sysid,
-                    vehicle_class=pose.vehicle_class,
-                    lat=pose.lat,
-                    lon=pose.lon,
-                    alt=pose.alt,
-                    heading=look[0],
-                )
+                pose = replace(pose, heading=look[0])
                 roll, pitch = 0.0, math.radians(look[1])
             else:
                 roll, pitch = self._attitude.get(spec.vehicle_id, (0.0, 0.0))
-            det = project_hit(hit, spec, pose, now, roll_rad=roll, pitch_rad=pitch)
-            if det:
-                found.append(det)
-                logger.info(
-                    "camera hit %s conf=%.2f rng=%.0fm lat=%.5f lon=%.5f",
-                    spec.vehicle_id,
-                    det.confidence,
-                    det.range_m or 0.0,
-                    det.lat,
-                    det.lon,
-                )
-        self._dets = found
+            try:
+                hits = await asyncio.to_thread(self._detector.detect_jpeg, jpeg)
+            except DetectorUnavailable as exc:
+                self._camera_status[spec.vehicle_id] = {"state": "detector_unavailable", "error": str(exc)}
+                logger.error("camera detector unavailable: %s", exc)
+                continue
+            # Inference may finish after the observation freshness budget.
+            if time.time() - received_at > 4.0:
+                self._camera_status[spec.vehicle_id] = {"state": "inference_too_slow"}
+                continue
+            projected = 0
+            for index, hit in enumerate(hits):
+                det = project_hit(hit, spec, pose, received_at, roll_rad=roll, pitch_rad=pitch)
+                if det:
+                    det.frame_id = frame_id
+                    det.observation_id = f"{frame_id}:box:{index}"
+                    self._dets.append(det)
+                    if len(self._dets) > 256:
+                        del self._dets[:-256]
+                    projected += 1
+            self._camera_status[spec.vehicle_id] = {"state": "observed" if projected else "no_localized_vessel",
+                "frame_id": frame_id, "received_at": received_at, "boxes": len(hits), "localized": projected,
+                "quality": self._detector.last_frame.get("quality")}
 
     async def _advance(self, spec: dict[str, Any], bridge: MavlinkBridge) -> bool:
         """One arm/takeoff step. Returns True when GUIDED gotos are legal."""
@@ -484,7 +522,7 @@ class WhiteoutAdapter:
                     await bridge.set_mode("GUIDED")
                     aim = spec.get("takeoff_aim") or spec.get("home")
                     if aim:
-                        await bridge.send_goto(aim[0], aim[1], 60.0)
+                        await bridge.send_plane_goto(aim[0], aim[1], 60.0)
                     air.last_cmd_at = now
                     return False
                 if "FBWA" not in mode:

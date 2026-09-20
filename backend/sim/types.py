@@ -51,6 +51,7 @@ class VehicleState:
     role: Role | None = None
     connected: bool = True
     mavlink: bool = False
+    alt_msl: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +69,7 @@ class VehicleState:
             "role": self.role,
             "connected": self.connected,
             "mavlink": self.mavlink,
+            "alt_msl": self.alt_msl,
         }
 
 
@@ -114,6 +116,7 @@ class Command:
     alt: float | None = None
     sector: int | None = None
     command_id: str | None = None
+    yaw_deg: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +127,7 @@ class Command:
             "alt": self.alt,
             "sector": self.sector,
             "command_id": self.command_id,
+            "yaw_deg": self.yaw_deg,
         }
 
 
