@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { GAME_RULES, SIMULATION_STEP, createGame, formatTime, hasLineOfSight, isNavigable, sampleHeight, startGame, stepGame, togglePause, type GameState, type InputState, type WorldData } from "../lib/game";
+import { GAME_RULES, SIMULATION_STEP, createGame, formatTime, getSector, hasLineOfSight, isNavigable, sampleHeight, sampleRiverHeight, startGame, stepGame, togglePause, type GameState, type InputState, type WorldData } from "../lib/game";
 
 function ocean(): WorldData {
   return { size: 131, half: 3250, heights: Array(131 * 131).fill(-20), waterLevel: 1, towers: [], spawn: { x: 0, z: 0, heading: 0 }, source: "test" };
@@ -17,7 +17,8 @@ test("bilinear terrain sampling and world boundaries", () => {
   assert.equal(sampleHeight(world, 0, 0), 10);
   assert.equal(sampleHeight(world, -10, -10), -10);
   assert.equal(sampleHeight(world, 10, 10), 30);
-  assert.equal(isNavigable(world, 11, 0), false);
+  assert.equal(sampleHeight(world, 11, 0), Infinity, "The legacy terrain sampler stays bounded");
+  assert.equal(isNavigable(world, 11, 0), true, "The connected river extends beyond the legacy heightmap");
   assert.equal(isNavigable(world, NaN, 0), false);
 });
 
@@ -149,7 +150,7 @@ test("adversarial throttle and steering cannot move the boat backwards along its
   assert.ok(movedFrames > 240, "The invariant must be checked during substantial forward travel");
 });
 
-test("boat cannot cross the shoreline or world edge at maximum speed", () => {
+test("boat cannot cross the shoreline but can cross the original map edge", () => {
   const world = ocean();
   for (let row = 69; row < world.size; row++) for (let col = 0; col < world.size; col++) world.heights[row * world.size + col] = 200;
   const game = play(world); game.boat.speed = 60;
@@ -160,8 +161,10 @@ test("boat cannot cross the shoreline or world edge at maximum speed", () => {
   const edgeWorld = ocean(); edgeWorld.spawn.z = 3200;
   const edge = play(edgeWorld);
   advance(edge, edgeWorld, 10, { throttle: 1, steer: 0 });
-  assert.ok(edge.boat.z <= edgeWorld.half - 31);
-  assert.equal(edge.collision, true);
+  assert.ok(edge.boat.z > edgeWorld.half + 1000);
+  assert.equal(edge.collision, false);
+  assert.equal(edge.escaped, true);
+  assert.deepEqual(getSector(edgeWorld, edge.boat.x, edge.boat.z), { sectorX: 0, sectorZ: 1 });
 });
 
 test("land blocks radar while clear terrain permits observation", () => {
@@ -392,7 +395,142 @@ test("the full fleet finds an idle boat and the supplied Fort Ross route permits
     if (!moving.collision) navigatedDistance = progress;
     previousProgress = progress;
   }
-  assert.ok(navigatedDistance > 3000, "The route must allow substantial downriver travel before its boundary");
-  assert.equal(moving.status, "caught");
-  assert.ok(moving.time < 45, `The moving boat survived ${moving.time.toFixed(2)} real seconds`);
+  assert.ok(navigatedDistance > 5000, "The route must continue downriver through the former map boundary");
+  assert.equal(moving.status, "playing");
+  assert.equal(moving.escaped, true);
+});
+
+test("generated terrain joins every original edge continuously while preserving interior geography", () => {
+  const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
+  for (let x = -2500; x <= 2500; x += 250) for (let z = -2500; z <= 2500; z += 250) {
+    assert.equal(sampleRiverHeight(world, x, z), sampleHeight(world, x, z));
+  }
+  for (const sign of [-1, 1]) for (let coordinate = -world.half; coordinate <= world.half; coordinate += 250) {
+    const edge = sign * world.half;
+    assert.ok(Math.abs(sampleRiverHeight(world, edge - 0.001, coordinate) - sampleRiverHeight(world, edge + 0.001, coordinate)) < 0.01);
+    assert.ok(Math.abs(sampleRiverHeight(world, coordinate, edge - 0.001) - sampleRiverHeight(world, coordinate, edge + 0.001)) < 0.01);
+  }
+  assert.equal(sampleRiverHeight(world, Infinity, 0), Infinity);
+  assert.equal(isNavigable(world, 0, NaN), false);
+  assert.deepEqual(getSector(world, -world.half - 1, world.half + 1), { sectorX: -1, sectorZ: 1 });
+});
+
+test("Fort Ross flows through several connected sectors without teleporting or duplicating the original fleet", () => {
+  const world = JSON.parse(readFileSync(resolve(__dirname, "../../public/assets/world.json"), "utf8")) as WorldData;
+  const game = play(world);
+  const originalTowers = game.towers.map(({ id, x, z }) => ({ id, x, z }));
+  const originalAircraft = [...game.drones, game.plane].map(({ id }) => id);
+  let crossed = false;
+  let traveled = 0;
+  for (let frame = 0; frame < 180 * 60; frame++) {
+    const previous = { x: game.boat.x, z: game.boat.z };
+    stepGame(game, world, { throttle: 1, steer: 0 }, 1 / 60);
+    const displacement = Math.hypot(game.boat.x - previous.x, game.boat.z - previous.z);
+    assert.ok(displacement <= GAME_RULES.maxSpeed * GAME_RULES.boostMultiplier * GAME_RULES.pace / 60 + 1e-8, "Crossing sectors cannot jump world coordinates");
+    traveled += displacement;
+    assert.equal(game.collision, false);
+    assert.equal(game.status, "playing");
+    assert.equal(isNavigable(world, game.boat.x, game.boat.z), true);
+    if (game.escaped) {
+      crossed = true;
+      assert.equal(game.detected, false);
+      assert.equal(game.lastKnown, null);
+      assert.equal(game.tagProgress, 0);
+      assert.equal(game.alert, "clear");
+      assert.ok([...game.drones, game.plane].every((craft) => !craft.detecting && craft.mode === "patrol"));
+    }
+    assert.ok([...game.drones, game.plane].every((craft) => Math.abs(craft.x) < world.half && Math.abs(craft.z) < world.half));
+    assert.ok(game.pickups.length <= GAME_RULES.maxPickups);
+  }
+  assert.equal(crossed, true);
+  assert.ok(game.sectorX >= 3 && game.sectorZ >= 1);
+  assert.ok(Math.abs(game.distanceTraveled - traveled) < 1e-7);
+  assert.deepEqual(game.towers.map(({ id, x, z }) => ({ id, x, z })), originalTowers);
+  assert.deepEqual([...game.drones, game.plane].map(({ id }) => id), originalAircraft);
+});
+
+test("crossing the patrol boundary immediately clears an existing tag and all shared sightings", () => {
+  const world = ocean();
+  const game = play(world);
+  Object.assign(game.boat, { z: world.half - 0.2, speed: GAME_RULES.maxSpeed });
+  game.simulationTime = 30;
+  game.lastKnown = { x: game.boat.x, z: game.boat.z };
+  game.detected = true;
+  game.tagProgress = 0.99;
+  game.drones.forEach((drone) => Object.assign(drone, { x: 0, z: world.half - 1, heading: 0, detecting: true, tagProgress: 0.99 }));
+  stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.escaped, true);
+  assert.equal(game.status, "playing");
+  assert.equal(game.lastKnown, null);
+  assert.equal(game.detected, false);
+  assert.equal(game.tagProgress, 0);
+  assert.ok(game.drones.every((drone) => drone.tagProgress === 0 && drone.mode === "patrol"));
+  game.boat.z = 0;
+  stepGame(game, world, { throttle: -1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.escaped, true, "The escaped state persists for the rest of the run");
+});
+
+test("speed pickups collect once, last four real seconds, respect braking and pause, and reset on retry", () => {
+  const world = ocean();
+  const game = play(world);
+  const firstPickups = structuredClone(game.pickups);
+  assert.equal(firstPickups.length, 1);
+  assert.ok(firstPickups[0].z >= 360 && firstPickups[0].z <= 450);
+  assert.ok(Math.abs(firstPickups[0].x) <= 20, "The initial pickup is reachable on the starting course");
+  const pickup = game.pickups[0];
+  Object.assign(game.boat, { x: pickup.x, z: pickup.z });
+  stepGame(game, world, { throttle: 1, steer: 0 }, SIMULATION_STEP / GAME_RULES.pace);
+  assert.equal(game.pickups.length, 0);
+  assert.equal(game.boostRemaining, GAME_RULES.boostDuration);
+  advance(game, world, 1.5, { throttle: 1, steer: 0 });
+  assert.ok(game.boat.speed > GAME_RULES.maxSpeed);
+  assert.ok(Math.abs(game.boostRemaining - 2.5) < 1e-8);
+  togglePause(game);
+  const snapshot = JSON.stringify(game);
+  advance(game, world, 20, { throttle: 1, steer: 0 });
+  assert.equal(JSON.stringify(game), snapshot);
+  togglePause(game);
+  const speed = game.boat.speed;
+  advance(game, world, 0.5, { throttle: -1, steer: 0 });
+  assert.ok(Math.abs(game.boat.speed - (speed - 27)) < 1e-8, "The accelerator effect must not override braking");
+  advance(game, world, 2.1, { throttle: -1, steer: 0 });
+  assert.equal(game.boostRemaining, 0);
+  assert.equal(game.boat.speed, 0);
+  startGame(game);
+  assert.equal(game.boostRemaining, 0);
+  assert.equal(game.distanceTraveled, 0);
+  assert.equal(game.escaped, false);
+  assert.equal(game.sectorX, 0);
+  assert.equal(game.sectorZ, 0);
+  assert.deepEqual(game.pickups, firstPickups);
+});
+
+test("pickup placement is seeded, navigable, bounded and expires behind the boat", () => {
+  const world = ocean();
+  const a = createGame(world, 123);
+  const b = createGame(world, 123);
+  const different = createGame(world, 456);
+  assert.deepEqual(a.pickups, b.pickups);
+  assert.notDeepEqual(a.pickups, different.pickups);
+  startGame(a); startGame(b);
+  for (const game of [a, b]) {
+    game.boat.z = 7000;
+    game.boat.speed = GAME_RULES.maxSpeed;
+  }
+  let highestId = 0;
+  for (let frame = 0; frame < 120 * 60; frame++) {
+    stepGame(a, world, { throttle: 1, steer: 0 }, 1 / 60);
+    stepGame(b, world, { throttle: 1, steer: 0 }, 1 / 60);
+    assert.ok(a.pickups.length <= GAME_RULES.maxPickups);
+    for (const pickup of a.pickups) {
+      assert.equal(isNavigable(world, pickup.x, pickup.z), true);
+      assert.ok(pickup.z - a.boat.z > -180);
+      assert.ok(Math.hypot(pickup.x - a.boat.x, pickup.z - a.boat.z) < 2200);
+      highestId = Math.max(highestId, pickup.id);
+    }
+  }
+  assert.ok(highestId > 10, "The random pickup stream must continue across sectors");
+  assert.deepEqual(a.pickups, b.pickups);
+  assert.deepEqual(a.boat, b.boat);
+  assert.equal(a.randomState, b.randomState);
 });

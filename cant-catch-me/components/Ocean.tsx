@@ -12,7 +12,8 @@ export function swellHeight(x: number, z: number, time: number) {
     + Math.sin(x * .026 + z * .019 - time * 1.05) * .08;
 }
 
-export function Ocean({ level, clock }: { level: number; clock: MutableRefObject<number> }) {
+export function Ocean({ level, clock, pose }: { level: number; clock: MutableRefObject<number>; pose: MutableRefObject<BoatPose> }) {
+  const surface = useRef<THREE.Mesh>(null);
   const material = useMemo(() => new THREE.ShaderMaterial({
     uniforms: { uTime: { value: 0 } },
     vertexShader: `
@@ -74,8 +75,12 @@ export function Ocean({ level, clock }: { level: number; clock: MutableRefObject
       }`,
   }), []);
   useEffect(() => () => material.dispose(), [material]);
-  useFrame(() => { material.uniforms.uTime.value = clock.current; });
-  return <mesh rotation={[-Math.PI/2,0,0]} position={[0,level,0]} material={material}><planeGeometry args={[20000,20000,256,256]}/></mesh>;
+  useFrame(() => {
+    material.uniforms.uTime.value = clock.current;
+    // The geometry follows the boat, while waves stay anchored to world coordinates.
+    surface.current?.position.set(Math.round(pose.current.x/500)*500,level,Math.round(pose.current.z/500)*500);
+  });
+  return <mesh ref={surface} rotation={[-Math.PI/2,0,0]} position={[0,level,0]} material={material}><planeGeometry args={[20000,20000,256,256]}/></mesh>;
 }
 
 /** A continuous, fading foam trail, sampled by distance rather than frame rate. */

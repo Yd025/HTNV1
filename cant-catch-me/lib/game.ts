@@ -24,6 +24,7 @@ export type AircraftState = {
   searchPhase: number;
 };
 export type DroneState = AircraftState & { tagProgress: number; distanceToBoat: number };
+export type BoostPickup = { id: number; x: number; z: number };
 type AircraftLaunch = Pick<AircraftState, "id" | "x" | "z" | "heading" | "altitude" | "patrolIndex">;
 export type GameState = {
   status: "ready" | "playing" | "paused" | "caught";
@@ -42,6 +43,14 @@ export type GameState = {
   lastKnown: { x: number; z: number } | null;
   lostFor: number;
   collision: boolean;
+  sectorX: number;
+  sectorZ: number;
+  /** Leaving the original patrol area permanently ends this run's pursuit. */
+  escaped: boolean;
+  distanceTraveled: number;
+  /** Active real seconds, unaffected by pause or the simulation pace. */
+  boostRemaining: number;
+  pickups: BoostPickup[];
   /** Internal simulation data; retained on the mutable state for deterministic replay. */
   accumulator: number;
   collisionFor: number;
@@ -49,6 +58,11 @@ export type GameState = {
   initialDrones: AircraftLaunch[];
   initialPlane: AircraftLaunch;
   patrolPoints: { x: number; z: number }[];
+  randomState: number;
+  initialRandomState: number;
+  initialPickups: BoostPickup[];
+  nextPickupId: number;
+  nextPickupAt: number;
 };
 
 export const GAME_RULES = {
@@ -68,6 +82,10 @@ export const GAME_RULES = {
   tagSeconds: 2,
   graceSeconds: 6,
   boatRadius: 21,
+  boostDuration: 4,
+  boostMultiplier: 1.65,
+  pickupRadius: 45,
+  maxPickups: 4,
 } as const;
 
 export const SIMULATION_STEP = 1 / 60;
@@ -93,8 +111,37 @@ export function sampleHeight(world: WorldData, x: number, z: number): number {
   return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
 }
 
+export function getSector(world: WorldData, x: number, z: number): { sectorX: number; sectorZ: number } {
+  return { sectorX: Math.floor((x + world.half) / (world.half * 2)), sectorZ: Math.floor((z + world.half) / (world.half * 2)) };
+}
+
+/** One continuous terrain function: sector changes never move the boat or repeat a map. */
+export function sampleRiverHeight(world: WorldData, x: number, z: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return Infinity;
+  const edge = Math.max(Math.abs(x), Math.abs(z));
+  const blendWidth = Math.min(500, world.half * 0.16);
+  if (edge <= world.half - blendWidth) return sampleHeight(world, x, z);
+  const forwardX = Math.sin(world.spawn.heading), forwardZ = Math.cos(world.spawn.heading);
+  const dx = x - world.spawn.x, dz = z - world.spawn.z;
+  const along = dx * forwardX + dz * forwardZ;
+  const across = dx * forwardZ - dz * forwardX;
+  // The main channel stays wide enough for the forward-only course. Longer
+  // waves shape its banks, while smaller raised patches form coastal islands.
+  const center = 210 * Math.sin(along / 1550) + 110 * Math.sin(along / 670);
+  const width = 650 + 95 * Math.sin(along / 1180) + 45 * Math.cos(along / 470);
+  const bank = Math.abs(across - center) - width;
+  const relief = 18 * Math.sin(x / 180) * Math.cos(z / 210) + 12 * Math.sin((x + z) / 340);
+  const islands = 50 * Math.pow(Math.max(0, Math.sin(along / 190) * Math.cos(across / 150)), 4)
+    * clamp((Math.abs(across - center) - 330) / 180, 0, 1);
+  const river = world.waterLevel + clamp(bank * 0.16 + relief + islands, -24, 210);
+  if (edge >= world.half) return river;
+  const t = clamp((edge - (world.half - blendWidth)) / blendWidth, 0, 1);
+  const blend = t * t * (3 - 2 * t);
+  return sampleHeight(world, x, z) * (1 - blend) + river * blend;
+}
+
 export function isNavigable(world: WorldData, x: number, z: number): boolean {
-  return sampleHeight(world, x, z) <= world.waterLevel;
+  return sampleRiverHeight(world, x, z) <= world.waterLevel;
 }
 
 function boatFits(world: WorldData, x: number, z: number, heading: number): boolean {
@@ -115,12 +162,33 @@ export function hasLineOfSight(world: WorldData, ax: number, az: number, ay: num
   const samples = Math.max(2, Math.ceil(distance / spacing));
   for (let i = 1; i < samples; i++) {
     const t = i / samples;
-    if (sampleHeight(world, ax + (bx - ax) * t, az + (bz - az) * t) > ay + (by - ay) * t) return false;
+    if (sampleRiverHeight(world, ax + (bx - ax) * t, az + (bz - az) * t) > ay + (by - ay) * t) return false;
   }
   return true;
 }
 
-export function createGame(world: WorldData): GameState {
+function random(state: Pick<GameState, "randomState">): number {
+  state.randomState = (Math.imul(state.randomState, 1664525) + 1013904223) >>> 0;
+  return state.randomState / 0x100000000;
+}
+
+function spawnPickup(state: GameState, world: WorldData, first = false): void {
+  if (state.pickups.length >= GAME_RULES.maxPickups) return;
+  const heading = state.boat.heading;
+  const forwardX = Math.sin(heading), forwardZ = Math.cos(heading);
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const ahead = first ? 360 + random(state) * 90 : 400 + random(state) * 420;
+    const sideways = (random(state) - 0.5) * (first ? 40 : 360);
+    const x = state.boat.x + forwardX * ahead + forwardZ * sideways;
+    const z = state.boat.z + forwardZ * ahead - forwardX * sideways;
+    if (!boatFits(world, x, z, heading)
+      || state.pickups.some((pickup) => Math.hypot(pickup.x - x, pickup.z - z) < 150)) continue;
+    state.pickups.push({ id: state.nextPickupId++, x, z });
+    return;
+  }
+}
+
+export function createGame(world: WorldData, seed = 0x51a7): GameState {
   const spawn = { ...world.spawn };
   const limit = world.half - 160;
   // Select a distant starting patrol location. Later pursuit only uses observations.
@@ -151,7 +219,7 @@ export function createGame(world: WorldData): GameState {
   const launch = (id: string, point: { x: number; z: number }, patrolIndex: number, altitude: number): AircraftLaunch => ({
     id, ...point, patrolIndex,
     heading: Math.atan2(patrolPoints[patrolIndex].x - point.x, patrolPoints[patrolIndex].z - point.z),
-    altitude: Math.max(world.waterLevel + altitude, sampleHeight(world, point.x, point.z) + 70),
+    altitude: Math.max(world.waterLevel + altitude, sampleRiverHeight(world, point.x, point.z) + 70),
   });
   const secondPosition = options.reduce((best, point) =>
     Math.hypot(point.x - options[0].x, point.z - options[0].z) > Math.hypot(best.x - options[0].x, best.z - options[0].z) ? point : best, options[1]);
@@ -168,7 +236,7 @@ export function createGame(world: WorldData): GameState {
   const initialPlane = launch("P1", planePosition, 0, 235);
   const resetAircraft = (initial: AircraftLaunch): AircraftState => ({ ...initial, speed: 0, detecting: false, mode: "patrol", searchPhase: 0 });
   const drones = initialDrones.map((initial) => ({ ...resetAircraft(initial), tagProgress: 0, distanceToBoat: Math.hypot(initial.x - spawn.x, initial.z - spawn.z) }));
-  return {
+  const state: GameState = {
     status: "ready", time: 0, simulationTime: 0,
     boat: { ...spawn, speed: 0, roll: 0 },
     drones, plane: { ...resetAircraft(initialPlane), speed: GAME_RULES.planeSpeed },
@@ -176,9 +244,15 @@ export function createGame(world: WorldData): GameState {
     detected: false, alert: "clear", tagProgress: 0,
     distanceToDrone: Math.min(...drones.map((drone) => drone.distanceToBoat)),
     lastKnown: null, lostFor: 0, collision: false,
+    ...getSector(world, spawn.x, spawn.z), escaped: false, distanceTraveled: 0, boostRemaining: 0, pickups: [],
     accumulator: 0, collisionFor: 0,
     initialBoat: spawn, initialDrones, initialPlane, patrolPoints,
+    randomState: seed >>> 0, initialRandomState: seed >>> 0, initialPickups: [], nextPickupId: 1, nextPickupAt: 7,
   };
+  spawnPickup(state, world, true);
+  state.initialPickups = state.pickups.map((pickup) => ({ ...pickup }));
+  state.initialRandomState = state.randomState;
+  return state;
 }
 
 export function startGame(state: GameState): void {
@@ -193,6 +267,9 @@ export function startGame(state: GameState): void {
     status: "playing", time: 0, simulationTime: 0, detected: false, alert: "clear", tagProgress: 0,
     distanceToDrone: Math.min(...state.drones.map((drone) => drone.distanceToBoat)),
     lastKnown: null, lostFor: 0, collision: false, accumulator: 0, collisionFor: 0,
+    sectorX: 0, sectorZ: 0, escaped: false, distanceTraveled: 0, boostRemaining: 0,
+    pickups: state.initialPickups.map((pickup) => ({ ...pickup })), randomState: state.initialRandomState,
+    nextPickupId: state.initialPickups.length + 1, nextPickupAt: 7,
   });
 }
 
@@ -209,7 +286,9 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
   const boat = state.boat;
   const throttle = clamp(Number.isFinite(input.throttle) ? input.throttle : 0, -1, 1);
   const steer = clamp(Number.isFinite(input.steer) ? input.steer : 0, -1, 1);
-  boat.speed = Math.max(0, approach(boat.speed, Math.max(0, throttle) * GAME_RULES.maxSpeed, (throttle === 0 ? 13 : 27) * STEP));
+  state.boostRemaining = Math.max(0, state.boostRemaining - realStep);
+  const topSpeed = GAME_RULES.maxSpeed * (state.boostRemaining > 0 ? GAME_RULES.boostMultiplier : 1);
+  boat.speed = Math.max(0, approach(boat.speed, Math.max(0, throttle) * topSpeed, (throttle === 0 ? 13 : 27) * STEP));
   const steeringPower = 0.27 + Math.min(boat.speed / 25, 1) * 0.73;
   const previousHeading = boat.heading;
   boat.heading = clamp(boat.heading - steer * steeringPower * 0.95 * STEP,
@@ -221,6 +300,7 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
   const nz = boat.z + Math.cos(boat.heading) * boat.speed * STEP;
   state.collisionFor = Math.max(0, state.collisionFor - STEP);
   if (boatFits(world, nx, nz, boat.heading)) {
+    state.distanceTraveled += Math.hypot(nx - boat.x, nz - boat.z);
     boat.x = nx; boat.z = nz;
   } else if (Math.abs(boat.speed) > 0.5) {
     boat.speed *= 0.28;
@@ -228,7 +308,27 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
   }
   state.collision = state.collisionFor > 0;
 
-  const active = state.simulationTime >= GAME_RULES.graceSeconds;
+  Object.assign(state, getSector(world, boat.x, boat.z));
+  state.escaped ||= state.sectorX !== 0 || state.sectorZ !== 0;
+  if (state.escaped) {
+    state.lastKnown = null;
+    state.lostFor = 0;
+  }
+  const forwardX = Math.sin(state.initialBoat.heading), forwardZ = Math.cos(state.initialBoat.heading);
+  state.pickups = state.pickups.filter((pickup) => {
+    const dx = pickup.x - boat.x, dz = pickup.z - boat.z;
+    if (Math.hypot(dx, dz) <= GAME_RULES.pickupRadius) {
+      state.boostRemaining = GAME_RULES.boostDuration;
+      return false;
+    }
+    return dx * forwardX + dz * forwardZ > -180 && Math.hypot(dx, dz) < 2200;
+  });
+  if (state.time >= state.nextPickupAt) {
+    spawnPickup(state, world);
+    state.nextPickupAt = state.time + 6 + random(state) * 4;
+  }
+
+  const active = !state.escaped && state.simulationTime >= GAME_RULES.graceSeconds;
   let towerSeesBoat = false;
   state.towers.forEach((tower, i) => {
     tower.heading = tower.baseHeading + Math.sin(state.simulationTime * 0.27 + i * 1.7) * 1.08;
@@ -280,7 +380,7 @@ function tick(state: GameState, world: WorldData, input: InputState): void {
     aircraft.heading += clamp(angleDifference(desiredHeading, aircraft.heading), -STEP * turnRate, STEP * turnRate);
     aircraft.x = clamp(aircraft.x + Math.sin(aircraft.heading) * aircraft.speed * STEP, -limit, limit);
     aircraft.z = clamp(aircraft.z + Math.cos(aircraft.heading) * aircraft.speed * STEP, -limit, limit);
-    const ground = sampleHeight(world, aircraft.x, aircraft.z);
+    const ground = sampleRiverHeight(world, aircraft.x, aircraft.z);
     aircraft.altitude = Math.max(ground + 30, aircraft.altitude + (Math.max(world.waterLevel + altitude, ground + 70) - aircraft.altitude) * (1 - Math.exp(-STEP * 1.8)));
     aircraft.mode = state.lastKnown ? state.detected ? "pursuit" : "searching" : "patrol";
   };

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { GAME_RULES, SIMULATION_STEP, sampleHeight, stepGame, type GameState, type InputState, type WorldData } from '../lib/game';
+import { GAME_RULES, SIMULATION_STEP, getSector, sampleRiverHeight, stepGame, type GameState, type InputState, type WorldData } from '../lib/game';
 import { Ocean, FoamWake, swellHeight, type BoatPose } from './Ocean';
 
 type Part = { name: string; type: string; material: string; color?: string; positions?: number[]; indices?: number[]; matrix?: number[]; size?: number[]; radius?: number; length?: number };
@@ -63,13 +63,13 @@ function Vehicle({ model, kind }: { model: Models[string]; kind: string }) {
   return <group scale={scale}>{geometries.map(({ geometry, color }) => <mesh key={color} geometry={geometry} castShadow receiveShadow><meshStandardMaterial color={color} roughness={0.72} metalness={0.08} flatShading side={kind==='boat'?THREE.DoubleSide:THREE.FrontSide}/></mesh>)}</group>;
 }
 
-function Terrain({ world }: { world: WorldData }) {
+function Terrain({ world, tileX, tileZ }: { world: WorldData; tileX: number; tileZ: number }) {
   const geometry = useMemo(() => {
-    const side = world.size, size = world.half * 2;
+    const side = tileX === 0 && tileZ === 0 ? world.size : 129, size = world.half * 2;
     const base = new THREE.PlaneGeometry(size, size, side - 1, side - 1); base.rotateX(-Math.PI / 2);
     const positions = base.getAttribute('position');
     for (let i = 0; i < positions.count; i++) {
-      const height = sampleHeight(world, positions.getX(i), positions.getZ(i));
+      const height = sampleRiverHeight(world, positions.getX(i) + tileX * size, positions.getZ(i) + tileZ * size);
       positions.setY(i, height < world.waterLevel ? -7 : height);
     }
     const g = base.toNonIndexed(); base.dispose(); g.computeVertexNormals();
@@ -79,13 +79,53 @@ function Terrain({ world }: { world: WorldData }) {
       const h = p.getY(i), slope = n.getY(i);
       const c = snow.clone().lerp(rock, Math.max(0, 0.88 - slope) * 1.5);
       if (h < 30) c.lerp(shore, (30 - h) / 45);
-      const grain = Math.sin(p.getX(i)*0.017+p.getZ(i)*0.014)*0.017;
+      const grain = Math.sin((p.getX(i)+tileX*size)*0.017+(p.getZ(i)+tileZ*size)*0.014)*0.017;
       c.offsetHSL(0, 0, grain); colors.push(c.r,c.g,c.b);
     }
     g.setAttribute('color',new THREE.Float32BufferAttribute(colors,3)); return g;
-  }, [world]);
+  }, [world, tileX, tileZ]);
   useEffect(() => () => geometry.dispose(), [geometry]);
-  return <mesh geometry={geometry} receiveShadow><meshStandardMaterial vertexColors roughness={0.97} flatShading/></mesh>;
+  return <mesh geometry={geometry} position={[tileX*world.half*2,0,tileZ*world.half*2]} receiveShadow><meshStandardMaterial vertexColors roughness={0.97} flatShading/></mesh>;
+}
+
+/** Keep just the current reach and its neighbours; all tiles share one world sampler. */
+function RiverTerrain({ world, state }: { world: WorldData; state: MutableRefObject<GameState> }) {
+  const [sector, setSector] = useState(() => getSector(world, state.current.boat.x, state.current.boat.z));
+  const current = useRef(sector);
+  useFrame(() => {
+    const next = getSector(world, state.current.boat.x, state.current.boat.z);
+    if (next.sectorX !== current.current.sectorX || next.sectorZ !== current.current.sectorZ) {
+      current.current = next;
+      setSector(next);
+    }
+  });
+  const tiles = [];
+  for (let x = sector.sectorX - 1; x <= sector.sectorX + 1; x++) {
+    for (let z = sector.sectorZ - 1; z <= sector.sectorZ + 1; z++) {
+      tiles.push(<Terrain key={`${x}:${z}`} world={world} tileX={x} tileZ={z}/>);
+    }
+  }
+  return <>{tiles}</>;
+}
+
+function BoostPickups({ state, world, clock, reducedMotion }: { state: MutableRefObject<GameState>; world: WorldData; clock: MutableRefObject<number>; reducedMotion: boolean }) {
+  const markers = useRef<(THREE.Group | null)[]>([]);
+  useFrame(() => {
+    markers.current.forEach((marker, i) => {
+      if (!marker) return;
+      const pickup = state.current.pickups[i];
+      marker.visible = Boolean(pickup) && state.current.status !== 'ready';
+      if (!pickup) return;
+      const bob = reducedMotion ? 0 : Math.sin(clock.current * 1.8 + pickup.id) * 2;
+      marker.position.set(pickup.x, world.waterLevel + 23 + bob, pickup.z);
+      marker.rotation.y = state.current.initialBoat.heading;
+    });
+  });
+  return <>{Array.from({length: GAME_RULES.maxPickups}, (_, i) => <group key={i} ref={node => {markers.current[i] = node;}} visible={false}>
+    <mesh><torusGeometry args={[27, 1.9, 8, 48]}/><meshBasicMaterial color="#f6a04d"/></mesh>
+    {[-6, 5].flatMap(y => [-1, 1].map(side => <mesh key={`${y}:${side}`} position={[side*5, y, 0]} rotation={[0, 0, side*Math.PI/4]}><boxGeometry args={[3, 15, 3]}/><meshBasicMaterial color="#ffe0aa"/></mesh>))}
+    <mesh rotation={[-Math.PI/2,0,0]} position={[0,-21,0]}><ringGeometry args={[31,36,48]}/><meshBasicMaterial color="#f6a04d" transparent opacity={0.5} side={THREE.DoubleSide} depthWrite={false}/></mesh>
+  </group>)}</>;
 }
 
 function RadarBeam({ tower, state }: { tower: WorldData['towers'][number]; state: MutableRefObject<GameState> }) {
@@ -115,7 +155,7 @@ function DroneShadow({ pose, index, world }: { pose: MutableRefObject<RenderPose
     if(!group.current)return;
     const d=pose.current.drones[index];
     const x=d.x,z=d.z;
-    const ground=sampleHeight(world,x,z);
+    const ground=sampleRiverHeight(world,x,z);
     group.current.visible=Number.isFinite(ground)&&ground<=world.waterLevel;
     group.current.position.set(x,world.waterLevel+.9,z);
     group.current.rotation.set(-Math.PI/2,0,-d.heading);
@@ -144,11 +184,13 @@ function World(props: Props) {
   const previousPose=useRef(copyPose(game.current)),pose=useRef(copyPose(game.current));
   const boatPose=useRef(pose.current.boat);
   const previousView=useRef(cameraMode),previousLook=useRef(false);
+  const readiness=useRef(0);
   const {camera,gl}=useThree();
   const target=useMemo(()=>new THREE.Vector3(),[]);
-  useEffect(()=>{gl.setClearColor('#cadfe0');onReady();},[gl,onReady]);
+  useEffect(()=>{gl.setClearColor('#cadfe0');return ()=>cancelAnimationFrame(readiness.current);},[gl]);
   // Run first: all effects consume the same interpolated pose and clock.
   useFrame((_,rawDelta)=>{
+    if (!readiness.current) readiness.current=requestAnimationFrame(onReady);
     const dt=Math.min(rawDelta,.05),s=game.current;
     const reset=s.time<previousTime.current||(previousStatus.current==='ready'&&s.status==='playing');
     if(reset){previousPose.current=copyPose(s);clock.current=0;}
@@ -180,13 +222,13 @@ function World(props: Props) {
       const sx=Math.sin(b.heading),sz=Math.cos(b.heading),facing=lookBack.current?-1:1;
       if(cameraMode==='helm'){
         camera.position.set(b.x-sx*14-sz*9,world.waterLevel+32+surface,b.z-sz*14+sx*9);
-        const ground=sampleHeight(world,camera.position.x,camera.position.z);
+        const ground=sampleRiverHeight(world,camera.position.x,camera.position.z);
         if(Number.isFinite(ground))camera.position.y=Math.max(camera.position.y,ground+7);
         target.set(b.x+sx*100*facing-sz*9,world.waterLevel-5+surface,b.z+sz*100*facing+sx*9);
         fov=76+(reducedMotion?0:speed*5);
       }else{
         camera.position.set(b.x-sx*175*facing,world.waterLevel+88+surface,b.z-sz*175*facing);
-        const ground=sampleHeight(world,camera.position.x,camera.position.z);
+        const ground=sampleRiverHeight(world,camera.position.x,camera.position.z);
         if(Number.isFinite(ground))camera.position.y=Math.max(camera.position.y,ground+40);
         target.set(b.x+sx*100*facing,world.waterLevel+12+surface,b.z+sz*100*facing);
         fov=55+(reducedMotion?0:speed*4);
@@ -207,7 +249,8 @@ function World(props: Props) {
     <fog attach="fog" args={['#cadfe0',2200,8500]}/>
     <hemisphereLight args={['#eefbff','#74969a',1.7]}/>
     <directionalLight position={[-1900,3000,1500]} intensity={2.6} color="#fff4dc"/>
-    <Ocean level={world.waterLevel} clock={clock}/><Terrain world={world}/>
+    <Ocean level={world.waterLevel} clock={clock} pose={boatPose}/><RiverTerrain world={world} state={game}/>
+    <BoostPickups state={game} world={world} clock={clock} reducedMotion={reducedMotion}/>
     {world.towers.map(t=><group key={t.id}>
       <group position={[t.x,t.height,t.z]}><Vehicle model={models.tower} kind="tower"/><mesh position={[0,65,0]}><sphereGeometry args={[5,12,8]}/><meshBasicMaterial color="#b7ebc6"/></mesh></group>
       <RadarBeam tower={t} state={game}/>
