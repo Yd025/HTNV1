@@ -17,13 +17,7 @@ from typing import Any, Callable
 try:
     import sentry_sdk
 except ImportError:  # local eval without Docker deps
-    from contextlib import nullcontext
-
     class sentry_sdk:  # type: ignore[no-redef]
-        @staticmethod
-        def start_span(**_kwargs):
-            return nullcontext()
-
         @staticmethod
         def capture_exception(_exc=None):
             return None
@@ -31,6 +25,7 @@ except ImportError:  # local eval without Docker deps
 from agents import MissionCommand, Squad
 from evidence import ObservationGate
 from metrics import MetricsEngine, Scorecard
+from observability import MissionObserver, TickTiming
 from sim.adapter import build_adapter
 from sim.types import Command, SimAdapter
 from tracker import TargetTracker
@@ -76,6 +71,8 @@ class SwarmBrain:
         self._search_sample_time_s: float | None = None
         self._search_commands: dict[str, Command] = {}
         self._search_detected = False
+        self.observer = MissionObserver(self.run_id, self.mode, self.adapter.name)
+        self._diagnostics: dict[str, Any] = {}
 
     async def connect(self) -> None:
         if self._closed:
@@ -120,149 +117,170 @@ class SwarmBrain:
             }
             self.recorder = RunRecorder(manifest, record_dir)
             await self.recorder.start()
+            self.observer.tags["run.source_sha256"] = manifest["source_sha256"]
+        source_run_id = getattr(self.adapter, "manifest", {}).get("run_id")
+        if source_run_id:
+            self.observer.tags["run.source_id"] = source_run_id
         self.connected = True
+        self.observer.start()
         logger.info("brain online adapter=%s", getattr(self.adapter, "name", "?"))
 
     async def tick(self) -> dict[str, Any]:
+        timing = TickTiming(1000 / max(1.0, TICK_HZ))
         try:
-            return await self._tick()
+            state = await self._tick(timing)
+            self.observer.offer(state, self._diagnostics)
+            return state
         except StopAsyncIteration:
             raise
         except BaseException as exc:
             if self.recorder:
                 self.recorder.invalidate(f"incomplete tick {self.sequence}: {type(exc).__name__}")
+            if isinstance(exc, Exception):
+                self.observer.offer({"run": {"sequence": self.sequence}}, timing.snapshot(), type(exc).__name__)
             raise
 
-    async def _tick(self) -> dict[str, Any]:
-        with sentry_sdk.start_span(op="bt.tick", name="swarm_tick"):
+    async def _tick(self, timing: TickTiming) -> dict[str, Any]:
+        with timing.span("adapter.vehicles"):
             vehicles = await self.adapter.list_vehicles()
-            raw_vehicles = [v.as_dict() for v in vehicles]
-            vehicle_ids = {v.vehicle_id for v in vehicles}
-            self._sent = {k: v for k, v in self._sent.items() if k in vehicle_ids}
-            self._desired = {k: v for k, v in self._desired.items() if k in vehicle_ids}
+        raw_vehicles = [v.as_dict() for v in vehicles]
+        vehicle_ids = {v.vehicle_id for v in vehicles}
+        self._sent = {k: v for k, v in self._sent.items() if k in vehicle_ids}
+        self._desired = {k: v for k, v in self._desired.items() if k in vehicle_ids}
+        with timing.span("adapter.detections"):
             raw_detections = await self.adapter.poll_detections()
-            if self.mode == "replay":
-                self.world.advisor = getattr(self.adapter, "current_advisor", None)
-            receipt_time = getattr(self.adapter, "observation_now", time.time())
-            elapsed_s = getattr(self.adapter, "elapsed_s", time.monotonic() - self._started)
-            comms = {v.vehicle_id: self.adapter.comms_ok(v.vehicle_id) for v in vehicles}
+        if self.mode == "replay":
+            self.world.advisor = getattr(self.adapter, "current_advisor", None)
+        receipt_time = getattr(self.adapter, "observation_now", time.time())
+        elapsed_s = getattr(self.adapter, "elapsed_s", time.monotonic() - self._started)
+        comms = {v.vehicle_id: self.adapter.comms_ok(v.vehicle_id) for v in vehicles}
+        with timing.span("observations.validate"):
             detections, rejected = self._gate.filter(raw_detections, receipt_time, self.mode)
-            self.observation_status = {
-                "received": len(raw_detections), "forwarded": len(detections), "rejected": rejected,
-                "latest_age_s": max(0.0, receipt_time - max(d.timestamp for d in detections)) if detections else None,
-                "basis": "receipt time unless capture_unix explicitly supplied",
-            }
-            self.world.vehicles = {v.vehicle_id: v for v in vehicles}
-            self.world.detections = detections
-            self.world.observation_now = receipt_time
-            self.world.comms = comms
-            if detections:
-                self.last_detect_at = time.time()
-                if self.search_planner and any(self.world.vehicles.get(d.source_id) and self.world.vehicles[d.source_id].vehicle_class == "tower" for d in detections):
-                    self._search_detected = True
-                    self._search_commands.clear()
+        self.observation_status = {
+            "received": len(raw_detections), "forwarded": len(detections), "rejected": rejected,
+            "latest_age_s": max(0.0, receipt_time - max(d.timestamp for d in detections)) if detections else None,
+            "basis": "receipt time unless capture_unix explicitly supplied",
+        }
+        self.world.vehicles = {v.vehicle_id: v for v in vehicles}
+        self.world.detections = detections
+        self.world.observation_now = receipt_time
+        self.world.comms = comms
+        if detections:
+            self.last_detect_at = time.time()
+            if self.search_planner and any(self.world.vehicles.get(d.source_id) and self.world.vehicles[d.source_id].vehicle_class == "tower" for d in detections):
+                self._search_detected = True
+                self._search_commands.clear()
 
-            with sentry_sdk.start_span(op="track.update", name="target_track"):
-                expired = self.c2.expire_if_stale(receipt_time, self.world)
-                tentative = self.world.track if not self.c2.active else None
-                tentative_stamp = tentative.last_observation_timestamp if tentative else None
-                if expired or (tentative_stamp is not None and receipt_time - tentative_stamp > self.c2.confirmation_window_s):
-                    self.tracker.reset()
-                    self.world.track = None
-                # Before the first confirmed tower cue, airborne observations
-                # cannot initialize the mission or poison its target association.
-                mission_detections = [d for d in detections
-                                      if d.source_id in self.world.vehicles
-                                      and comms.get(d.source_id, False)
-                                      and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower")]
-                self.world.track = self.tracker.update(mission_detections, now=self._started + elapsed_s,
-                                                       observation_now=receipt_time)
-                self.world.accepted_detections = list(self.tracker.accepted_detections)
+        with timing.span("track.update", "target_track"):
+            expired = self.c2.expire_if_stale(receipt_time, self.world)
+            tentative = self.world.track if not self.c2.active else None
+            tentative_stamp = tentative.last_observation_timestamp if tentative else None
+            if expired or (tentative_stamp is not None and receipt_time - tentative_stamp > self.c2.confirmation_window_s):
+                self.tracker.reset()
+                self.world.track = None
+            # Before the first confirmed tower cue, airborne observations
+            # cannot initialize the mission or poison its target association.
+            mission_detections = [d for d in detections
+                                  if d.source_id in self.world.vehicles
+                                  and comms.get(d.source_id, False)
+                                  and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower")]
+            self.world.track = self.tracker.update(mission_detections, now=self._started + elapsed_s,
+                                                   observation_now=receipt_time)
+            self.world.accepted_detections = list(self.tracker.accepted_detections)
 
+        with timing.span("roles.assign"):
             mission_was_active = self.c2.active
             roles = self.c2.tick(vehicles, self.world.track, self.world.advisor, self.world)
             if mission_was_active and not self.c2.active:
                 self.tracker.reset()
                 self.world.track = None
-            self.world.set_roles(roles)
-            for v in vehicles:
-                v.role = roles.get(v.vehicle_id, v.role)
+        self.world.set_roles(roles)
+        for v in vehicles:
+            v.role = roles.get(v.vehicle_id, v.role)
 
-            cmds: list[Command] = []
-            self.command_outcomes = []
-            # Legacy placement-policy experiments may point towers, but never
-            # bypass the tower-confirmation gate by sending aircraft searching.
-            search_commands = {}
-            if self.search_planner and not (self._search_detected or self.world.track or self.world.detections or self.world.last_cue):
-                sample_time_s = getattr(self.adapter, "search_sample_time_s", None)
-                if sample_time_s is not None and sample_time_s != self._search_sample_time_s:
+        cmds: list[Command] = []
+        self.command_outcomes = []
+        # Legacy placement-policy experiments may point towers, but never
+        # bypass the tower-confirmation gate by sending aircraft searching.
+        search_commands = {}
+        if self.search_planner and not (self._search_detected or self.world.track or self.world.detections or self.world.last_cue):
+            sample_time_s = getattr(self.adapter, "search_sample_time_s", None)
+            if sample_time_s is not None and sample_time_s != self._search_sample_time_s:
+                with timing.span("search.plan"):
                     self._search_commands = {c.vehicle_id: c for c in self.search_planner.commands(vehicles, sample_time_s)}
-                    self._search_sample_time_s = sample_time_s
-                # Empty polls between sampled observations are not negative
-                # evidence. Existing dispatch suppression handles cached goals.
-                search_commands = {vid: cmd for vid, cmd in self._search_commands.items()
-                                   if self.world.vehicles.get(vid) and self.world.vehicles[vid].vehicle_class == "tower"}
-            for v in vehicles:
-                if not comms[v.vehicle_id]:
-                    continue
+                self._search_sample_time_s = sample_time_s
+            # Empty polls between sampled observations are not negative
+            # evidence. Existing dispatch suppression handles cached goals.
+            search_commands = {vid: cmd for vid, cmd in self._search_commands.items()
+                               if self.world.vehicles.get(vid) and self.world.vehicles[vid].vehicle_class == "tower"}
+        for v in vehicles:
+            if not comms[v.vehicle_id]:
+                continue
+            with timing.span("agent.decide", v.vehicle_id):
                 decision = self.squad.tick(v, self.world)
-                for call in decision.calls:
-                    self.world.post(v.vehicle_id, call.recipient, call.kind, call.body)
-                cmd = search_commands.get(v.vehicle_id, decision.command)
-                if cmd:
-                    cmds.append(cmd)
-            for cmd in cmds:
-                signature = (cmd.type, cmd.lat, cmd.lon, cmd.alt, cmd.sector, cmd.yaw_deg)
-                previous = self._sent.get(cmd.vehicle_id)
-                desired = self._desired.get(cmd.vehicle_id)
-                now = time.monotonic()
-                same = previous is not None and previous[0] == signature
-                cmd.command_id = desired[1] if desired and desired[0] == signature else f"{self.run_id}:{uuid.uuid4().hex}:{cmd.vehicle_id}"
-                self._desired[cmd.vehicle_id] = (signature, cmd.command_id)
-                if same and now - previous[1] < 1.0:
-                    self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "suppressed"})
-                    continue
-                with sentry_sdk.start_span(op="adapter.send", name=cmd.vehicle_id):
-                    try:
-                        await asyncio.wait_for(self.adapter.send_command(cmd), timeout=0.5)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "dispatch_error", "error": type(exc).__name__})
-                        continue
-                self._sent[cmd.vehicle_id] = (signature, now, cmd.command_id)
-                self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "dispatched"})
-                if self.metrics:
-                    self.metrics.note_command()
-                self.last_command_at = receipt_time
-                self.world.last_command = cmd.as_dict()
-            self.commands_last = cmds
-
-            truth = self.adapter.truth_target()
-            self._truth = truth
+            for call in decision.calls:
+                self.world.post(v.vehicle_id, call.recipient, call.kind, call.body)
+            cmd = search_commands.get(v.vehicle_id, decision.command)
+            if cmd:
+                cmds.append(cmd)
+        for cmd in cmds:
+            signature = (cmd.type, cmd.lat, cmd.lon, cmd.alt, cmd.sector, cmd.yaw_deg)
+            previous = self._sent.get(cmd.vehicle_id)
+            desired = self._desired.get(cmd.vehicle_id)
+            now = time.monotonic()
+            same = previous is not None and previous[0] == signature
+            cmd.command_id = desired[1] if desired and desired[0] == signature else f"{self.run_id}:{uuid.uuid4().hex}:{cmd.vehicle_id}"
+            self._desired[cmd.vehicle_id] = (signature, cmd.command_id)
+            if same and now - previous[1] < 1.0:
+                self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "suppressed"})
+                continue
+            try:
+                with timing.span("adapter.send", cmd.vehicle_id):
+                    await asyncio.wait_for(self.adapter.send_command(cmd), timeout=0.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "dispatch_error", "error": type(exc).__name__})
+                continue
+            self._sent[cmd.vehicle_id] = (signature, now, cmd.command_id)
+            self.command_outcomes.append({"command_id": cmd.command_id, "vehicle_id": cmd.vehicle_id, "status": "dispatched"})
             if self.metrics:
+                self.metrics.note_command()
+            self.last_command_at = receipt_time
+            self.world.last_command = cmd.as_dict()
+        self.commands_last = cmds
+
+        truth = self.adapter.truth_target()
+        self._truth = truth
+        if self.metrics:
+            with timing.span("metrics.update"):
                 self.score = self.metrics.update(vehicles, self.world.track, truth, now=self._started + elapsed_s)
 
-            self._ticks += 1
-            now = time.monotonic()
-            if now - self._hz_t >= 1.0:
-                self.world.tick_hz = self._ticks / (now - self._hz_t)
-                self._ticks = 0
-                self._hz_t = now
-            self.last_error = None
-            self._published_sequence = self.sequence
+        self._ticks += 1
+        now = time.monotonic()
+        if now - self._hz_t >= 1.0:
+            self.world.tick_hz = self._ticks / (now - self._hz_t)
+            self._ticks = 0
+            self._hz_t = now
+        self.last_error = None
+        self._published_sequence = self.sequence
+        with timing.span("state.snapshot"):
             state = self.snapshot()
-            if self.recorder:
-                self.recorder.offer({
-                    "sequence": self.sequence, "elapsed_s": elapsed_s, "recorded_at": receipt_time,
-                    "vehicles": raw_vehicles, "detections": [d.as_dict() for d in raw_detections],
-                    "comms": comms, "accepted": [d.observation_id for d in detections], "rejected": rejected,
-                    "commands": [c.as_dict() for c in cmds], "outcomes": self.command_outcomes,
-                    "track": state["track"], "scores": state["scores"],
-                    "advisor": self.world.advisor, "evaluation_truth": _truth_dict(truth),
-                })
-            self.sequence += 1
-            return state
+        # Core tick timings exclude recording serialization and telemetry export.
+        self._diagnostics = timing.snapshot()
+        state["diagnostics"] = self._diagnostics
+        if self.recorder:
+            self.recorder.offer({
+                "sequence": self.sequence, "elapsed_s": elapsed_s, "recorded_at": receipt_time,
+                "vehicles": raw_vehicles, "detections": [d.as_dict() for d in raw_detections],
+                "comms": comms, "accepted": [d.observation_id for d in detections], "rejected": rejected,
+                "commands": [c.as_dict() for c in cmds], "outcomes": self.command_outcomes,
+                "track": state["track"], "scores": state["scores"],
+                "advisor": self.world.advisor, "evaluation_truth": _truth_dict(truth),
+                "diagnostics": self._diagnostics,
+            })
+        self.sequence += 1
+        return state
 
     def snapshot(self) -> dict[str, Any]:
         track = self.world.track.as_dict() if self.world.track else None
@@ -290,6 +308,7 @@ class SwarmBrain:
             "observations": self.observation_status,
             "command_outcomes": self.command_outcomes,
             "recording": self.recorder.status if self.recorder else {"enabled": False},
+            "diagnostics": self._diagnostics,
             "fleet": {k: v.as_dict() for k, v in self.world.vehicles.items()},
             "detections": [d.as_dict() for d in self.world.detections[-12:]],
             "track": track,
@@ -345,8 +364,11 @@ class SwarmBrain:
             if close:
                 await close()
         finally:
-            if self.recorder:
-                await self.recorder.close()
+            try:
+                if self.recorder:
+                    await self.recorder.close()
+            finally:
+                await self.observer.close()
 
 
 def _truth_dict(pair: tuple[float, float] | None) -> dict[str, float] | None:

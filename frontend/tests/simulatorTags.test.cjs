@@ -36,17 +36,19 @@ function element(tagName) {
   };
 }
 
-function harness() {
+function harness(three = { Vector3 }) {
   const origin = "http://localhost:3000";
   const document = { head: element("head"), body: element("body"), createElement: element };
   const models = new Map();
   const messages = [];
   const renderCalls = [];
+  let cameraLookTarget = null;
   let time = 10000;
   let controlUpdates = 0;
   const scene = {
-    camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01) },
-    controls: { target: new Vector3(), update() { controlUpdates += 1; } },
+    camera: { position: new Vector3(0, -100, 100), project: point => point.multiplyScalar(0.01), lookAt(target) { cameraLookTarget = new Vector3().copy(target); } },
+    controls: { target: new three.Vector3(), enablePan: true, enableRotate: true, enableZoom: true, noPan: false, noRotate: false, noZoom: false, update() { controlUpdates += 1; } },
+    onMouseScroll() { return "native-scroll"; },
     getByName: id => models.get(id),
     getDomElement: () => ({ getBoundingClientRect: () => ({ left: 20, top: 30, width: 800, height: 600 }) }),
     render(...args) { renderCalls.push({ receiver: this, args }); return "native-render-result"; },
@@ -54,7 +56,7 @@ function harness() {
   const parent = { postMessage(message, targetOrigin) { messages.push({ message, targetOrigin }); } };
   const listeners = {};
   const window = {
-    parent, location: { origin }, scene, THREE: { Vector3 }, iface: { isConnected: true },
+    parent, location: { origin }, scene, THREE: three, iface: { isConnected: true },
     addEventListener(type, listener) { listeners[type] = listener; },
     setTimeout() { throw new Error("Scene should already be available"); },
   };
@@ -69,9 +71,17 @@ function harness() {
     get leaders() { return layer.children.filter(child => child.className === "ow-line"); },
     get dots() { return layer.children.filter(child => child.className === "ow-dot"); },
     get controlUpdates() { return controlUpdates; },
+    get cameraLookTarget() { return cameraLookTarget; },
     advance(ms) { time += ms; },
-    model(id, x = 0, y = 0, z = 0) {
-      const object = { position: new Vector3(x, y, z), visible: true, getWorldPosition(out) { return out.copy(this.position); } };
+    model(id, x = 0, y = 0, z = 0, yaw = 0) {
+      const object = {
+        position: new Vector3(x, y, z), yaw, visible: true,
+        getWorldPosition(out) { return out.copy(this.position); },
+        localToWorld(out) {
+          const lx = out.x, ly = out.y, c = Math.cos(this.yaw), s = Math.sin(this.yaw);
+          return out.set(lx * c - ly * s + this.position.x, lx * s + ly * c + this.position.y, out.z + this.position.z);
+        },
+      };
       models.set(id, object);
       return object;
     },
@@ -102,6 +112,11 @@ function assertAnchor(h, index, x, y) {
     "leader spans from the exact native anchor to the nearest label edge");
 }
 
+function assertVector(actual, expected, message) {
+  for (const axis of ["x", "y", "z"]) assert.ok(Math.abs(actual[axis] - expected[axis]) < 1e-9,
+    `${message ?? "vector"} ${axis}: expected ${expected[axis]}, received ${actual[axis]}`);
+}
+
 test("bridge rejects messages from another origin, source, or protocol version", () => {
   const h = harness();
   const message = { type: "overwatch:telemetry", version: 1, fresh: true, fleet: [asset()] };
@@ -130,7 +145,7 @@ test("telemetry creates safe text labels, selected state, and bounded valid them
   const tag = h.tags[0];
   assert.deepEqual(tag.children.map(child => child.tagName), ["strong", "span", "span"]);
   assert.equal(tag.children[0].textContent, id);
-  assert.equal(tag.children[1].textContent, role + " · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · " + role);
   assert.equal(tag.children[2].textContent, "— · 12.3 m/s");
   assert.equal(tag.attributes["aria-label"], "Inspect " + id);
   assert.equal(tag.attributes["aria-pressed"], "true");
@@ -139,7 +154,7 @@ test("telemetry creates safe text labels, selected state, and bounded valid them
   assert.equal(h.layer.style["--tag-accent"], undefined);
   h.telemetry([asset(id, { role: "Confirm" })]);
   assert.equal(h.tags.length, 1);
-  assert.equal(tag.children[1].textContent, "Confirm · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Confirm");
   assert.equal(tag.attributes["aria-pressed"], "false");
 });
 
@@ -211,16 +226,18 @@ test("missing, invisible, clipped and removed native objects cannot leave visibl
   assert.equal(h.leaders[0].hidden, true);
   assert.equal(h.dots[0].hidden, true);
   h.telemetry([]);
-  assert.equal(h.layer.children.length, 0);
+  assert.equal(h.tags.length + h.leaders.length + h.dots.length, 0);
   assert.equal(tag.parentNode, null);
 });
 
-test("turning tags off hides the layer and turning them on uses the current native pose", () => {
+test("turning asset tags off leaves ship overlays available and reenabling uses the current pose", () => {
   const h = harness();
   const object = h.model("copter-1");
   h.telemetry([asset()], { tags: false });
   h.scene.render();
-  assert.equal(h.layer.hidden, true);
+  h.scene.render();
+  assert.equal(h.tags[0].hidden, true);
+  assert.equal(h.layer.hidden, false);
   object.position.set(20, -20, 0);
   h.telemetry([asset()], { tags: true });
   h.scene.render();
@@ -238,15 +255,41 @@ test("metadata becomes stale after a telemetry timeout and recovers with fresh t
   h.advance(5600);
   h.scene.render();
   assert.equal(tag.dataset.stale, "true");
-  assert.equal(tag.children[1].textContent, "Track · telemetry stale");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Track");
+  assert.equal(tag.children[2].textContent, "Telemetry stale");
   h.telemetry([asset()]);
   assert.equal(tag.dataset.stale, "false");
-  assert.equal(tag.children[1].textContent, "Track · copter");
+  assert.equal(tag.children[1].textContent, "Quadcopter · Track");
   h.telemetry([asset()], { fresh: false });
   assert.equal(tag.dataset.stale, "true");
   h.telemetry([asset("copter-1", { linked: false })]);
   assert.equal(tag.dataset.stale, "true");
-  assert.equal(tag.children[1].textContent, "Track · link unavailable");
+  assert.equal(tag.children[2].textContent, "Link unavailable");
+});
+
+test("native towers can be located without borrowing assignments from another simulation", () => {
+  const h = harness();
+  h.model("tower-1", 20, 10, 0);
+  h.model("terrain_fort_ross");
+  h.scene.render();
+  assert.equal(h.tags.length, 1, "terrain is not a fleet asset");
+  const tag = h.tags[0];
+  assert.equal(tag.children[1].textContent, "Sensor tower · Assignment unavailable");
+  const status = h.messages.find(({ message }) => message.type === "overwatch:status").message;
+  assert.equal(status.assets[0].id, "tower-1");
+  assert.equal(status.matched.length, 0, "native presence is not linked mission telemetry");
+  h.send({ type: "overwatch:focus", version: 1, id: "tower-1" });
+  assertVector(h.scene.controls.target, { x: 20, y: 10, z: 0 });
+  h.telemetry([asset("tower-1", { vehicleClass: "tower", role: "cue" })]);
+  assert.equal(tag.children[1].textContent, "Sensor tower · Cue sensors");
+  assert.equal(tag.dataset.role, "cue");
+  h.telemetry([]);
+  assert.equal(tag.children[1].textContent, "Sensor tower · Assignment unavailable");
+  assert.equal(tag.dataset.role, "");
+  h.models.delete("tower-1");
+  h.advance(1100);
+  h.scene.render();
+  assert.equal(h.tags.length, 0, "removed native assets are no longer selectable");
 });
 
 test("overlapping native anchors receive separate nonoverlapping labels with accurate leaders", () => {
@@ -285,12 +328,185 @@ test("focus changes only the local camera and ignores untrusted or unknown reque
   assert.deepEqual(h.scene.controls.target, new Vector3(20, 30, 40));
   assert.deepEqual(object.position, new Vector3(20, 30, 40));
   const cameraOffset = new Vector3().subVectors(h.scene.camera.position, object.position);
-  assert.ok(Math.abs(cameraOffset.length() - 160) < 1e-10);
-  assert.equal(cameraOffset.x, 0);
+  assert.ok(cameraOffset.length() > 120, "camera fits the copter reference radius");
   assert.ok(cameraOffset.y < 0 && cameraOffset.z > 0);
   assert.equal(h.messages.length, 0);
   assert.equal(h.renderCalls.length, 0);
   h.models.delete("copter-1");
   h.send(focus);
   assert.equal(h.controlUpdates, 1);
+});
+
+test("selected radius and ship both fit the overview, including portrait layouts", () => {
+  const T = require("three");
+  for (const aspect of [4 / 3, 0.55]) {
+    const h = harness(T);
+    h.scene.camera = new T.PerspectiveCamera(60, aspect, 0.1, 50000);
+    h.scene.camera.up.set(0, 0, 1);
+    h.scene.scene = new T.Scene();
+    h.scene.getDomElement = () => ({ getBoundingClientRect: () => ({ left: 0, top: 0, width: 600 * aspect, height: 600 }) });
+    h.model("tower-1", 100, 200, 8);
+    const ship = h.model("target_vessel", 8000, -4000, 0);
+    h.telemetry([asset("tower-1", { vehicleClass: "tower", role: "cue" })], { selected: "tower-1" });
+    h.send({ type: "overwatch:focus", version: 1, id: "tower-1" });
+    h.scene.render(); h.scene.camera.updateMatrixWorld();
+    const ring = h.scene.scene.getObjectByName("overwatch-reference-radius");
+    assert.equal(ring.scale.x, 2500);
+    assert.equal(ring.scale.y, 2500);
+    assert.equal(ring.position.x, 100);
+    assert.equal(ring.position.y, 200);
+    for (const p of [[100-2500,200,9], [100+2500,200,9], [100,200-2500,9], [100,200+2500,9], [ship.position.x,ship.position.y,ship.position.z]]) {
+      const screen = new T.Vector3(...p).project(h.scene.camera);
+      assert.ok(Math.abs(screen.x) < 0.9 && Math.abs(screen.y) < 0.9 && Math.abs(screen.z) < 1, "radius and native ship remain inside the viewport");
+    }
+    const label = h.layer.children.find(child => child.className === "ow-range");
+    assert.match(label.textContent, /Reference radius 2.5 km/);
+    assert.match(label.textContent, /sensor reach unverified/);
+    h.telemetry([asset("tower-1", { vehicleClass: "tower" })], { selected: null });
+    h.scene.render();
+    assert.equal(ring.visible, false);
+    assert.equal(label.hidden, true);
+  }
+});
+
+test("ship inset restores the main renderer viewport and never changes model poses", () => {
+  const T = require("three"), h = harness(T), calls = [];
+  h.scene.camera = new T.PerspectiveCamera(60, 4/3, 0.1, 50000);
+  h.scene.scene = new T.Scene();
+  h.scene.renderer = { autoClear: true, setViewport(...values) { calls.push(["viewport", ...values]); }, setScissor() {}, setScissorTest(on) { calls.push(["scissor", on]); }, clear() {}, render() { calls.push(["inset"]); } };
+  h.model("tower-1", 10, 20, 8);
+  const ship = h.model("target_vessel", 300, 400, 0);
+  h.telemetry([asset("tower-1", { vehicleClass: "tower" })], { selected: "tower-1" });
+  h.scene.render();
+  assert.ok(calls.some(call => call[0] === "inset"));
+  assert.deepEqual(calls.at(-1), ["viewport", 0, 0, 800, 600]);
+  assert.deepEqual(calls.at(-2), ["scissor", false]);
+  assert.equal(h.scene.renderer.autoClear, true);
+  assertVector(ship.position, { x: 300, y: 400, z: 0 });
+  h.window.THREE = { ...T, REVISION: "86" };
+  calls.length = 0; h.scene.render();
+  assert.equal(calls.find(call => call[0] === "viewport")[2], 12, "native r86 expects a top-left viewport origin");
+  h.scene.renderer.render = () => { throw new Error("Auxiliary render failed"); };
+  assert.equal(h.scene.render(), "native-render-result");
+  assert.equal(h.scene.renderer.autoClear, true);
+  assert.equal(h.layer.children.find(child => child.className === "ow-inset").hidden, true);
+  h.window.iface.isConnected = false; h.scene.render();
+  assert.equal(h.layer.children.find(child => child.className === "ow-inset").hidden, true);
+});
+
+test("ship follow tracks native movement in the paint call and preserves orbit and zoom", () => {
+  const h = harness();
+  const ship = h.model("target_vessel", 20, 30, 0);
+  h.scene.camera.position.set(0, 0, -100);
+  h.send({ type: "overwatch:follow-ship", version: 1, enabled: true });
+  h.scene.render();
+  assert.deepEqual(h.scene.controls.target, ship.position);
+  assert.ok(h.scene.camera.position.z > ship.position.z, "demo camera begins above the ship even after an underwater view");
+  assertVector(h.cameraLookTarget, ship.position);
+  assert.equal(h.scene.controls.enablePan, false);
+  h.scene.camera.position.copy(ship.position).add(new Vector3(30, -60, 40));
+  ship.position.set(25, 35, 0);
+  h.advance(1000); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, ship.position);
+  assert.deepEqual(h.scene.camera.position, new Vector3(55, -25, 40));
+  assert.equal(h.messages.at(-1).message.followingShip, true);
+  let prevented = false;
+  assert.equal(h.scene.onMouseScroll({ preventDefault() { prevented = true; } }), undefined);
+  assert.equal(prevented, true);
+  h.send({ type: "overwatch:follow-ship", version: 1, enabled: false });
+  const previous = new Vector3().copy(h.scene.camera.position);
+  ship.position.set(99, 99, 0); h.scene.render();
+  assert.deepEqual(h.scene.camera.position, previous);
+  assert.equal(h.scene.controls.enablePan, true);
+  assert.equal(h.scene.onMouseScroll(), "native-scroll");
+});
+
+test("camera presets are ship-relative and cover chase, profiles, overhead and context views", () => {
+  const h = harness();
+  h.model("target_vessel", 10, 20, 0, Math.PI / 2);
+  const expected = {
+    chase: [[37.5, -90, 42.5], [10, 35, 7]],
+    stern: [[10, -100, 32.5], [10, 27.5, 7]],
+    bow: [[10, 130, 32.5], [10, 20, 7]],
+    port: [[-77.5, 20, 32.5], [10, 20, 7]],
+    starboard: [[97.5, 20, 32.5], [10, 20, 7]],
+    portQuarter: [[-52.5, -57.5, 42.5], [10, 27.5, 7]],
+    starboardQuarter: [[72.5, -57.5, 42.5], [10, 27.5, 7]],
+    waterline: [[85, 22.5, 5], [10, 26, 7]],
+    overhead: [[10, 17.5, 140], [10, 20, 0]],
+    wide: [[97.5, -90, 82.5], [10, 27.5, 7]],
+    bridge: [[10, 37.5, 19], [10, 170, 6]],
+  };
+  for (const [mode, [camera, target]] of Object.entries(expected)) {
+    h.send({ type: "overwatch:camera", version: 1, mode });
+    h.advance(1000); h.scene.render();
+    assertVector(h.scene.camera.position, new Vector3(...camera), mode + " camera");
+    assertVector(h.scene.controls.target, new Vector3(...target), mode + " target");
+    assertVector(h.cameraLookTarget, new Vector3(...target), mode + " look target");
+    assert.equal(h.scene.controls.enablePan, false);
+    assert.equal(h.scene.controls.enableRotate, false);
+    assert.equal(h.scene.controls.enableZoom, false);
+    assert.equal(h.scene.controls.noPan, true);
+    assert.equal(h.scene.controls.noRotate, true);
+    assert.equal(h.scene.controls.noZoom, true);
+    assert.equal(h.messages.at(-1).message.cameraMode, mode);
+    assert.equal(h.messages.at(-1).message.followingShip, true);
+  }
+});
+
+test("locked views rotate with heading, switch immediately and free restores navigation", () => {
+  const h = harness();
+  const ship = h.model("target_vessel", 0, 0, 0);
+  h.send({ type: "overwatch:camera", version: 1, mode: "chase" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(-110, -27.5, 42.5), "chase camera");
+  ship.yaw = Math.PI / 2; h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(27.5, -110, 42.5), "rotated chase camera");
+  h.send({ type: "overwatch:camera", version: 1, mode: "bow" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(0, 110, 32.5), "rotated bow camera");
+  h.send({ type: "overwatch:camera", version: 1, mode: "unknown" }); h.scene.render();
+  assertVector(h.scene.camera.position, new Vector3(0, 110, 32.5), "unknown mode ignored");
+  h.send({ type: "overwatch:camera", version: 1, mode: "free" });
+  const free = new Vector3().copy(h.scene.camera.position);
+  ship.position.set(20, 30, 0); h.scene.render();
+  assert.deepEqual(h.scene.camera.position, free);
+  assert.equal(h.scene.controls.enablePan, true);
+  assert.equal(h.scene.controls.enableRotate, true);
+  assert.equal(h.scene.controls.enableZoom, true);
+  assert.equal(h.scene.controls.noPan, false);
+  assert.equal(h.scene.controls.noRotate, false);
+  assert.equal(h.scene.controls.noZoom, false);
+});
+
+test("ship follow rejects untrusted messages and pauses on disconnect, invalid or missing model", () => {
+  const h = harness();
+  const request = { type: "overwatch:follow-ship", version: 1, enabled: true };
+  const ship = h.model("target_vessel", 20, 30, 0);
+  h.send(request, { source: {} }); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3());
+  h.send(request); h.scene.render();
+  h.window.iface.isConnected = false;
+  ship.position.set(50, 50, 0); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(20, 30, 0));
+  assert.equal(h.scene.controls.enablePan, true);
+  h.window.iface.isConnected = true; h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(50, 50, 0));
+  ship.position.x = NaN; h.scene.render();
+  assert.deepEqual(h.scene.controls.target, new Vector3(50, 50, 0));
+  h.models.delete("target_vessel"); h.advance(1000); h.scene.render();
+  assert.equal(h.messages.at(-1).message.followingShip, false);
+  const replacement = h.model("target_vessel", 5, 6, 0); h.scene.render();
+  assert.deepEqual(h.scene.controls.target, replacement.position);
+});
+
+test("replay capture runs after native paint, is bounded, and cannot interrupt rendering", () => {
+  const h = harness();
+  let snapshots = 0;
+  h.window.__overwatchCaptureCanvas = () => { assert.ok(h.renderCalls.length > snapshots); snapshots += 1; };
+  h.scene.render(); h.advance(100); h.scene.render();
+  assert.equal(snapshots, 1);
+  h.advance(400); h.scene.render(); assert.equal(snapshots, 2);
+  h.document.hidden = true; h.advance(1000); h.scene.render(); assert.equal(snapshots, 2);
+  h.document.hidden = false;
+  h.window.__overwatchCaptureCanvas = () => { throw new Error("Replay unavailable"); };
+  assert.equal(h.scene.render(), "native-render-result");
 });

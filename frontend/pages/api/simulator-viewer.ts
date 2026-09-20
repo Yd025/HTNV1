@@ -24,7 +24,9 @@ export default async function handler(request: NextApiRequest, response: NextApi
     const { viewer } = simulatorViewerUrls(address, controlAddress);
     // Redirects could silently change the asset/socket origin. The configured
     // endpoint must be the native viewer page, not a login or redirect page.
-    const upstream = await fetch(viewer.href, { signal: controller.signal, cache: "no-store", redirect: "error" });
+    const fetchAddress = process.env.SIM_VIEWER_INTERNAL_URL
+      ? simulatorViewerUrls(process.env.SIM_VIEWER_INTERNAL_URL).viewer.href : viewer.href;
+    const upstream = await fetch(fetchAddress, { signal: controller.signal, cache: "no-store", redirect: "error" });
     if (!upstream.ok) {
       return response.status(502).send(errorPage(`The simulator viewer returned HTTP ${upstream.status}.`));
     }

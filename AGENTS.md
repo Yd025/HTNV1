@@ -205,6 +205,7 @@ Eval profiles: `straight`, `weave`, `stop_and_go`. Prefer improving **tracking**
 
 ## Style
 
+- Commit completed changes after each implementation prompt. Use plain descriptive commit titles without conventional prefixes such as `fix:` or `feat:`. Keep unrelated working-tree changes out of commits.
 - Python 3.12, type hints, stdlib-first in the inner loop.
 - FastAPI async; pymavlink in `asyncio.to_thread` with a lock (already in `MavlinkBridge`).
 - Next.js 14 **Pages Router** (`pages/`), not App Router. Leaflet and R3F (`TacticalScene`) via `dynamic(..., { ssr: false })`.

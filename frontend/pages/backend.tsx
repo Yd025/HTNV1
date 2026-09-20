@@ -2,8 +2,11 @@ import Head from "next/head";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import BackendEvidence from "../components/BackendEvidence";
+import MissionObservability from "../components/MissionObservability";
 import CameraRail from "../components/CameraRail";
 import SimulatorWorld from "../components/SimulatorWorld";
+import SentryGuide from "../components/SentryGuide";
+import { useTickWindow } from "../hooks/useTickWindow";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { useMissionTelemetry } from "../hooks/useMissionTelemetry";
 import { DEFAULT_ARENA, llToNe } from "../lib/geo";
@@ -23,6 +26,7 @@ const percent = (value: unknown) => typeof value === "number" && Number.isFinite
 export default function BackendPreview() {
   const telemetry = useMissionTelemetry();
   const { state, isFresh, hasReceived } = telemetry;
+  const tickSummary = useTickWindow(state, isFresh);
   const [theme, setTheme] = useState<ThemeId>("ink");
   const [viewChoice, setView] = useState<"simulator" | "2d" | "3d" | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -37,7 +41,7 @@ export default function BackendPreview() {
   const [monitorExpanded, setMonitorExpanded] = useState(false);
   const [monitorError, setMonitorError] = useState<string | null>(null);
   const isSimulator = state.adapter === "whiteout";
-  const view = viewChoice ?? (isSimulator ? "simulator" : "2d");
+  const view = viewChoice ?? (isSimulator ? "simulator" : "3d");
   const simulatorAssets = simulator?.assets.assets?.filter(asset => asset.rostered) ?? [];
   const fleet = Object.values(state.fleet ?? {});
   const asset = selected ? state.fleet?.[selected] : null;
@@ -118,18 +122,19 @@ export default function BackendPreview() {
   }
 
   return <>
-    <Head><title>Overwatch | Backend live preview</title><meta name="description" content="Overwatch mission telemetry, sensor cameras, and the connected ArcticSim world." /></Head>
+    <MissionObservability telemetry={telemetry} />
+    <Head><title>Overwatch | Mission demo</title><meta name="description" content="Overwatch mission telemetry, sensor cameras, and the connected ArcticSim world." /></Head>
     <main className={s.page} style={themeStyle(theme)}>
       <header className={s.header}>
         <a href="/" className={s.brand}><BrandMark /><span>OVERWATCH</span></a>
-        <nav aria-label="Preview sections"><a href="#arena">World</a><a href="#cameras">Cameras</a><a href="#fleet">Fleet</a><a href="#evidence">Evidence</a><a href="#services">System</a></nav>
-        <label className={s.theme}>Appearance<select value={theme} onChange={e => setTheme(e.target.value as ThemeId)}>{Object.values(themes).map(t => <option value={t.id} key={t.id}>{t.name}</option>)}</select></label>
+        <nav aria-label="Demo sections"><a href="#arena">Mission</a><a href="#sentry-guide">Sentry guide</a></nav>
+        <details className={s.settings}><summary>Settings</summary><div><label className={s.theme}>Appearance<select value={theme} onChange={e => setTheme(e.target.value as ThemeId)}>{Object.values(themes).map(t => <option value={t.id} key={t.id}>{t.name}</option>)}</select></label><button onClick={download} disabled={!hasReceived}>Save snapshot</button><a href="/">Full mission dashboard ↗</a></div></details>
       </header>
 
       <div className={s.content}>
         <div className={s.titleRow}>
-          <div><h1>Backend, in view.</h1><p>A live view of the fleet, its decisions, and the evidence behind them.</p></div>
-          <div className={s.titleActions}><span className={`${s.status} ${isFresh ? s.online : s.warning}`}><span />{status}</span><button onClick={download} disabled={!hasReceived}>Save snapshot</button></div>
+          <div><h1>One ship. A coordinated fleet.</h1><p>Follow the mission, locate its sensors, and see what drives each control tick.</p></div>
+          <div className={s.titleActions}><span className={`${s.status} ${isFresh ? s.online : s.warning}`}><span />{status}</span></div>
         </div>
         <div className={s.context}><span className={s.mode}>{isSimulator ? "ArcticSim simulation" : mode === "synthetic" ? "Synthetic simulation" : `${mode} mode`}</span><span>Temporary preview · {isSimulator ? "simulator + mission telemetry" : "read only"}</span><span>{number(telemetry.receivedHz)} frames/s</span><span>Frame age {number(telemetry.ageSeconds)} s</span><span>Sequence {state.run?.sequence?.toLocaleString() ?? "—"}</span></div>
         {!isFresh && <p className={s.notice} role="status">{hasReceived ? "Showing the last received state. Values are not current until telemetry resumes." : `Waiting for the backend telemetry stream. This page reconnects automatically.`}</p>}
@@ -140,7 +145,7 @@ export default function BackendPreview() {
           {monitorError && <p className={s.notice} role="status">{monitorError}</p>}
         <section className={s.operational} aria-labelledby="arena-title">
           <div className={s.arenaColumn}>
-            <div className={`${s.sectionHead} ${s.worldHead}`}><div><h2 id="arena-title">{view === "simulator" ? "Simulator world" : "Operational picture"}</h2><p>{view === "simulator" ? `${simulator?.site.name?.replace(/_/g, " ") ?? "ArcticSim"} · native terrain, live objects and mission tags` : "Schematic view · stand-in arena, not Dominion terrain"}</p></div><div className={s.switch} aria-label="World view">{isSimulator && <button aria-pressed={view === "simulator"} onClick={() => setView("simulator")}>Simulator world</button>}<button aria-pressed={view === "2d"} onClick={() => setView("2d")}>2D plot</button><button aria-pressed={view === "3d"} onClick={() => setView("3d")}>3D schematic</button></div></div>
+            <div className={`${s.sectionHead} ${s.worldHead}`}><div><h2 id="arena-title">{view === "simulator" ? "Simulator world" : "Operational picture"}</h2><p>{view === "simulator" ? `${simulator?.site.name?.replace(/_/g, " ") ?? "ArcticSim"} · native terrain, live objects and mission tags` : "Schematic view · stand-in arena, not Dominion terrain"}</p></div><details className={s.viewOptions}><summary>View options</summary><div className={s.switch} aria-label="World view">{isSimulator && <button aria-pressed={view === "simulator"} onClick={() => setView("simulator")}>Simulator world</button>}<button aria-pressed={view === "2d"} onClick={() => setView("2d")}>2D plot</button><button aria-pressed={view === "3d"} onClick={() => setView("3d")}>3D schematic</button></div></details></div>
             <div className={`${s.map} ${view === "simulator" ? s.simulatorMap : ""}`}>
               {view === "simulator" ? <SimulatorWorld key={viewerAttempt} state={state} isFresh={isFresh} selected={selected} onSelect={setSelected} colors={themes[theme].colors} /> : !hasReceived ? <div className={s.empty}>The arena appears when the first state arrives.</div> : view === "2d" ? <ArenaPlot state={state} selected={selected} select={setSelected} showTruth={truth} /> : <Scene fleet={state.fleet ?? {}} track={track ?? null} truth={truth ? state.truth ?? null : null} heatmap={state.heatmap ?? []} strategy={telemetry.strategy} arena={state.arena} scene={themes[theme].scene} selectedVehicleId={selected} onSelectVehicle={setSelected} />}
             </div>
@@ -157,7 +162,7 @@ export default function BackendPreview() {
         <section className={s.trackPanel} aria-labelledby="target-title">
           <div className={s.trackIntro}>
             <div className={s.sectionHead}><h2 id="target-title">Target track</h2><Icon name="target" /></div>
-            <div className={s.trackState}>{!isFresh && track ? "Last received estimate" : track ? (track.age_s != null && track.age_s > .5 ? "Predicting through a gap" : "Recent observation") : "Searching for contact"}</div>
+            <div className={s.trackState}>{!isFresh && track ? "Last received estimate" : track ? "Shared target estimate" : "Searching for contact"}</div>
             <p>{track ? `${track.class_hint ?? "Unknown class"} · existing shared target filter` : "No target estimate is being reported."}</p>
             <p className={s.explainer}>Confidence and uncertainty are filter estimates, not measured accuracy.</p>
           </div>
@@ -177,6 +182,8 @@ export default function BackendPreview() {
           <Score label="Tracking accuracy" value={state.scores?.tracking} note={state.scores?.tracking == null ? "No independent truth available" : `${number(state.scores?.track_error_m)} m error against evaluation truth`} />
         </section>
 
+        <SentryGuide summary={tickSummary} isFresh={isFresh} />
+        <details className={s.technical}><summary>Fleet details &amp; diagnostics</summary>
         <section id="fleet" className={s.fleet}>
           <div className={s.sectionHead}><div><h2>Fleet & current intent</h2><p>Select an asset to inspect its telemetry. Locate it in the simulator world, 2D plot or 3D schematic.</p></div><span>{fleet.length} assets</span></div>
           <div className={s.tableWrap}><table><thead><tr><th>Asset</th><th>Role</th><th>Intent</th><th>Altitude</th><th>Speed</th><th>Heading</th><th>Battery</th><th>Position</th></tr></thead><tbody>{fleet.map(v => <tr key={v.vehicle_id} data-selected={selected === v.vehicle_id}><th><button onClick={() => setSelected(selected === v.vehicle_id ? null : v.vehicle_id)} aria-pressed={selected === v.vehicle_id}><Icon name={v.vehicle_class ?? "fleet"} />{v.vehicle_id}</button><small>{v.vehicle_class} · {v.mavlink ? "MAVLink" : isSimulator ? "Disconnected" : "local"}</small></th><td>{v.role ?? "Unassigned"}</td><td>{state.intents?.[v.vehicle_id] ?? "—"}</td><td>{number(v.alt)} m</td><td>{number(v.groundspeed)} m/s</td><td>{number(v.heading, 0)}°</td><td>{typeof v.battery_remaining === "number" && v.battery_remaining >= 0 ? `${number(v.battery_remaining, 0)}%` : "Unavailable"}</td><td>{number(v.lat, 4)}, {number(v.lon, 4)}</td></tr>)}</tbody></table>{!fleet.length && <p className={s.empty}>Fleet telemetry has not arrived.</p>}</div>
@@ -188,6 +195,7 @@ export default function BackendPreview() {
           <div className={s.serviceRows}><Service name="Controller" value={healthError ? "Unavailable" : health?.backend ?? "Checking"} detail={`${number(state.tick_hz)} Hz`} /><Service name="Database" value={healthError ? "Unavailable" : health?.database_status ?? "Checking"} detail="Optional storage" /><Service name="Advisor" value={healthError ? "Unavailable" : health?.advisor_status ?? "Checking"} detail="Outside the control loop" /><Service name="Telemetry" value={telemetry.connection} detail={`${telemetry.frameCount.toLocaleString()} received · ${telemetry.reconnects} reconnects`} /></div>
         </section>
         <div id="evidence"><BackendEvidence state={state} /></div>
+        </details>
         <footer className={s.footer}><span>Connected to {API} · existing /ws/telemetry stream</span><a href="/">Open the full mission dashboard</a></footer>
       </div>
     </main>

@@ -92,6 +92,19 @@ test("route is GET-only and does not fetch a caller-supplied upstream", async ()
   assert.match(h.result.body, /configured\.example:8080/);
 });
 
+test("Docker can fetch internally while browser assets and sockets retain the public origin", async () => {
+  let fetched;
+  const h = routeHarness(async url => {
+    fetched = url;
+    return { ok: true, headers: new Headers({ "content-type": "text/html" }), text: async () => native };
+  }, { SIM_VIEWER_URL: "http://127.0.0.1:8080", SIM_VIEWER_INTERNAL_URL: "http://host.docker.internal:8080" });
+  await h.handler({ method: "GET", query: {} }, h.response);
+  assert.equal(fetched, "http://host.docker.internal:8080/");
+  assert.equal(h.result.status, 200);
+  assert.match(h.result.body, /<base href="http:\/\/127\.0\.0\.1:8080\/">/);
+  assert.doesNotMatch(h.result.body, /host\.docker\.internal/);
+});
+
 test("route presents honest errors for failed and incompatible responses", async () => {
   const cases = [
     { fetch: async () => ({ ok: false, status: 502 }), status: 502, text: /HTTP 502/ },

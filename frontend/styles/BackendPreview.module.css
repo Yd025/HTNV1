@@ -9,6 +9,15 @@
 .header nav { display:flex; gap:25px; color:var(--text-muted); }
 .theme { margin-left:auto; display:flex; align-items:center; gap:10px; font-size:12px; color:var(--text-muted); }
 .theme select { color:var(--text); padding:6px 9px; }
+.settings { position:relative; margin-left:auto; font-size:12px; }
+.settings summary,.viewOptions summary { cursor:pointer; padding:8px; color:var(--text-muted); }
+.settings[open]>div { position:absolute; right:0; top:100%; z-index:40; min-width:250px; padding:18px; display:grid; gap:16px; background:var(--surface); border:1px solid var(--line-strong); box-shadow:0 6px 20px #0003; }
+.settings .theme { margin-left:0; font-size:12px; }
+.settings a { color:var(--accent-text); }
+.viewOptions { font-size:12px; }
+.viewOptions[open] .switch { margin-top:8px; }
+.technical { margin-top:28px; border-top:1px solid var(--line); padding-top:22px; }
+.technical>summary { cursor:pointer; color:var(--text-muted); font-size:14px; padding:8px 0; }
 .content { max-width:1512px; margin:auto; padding:38px 28px 20px; }
 .titleRow { display:flex; justify-content:space-between; gap:24px; align-items:center; }
 .titleRow h1 { font-size:clamp(27px,3vw,40px); font-weight:500; letter-spacing:-.035em; line-height:1.15; }

@@ -14,18 +14,16 @@ import sentry_sdk
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-from sentry_sdk.integrations.logging import LoggingIntegration
-from sentry_sdk.integrations.starlette import StarletteIntegration
 
 import db
 from ai_orchestrator import OverwatchDAG
 from brain import ADVISOR_EVERY_S, SwarmBrain
+from observability import configure_sentry, flush_sentry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("overwatch")
 
-SENTRY_DSN = os.getenv("SENTRY_DSN") or None
+SENTRY_ENABLED = configure_sentry()
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 DB_TIMEOUT_S = float(os.getenv("DB_TIMEOUT_SEC", "2"))
 DB_RETRY_S = float(os.getenv("DB_RETRY_SEC", "15"))
@@ -33,24 +31,6 @@ WS_TIMEOUT_S = float(os.getenv("WS_SEND_TIMEOUT_SEC", "2"))
 ADVISOR_TIMEOUT_S = float(os.getenv("ADVISOR_TIMEOUT_SEC", "12"))
 STATE_STALE_S = float(os.getenv("STATE_STALE_SEC", "3"))
 SHUTDOWN_TIMEOUT_S = float(os.getenv("SHUTDOWN_TIMEOUT_SEC", "5"))
-
-_sentry_kwargs = {
-    "dsn": SENTRY_DSN,
-    "environment": os.getenv("SENTRY_ENVIRONMENT", "hackathon"),
-    "integrations": [
-        StarletteIntegration(transaction_style="endpoint"),
-        FastApiIntegration(transaction_style="endpoint"),
-        LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
-    ],
-    "traces_sample_rate": 1.0,
-    "profiles_sample_rate": 1.0,
-    "enable_tracing": True,
-    "send_default_pii": False,
-}
-try:
-    sentry_sdk.init(**_sentry_kwargs, enable_logs=True)
-except TypeError:
-    sentry_sdk.init(**_sentry_kwargs)
 
 
 def _replace_latest(queue: asyncio.Queue, value: Any) -> None:
@@ -214,6 +194,7 @@ async def lifespan(application: FastAPI):
         yield
     finally:
         await hub.close()
+        await flush_sentry()
         application.state.hub = None
 
 
@@ -255,7 +236,8 @@ async def health(request: Request) -> dict[str, Any]:
         "last_detect_at": hub.brain.last_detect_at,
         "last_command_at": hub.brain.last_command_at,
         "scores": latest.get("scores"),
-        "sentry": bool(SENTRY_DSN),
+        "sentry": SENTRY_ENABLED,
+        "observability": hub.brain.observer.status,
     }
 
 

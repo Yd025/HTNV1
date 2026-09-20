@@ -17,6 +17,7 @@ node_modules/
 out/
 dist/
 *.tsbuildinfo
+.npm-cache/
 
 # Independent simulator checkout and downloaded/generated data.
 /arctic-sim/

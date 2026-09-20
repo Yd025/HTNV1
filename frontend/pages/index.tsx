@@ -1,10 +1,13 @@
 import dynamic from "next/dynamic";
 import Head from "next/head";
+import * as Sentry from "@sentry/nextjs";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
 import GraphTrainingDemo from "../components/GraphTrainingDemo";
 import GameLearning from "../components/GameLearning";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
+import MissionObservability from "../components/MissionObservability";
+import { useTickWindow } from "../hooks/useTickWindow";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
 import { useMissionTelemetry } from "../hooks/useMissionTelemetry";
@@ -24,7 +27,8 @@ const FleetModelPreview = dynamic(
   { ssr: false, loading: () => <Loading>Loading platform models…</Loading> },
 );
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-type Section = "overview" | "fleet" | "cameras" | "activity" | "system" | "game";
+const SentryPanel = dynamic(() => import("../components/SentryPanel"), { ssr: false });
+type Section = "overview" | "fleet" | "cameras" | "activity" | "system" | "game" | "sentry";
 const sections: {
   value: Section;
   label: string;
@@ -62,6 +66,12 @@ const sections: {
     description: "Learn tower placements from Cant Catch Me players and follow the opening stretch live.",
   },
   {
+    value: "sentry",
+    label: "Sentry",
+    icon: "eye",
+    description: "Trace performance, inspect mission logs, and verify event delivery.",
+  },
+  {
     value: "system",
     label: "System monitor",
     icon: "pulse",
@@ -71,11 +81,12 @@ const sections: {
 ];
 const EMPTY_FLEET: Record<string, TelemetrySample> = {};
 
-export default function CommandCenter() {
+export default function CommandCenter({ initialSection = "overview" }: { initialSection?: Section }) {
   const telemetry = useMissionTelemetry();
   const { state, strategy, isFresh, hasReceived, lastReceived, connection } =
     telemetry;
-  const [section, setSection] = useState<Section>("overview");
+  const tickSummary = useTickWindow(state, isFresh);
+  const [section, setSection] = useState<Section>(initialSection);
   const [view, setView] = useState<"3d" | "2d">("3d");
   const [themeId, setThemeId] = useState<ThemeId>("ink");
   const [selected, setSelected] = useState<string | null>(null);
@@ -100,10 +111,20 @@ export default function CommandCenter() {
         : (state.adapter ?? "Awaiting simulation");
   const activeSection = sections.find((item) => item.value === section)!;
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("tab") === "game") setSection("game");
+    const querySection = new URLSearchParams(window.location.search).get("tab");
+    if (sections.some(item => item.value === querySection)) setSection(querySection as Section);
+    const syncSection = () => {
+      const selected = window.location.hash.slice(1);
+      if (sections.some(item => item.value === selected)) setSection(selected as Section);
+    };
+    syncSection();
+    window.addEventListener("hashchange", syncSection);
+    return () => window.removeEventListener("hashchange", syncSection);
   }, []);
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    Sentry.addBreadcrumb({ category: "navigation", message: `Dashboard section: ${section}`, level: "info" });
+    Sentry.logger.info("Dashboard section opened", { "event.name": "dashboard.navigation", section });
   }, [section]);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
@@ -145,6 +166,7 @@ export default function CommandCenter() {
 
   return (
     <>
+      <MissionObservability telemetry={telemetry} />
       <Head>
         <title>{`Overwatch | ${activeSection.label}`}</title>
         <meta
@@ -745,6 +767,7 @@ export default function CommandCenter() {
             )}
             {section === "game" && <GameLearning />}
             {section === "system" && <TelemetryMonitor telemetry={telemetry} />}
+            {section === "sentry" && <SentryPanel telemetry={telemetry} tickSummary={tickSummary} />}
           </div>
           {section !== "game" && <footer className="mission-footer">
             <span>
