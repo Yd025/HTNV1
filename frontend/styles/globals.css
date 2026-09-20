@@ -130,22 +130,13 @@ select:focus-visible,
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: 0.035em;
-  padding: 0 6px;
+  justify-content: center;
 }
-.brand > .brand-mark {
-  color: var(--accent-text);
-}
-.brand small {
+.brand-logo {
   display: block;
-  font-weight: 400;
-  letter-spacing: 0;
-  font-size: 9px;
-  color: var(--text-muted);
-  margin-top: 4px;
+  width: 100%;
+  max-width: 144px;
+  height: auto;
 }
 .sidebar-mission {
   display: flex;
@@ -1426,10 +1417,6 @@ dd {
   .mission-main {
     margin-left: 180px;
   }
-  .brand {
-    font-size: 15px;
-    gap: 6px;
-  }
   .brand-mark {
     height: 26px;
     width: 26px;
@@ -1514,12 +1501,6 @@ dd {
   }
   .mission-main {
     margin-left: 164px;
-  }
-  .brand {
-    font-size: 13px;
-  }
-  .brand small {
-    font-size: 8px;
   }
   .main-navigation .ui-tab {
     font-size: 11px;
@@ -1654,11 +1635,11 @@ dd {
     border-bottom: 1px solid var(--line);
   }
   .brand {
-    font-size: 16px;
-    padding: 0;
+    justify-content: flex-start;
   }
-  .brand small {
-    font-size: 8px;
+  .brand-logo {
+    width: 120px;
+    max-width: 100%;
   }
   .brand-mark {
     height: 29px;

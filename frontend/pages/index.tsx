@@ -1,5 +1,6 @@
 import dynamic from "next/dynamic";
 import Head from "next/head";
+import Image from "next/image";
 import * as Sentry from "@sentry/nextjs";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
@@ -8,7 +9,7 @@ import GameLearning from "../components/GameLearning";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
 import MissionObservability from "../components/MissionObservability";
 import { useTickWindow } from "../hooks/useTickWindow";
-import { BrandMark, Icon } from "../components/ui/Icons";
+import { Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
 import { useMissionTelemetry } from "../hooks/useMissionTelemetry";
 import { themes, themeStyle, type ThemeId } from "../lib/theme";
@@ -193,10 +194,15 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
             onClick={() => setSection("overview")}
             aria-label="Overwatch overview"
           >
-            <BrandMark />
-            <span>
-              OVERWATCH<small>WHITEOUT operations</small>
-            </span>
+            <Image
+              className="brand-logo"
+              src="/mountain-logo.png"
+              alt="Mountain logo"
+              width={2079}
+              height={756}
+              sizes="(max-width: 700px) 120px, 144px"
+              priority
+            />
           </a>
           <div className="sidebar-mission">
             <span className="mission-cross">
