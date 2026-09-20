@@ -276,7 +276,7 @@ export default function GraphTrainingDemo({ surface = "overview" }: { surface?: 
     <header className={styles.heading}><div><h2>{surface === "cameras" ? "Mission cameras" : "Simulation lab"}</h2><p>The same mission and timeline as Overview. Switch views at any time.</p></div><span className={styles.modelTag}>Modeled replay imagery</span></header>
     <MissionSequence frame={frame} pending={custom || busy} />
     {missionToolbar}{transport}
-    <TrainingMissionViews surface={surface} profile={profile} frame={displayFrame} towers={towers} elapsedS={playhead} pending={custom || busy} calculating={busy} />
+    <TrainingMissionViews surface={surface} profile={profile} frame={displayFrame} frames={replay!.frames} towers={towers} elapsedS={playhead} running={running && !reducedMotion} pending={custom || busy} calculating={busy} />
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     {error && <p className={styles.error} role="alert">{error}</p>}
   </section>;
@@ -326,7 +326,7 @@ export default function GraphTrainingDemo({ surface = "overview" }: { surface?: 
         <div className={styles.mapLegend}><span><i className={styles.solidLegend} />Accepted contact report · {frame.t} s sample</span><span><i className={styles.dashLegend} />Distance guide when unseen</span><span><i className={styles.routeLegend} />Planned drone route</span></div>
         <p className={styles.mapNote}>Camera scans use terrain visibility and a modeled sensor response. Rings are distance references. Boat position and distance guides are evaluation truth; the controller only receives observations. A handoff example is one successful test, not a success-rate claim.</p>
       </div>
-      <TrainingMissionViews surface="overview" profile={profile} frame={displayFrame} towers={towers} elapsedS={playhead} pending={custom || busy} calculating={busy} />
+      <TrainingMissionViews surface="overview" profile={profile} frame={displayFrame} frames={replay!.frames} towers={towers} elapsedS={playhead} running={running && !reducedMotion} pending={custom || busy} calculating={busy} />
     </div></div>
     <details className={styles.placementSettings}>
       <summary>Placement controls and camera guides</summary>

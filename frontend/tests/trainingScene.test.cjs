@@ -7,7 +7,7 @@ const ts = require("typescript");
 const exportsObject = {};
 const source = fs.readFileSync(path.resolve(__dirname, "../lib/trainingScene.ts"), "utf8");
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: exportsObject });
-const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport, sensorReportCrop, cropSensorPoint } = exportsObject;
+const { scenePosition, sensorDirection, sensorPose, sensorAspect, terrainHeight, projectSensorPoint, acceptedSensorReport, sensorReportCrop, sensorReplayDetail, cropSensorPoint } = exportsObject;
 
 test("world coordinates preserve projected axes and the camera basis matches the overview frustum", () => {
   assert.deepEqual(Array.from(scenePosition({ x: 20, y: 30, z: 40 })), [20, 40, -30]);
@@ -120,7 +120,7 @@ test("saved handoff report crops include the physical vessel at 150 s and the re
   assert.ok(replay, "the saved handoff example must exist");
   for (const time of [150, 245]) for (const zoom of [12, 24]) {
     const frame = replay.frames.find(item => item.t === time), pose = sensorPose(profile, frame, replay.towers, "quad");
-    const crop = sensorReportCrop(frame, pose, zoom);
+    const crop = sensorReplayDetail(profile, replay.frames, replay.towers, pose, time, zoom).crop;
     assert.ok(crop, `the quad must have an accepted in-view report at ${time} s`);
     const corners = [];
     // Bounds of the existing six-metre vessel, in metres, at the replay's evaluation truth.
@@ -133,5 +133,62 @@ test("saved handoff report crops include the physical vessel at 150 s and the re
     }
     const displayedWidth = (Math.max(...corners.map(point => point.x)) - Math.min(...corners.map(point => point.x))) * 186;
     assert.ok(displayedWidth > 14, `the crop must make the compact vessel visible at ${time} s`);
+  }
+});
+
+test("replay detail retains magnification through missed reports without showing old evidence as current", () => {
+  const profile = { sensors: { quad: opticalPose.sensor } };
+  const drone = { ...opticalPose, cameraHeading: 0, cameraPitch: 0 };
+  const observation = { source: "quad", x: 0, y: 100, timestamp: 10, accepted: true };
+  const frames = [
+    { t: 0, drones: [drone], observations: [] },
+    { t: 10, drones: [drone], observations: [observation] },
+    { t: 15, drones: [drone], observations: [] },
+    { t: 20, drones: [drone], observations: [{ ...observation, x: 30, timestamp: 20, accepted: false }] },
+    { t: 25, drones: [drone], observations: [{ ...observation, x: 50, timestamp: 25 }] },
+  ];
+  for (const zoom of [1, 12, 24]) {
+    const acquired = sensorReplayDetail(profile, frames, [], opticalPose, 10, zoom);
+    assert.equal(acquired.crop.zoom, zoom);
+    for (const time of [15, 20, 24.9]) {
+      const held = sensorReplayDetail(profile, frames, [], opticalPose, time, zoom);
+      assert.deepEqual(held, acquired, "missing or rejected reports cannot toggle zoom or recenter it");
+    }
+  }
+  assert.equal(acceptedSensorReport(frames[2], opticalPose), null, "holding zoom must not fabricate a current reticle");
+  assert.equal(sensorReplayDetail(profile, frames, [], opticalPose, 25).timestamp, 25);
+  const before = sensorReplayDetail(profile, frames, [], opticalPose, 24.9999, 12, true);
+  const during = sensorReplayDetail(profile, frames, [], opticalPose, 26, 12, true);
+  const after = sensorReplayDetail(profile, frames, [], opticalPose, 27, 12, true);
+  assert.deepEqual(sensorReplayDetail(profile, frames, [], opticalPose, 25, 12, true).crop, before.crop, "a new report cannot snap the crop");
+  assert.deepEqual(sensorReplayDetail(profile, frames, [], opticalPose, 25, 12, false).crop, after.crop, "paused or sought frames settle on their current report");
+  assert.ok(during.crop.x > before.crop.x && during.crop.x < after.crop.x, "the crop eases toward the new image report");
+  assert.equal(sensorReplayDetail(profile, frames, [], opticalPose, 15).timestamp, 10, "rewind must discard future evidence");
+  assert.equal(sensorReplayDetail(profile, frames, [], opticalPose, 9.9), null);
+  assert.equal(sensorReplayDetail(profile, [frames[0]], [], opticalPose, 30), null, "a different mission has no inherited crop");
+  assert.equal(sensorReplayDetail(profile, frames, [], { ...opticalPose, id: "other" }, 30), null);
+  const outside = sensorReplayDetail(profile, frames, [], { ...opticalPose, heading: 180 }, 15);
+  assert.equal(outside.crop.zoom, 12);
+  assert.deepEqual(outside.crop, sensorReplayDetail(profile, frames, [], opticalPose, 15).crop, "camera motion and frustum exits cannot pull the crop back to another image region");
+  assert.equal(outside.inView, false, "retained magnification cannot imply that the old report is still in view");
+});
+
+test("handoff playback never drops detail magnification after a camera's first accepted report", () => {
+  const profile = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/arctic-profile.json"), "utf8"));
+  const report = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/graph-report.json"), "utf8"));
+  const replay = report.replays.find(item => item.seed === 591955);
+  for (const id of ["tower-1", "tower-2", "plane", "quad"]) {
+    let acquired = false, gaps = 0;
+    for (const frame of replay.frames) {
+      const pose = sensorPose(profile, frame, replay.towers, id);
+      const detail = sensorReplayDetail(profile, replay.frames, replay.towers, pose, frame.t, 24);
+      if (detail) acquired = true;
+      if (acquired) {
+        assert.equal(detail?.crop.zoom, 24, `${id} must retain detail at ${frame.t} s`);
+        assert.ok(detail.timestamp <= frame.t);
+        if (!acceptedSensorReport(frame, pose)) gaps++;
+      }
+    }
+    if (id === "quad") assert.ok(gaps > 10, "the regression must exercise intermittent aircraft reports");
   }
 });

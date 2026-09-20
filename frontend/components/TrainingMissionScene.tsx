@@ -17,12 +17,13 @@ export type TrainingMissionSceneProps = {
   onSelect?: (id: string) => void;
   compact?: boolean;
   digitalZoom?: number;
+  sensorCrop?: SensorCrop | null;
 };
 
 /** A view of the overview's replay, with no simulation clock or control commands. */
-export default function TrainingMissionScene({ profile, frame, towers, mode = "orbit", sensorId, selectedId, onSelect, compact = false, digitalZoom = 1 }: TrainingMissionSceneProps) {
+export default function TrainingMissionScene({ profile, frame, towers, mode = "orbit", sensorId, selectedId, onSelect, compact = false, digitalZoom = 1, sensorCrop }: TrainingMissionSceneProps) {
   const pose = mode === "sensor" ? sensorPose(profile, frame, towers, sensorId ?? "") : null;
-  const crop = pose && digitalZoom > 1 ? sensorReportCrop(frame, pose, digitalZoom) : null;
+  const crop = pose && digitalZoom > 1 ? sensorCrop ?? sensorReportCrop(frame, pose, digitalZoom) : null;
   const wideReport = pose ? acceptedSensorReport(frame, pose) : null;
   const report = crop ? cropSensorPoint(wideReport, crop) : wideReport;
   const opticalCenter = crop ? cropSensorPoint({ x: .5, y: .5 }, crop) : { x: .5, y: .5 };

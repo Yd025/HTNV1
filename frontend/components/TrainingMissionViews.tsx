@@ -1,7 +1,7 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { assetLabel, type ArcticProfile, type GraphFrame, type GraphTower } from "../lib/graphExperiment";
-import { acceptedSensorReport, sensorAspect, sensorPose } from "../lib/trainingScene";
+import { sensorAspect, sensorPose, sensorReplayDetail } from "../lib/trainingScene";
 import styles from "./TrainingMissionViews.module.css";
 
 const TrainingMissionScene = dynamic(() => import("./TrainingMissionScene"), {
@@ -13,13 +13,15 @@ interface Props {
   surface: "overview" | "cameras" | "lab";
   profile: ArcticProfile;
   frame: GraphFrame;
+  frames: GraphFrame[];
   towers: GraphTower[];
   elapsedS: number;
+  running: boolean;
   pending: boolean;
   calculating?: boolean;
 }
 
-type ViewProps = Pick<Props, "profile" | "frame" | "towers">;
+type ViewProps = Pick<Props, "profile" | "frame" | "frames" | "towers" | "elapsedS" | "running">;
 const degrees = (value: number) => `${value.toFixed(1)}°`;
 const meters = (value: number) => `${Math.round(value).toLocaleString()} m`;
 const xy = (x: number, y: number) => `${Math.round(x).toLocaleString()}, ${Math.round(y).toLocaleString()}`;
@@ -33,11 +35,16 @@ function reportStatus(frame: GraphFrame, source: string) {
   };
 }
 
-function SensorView({ profile, frame, towers, sensorId, compact = false }: ViewProps & { sensorId: string; compact?: boolean }) {
+function SensorView({ profile, frame, frames, towers, elapsedS, running, sensorId, compact = false }: ViewProps & { sensorId: string; compact?: boolean }) {
   const [requestedZoom, setRequestedZoom] = useState(12);
+  const [playback, setPlayback] = useState({ running, settledSampleS: frame.t });
+  if (playback.running !== running) setPlayback({ running, settledSampleS: frame.t });
+  // Pause/seek settles the crop. Resume must not replay that sample's earlier transition.
+  const animate = running && playback.running && frame.t > playback.settledSampleS;
   const pose = sensorPose(profile, frame, towers, sensorId);
-  const report = pose ? acceptedSensorReport(frame, pose) : null;
-  const digitalZoom = report ? requestedZoom : 1;
+  const detail = pose ? sensorReplayDetail(profile, frames, towers, pose, elapsedS, requestedZoom, animate) : null;
+  const digitalZoom = detail ? requestedZoom : 1;
+  const detailStatus = detail ? !detail.inView ? "last report outside view" : detail.timestamp < frame.t ? `last report ${Math.floor(elapsedS - detail.timestamp)} s ago` : "reported position" : "awaiting a report";
   const status = reportStatus(frame, sensorId);
   return <figure className={`${styles.sensor} ${compact ? styles.compactSensor : ""}`} aria-label={`${assetLabel(sensorId)} modeled camera view`}>
     <figcaption className={styles.sensorHeading}>
@@ -48,15 +55,15 @@ function SensorView({ profile, frame, towers, sensorId, compact = false }: ViewP
       <div className={styles.sensorMedia}>
         <div className={styles.sensorControls} role="group" aria-label={`${assetLabel(sensorId)} camera magnification`}>
           <button type="button" aria-pressed={digitalZoom === 1} onClick={() => setRequestedZoom(1)}>Wide</button>
-          {[12, 24].map(zoom => <button key={zoom} type="button" aria-pressed={digitalZoom === zoom} disabled={!report} onClick={() => setRequestedZoom(zoom)}
-            title={report ? "Magnify this camera's reported position" : "Contact detail needs an accepted report inside this camera's view"}>{zoom}× detail</button>)}
+          {[12, 24].map(zoom => <button key={zoom} type="button" aria-pressed={digitalZoom === zoom} disabled={!detail} onClick={() => setRequestedZoom(zoom)}
+            title={detail ? "Keep this magnification between camera reports" : "Contact detail becomes available after this camera's first accepted report"}>{zoom}× detail</button>)}
         </div>
         <div className={styles.sensorImage}>
           <div className={styles.sensorViewport} style={compact ? { maxWidth: `${180 * sensorAspect(pose.sensor)}px` } : undefined}>
-            <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} digitalZoom={digitalZoom} />
+            <TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="sensor" sensorId={sensorId} digitalZoom={digitalZoom} sensorCrop={detail?.crop} />
           </div>
         </div>
-        <p className={styles.sensorViewMode}>{digitalZoom > 1 ? `${digitalZoom}× digital crop · reported position` : `Wide · ${degrees(pose.sensor.hfovDeg)} horizontal view`}</p>
+        <p className={styles.sensorViewMode}>{digitalZoom > 1 ? `${digitalZoom}× digital crop · ${detailStatus}` : `Wide · ${degrees(pose.sensor.hfovDeg)} horizontal view`}</p>
       </div>
       {!compact && <dl className={styles.sensorReadout}>
         <div><dt>Camera heading</dt><dd>{degrees(((pose.heading % 360) + 360) % 360)}</dd></div>
@@ -95,7 +102,7 @@ function ObservationTable({ frame }: Pick<Props, "frame">) {
   </section>;
 }
 
-export default function TrainingMissionViews({ surface, profile, frame, towers, elapsedS, pending, calculating = false }: Props) {
+export default function TrainingMissionViews({ surface, profile, frame, frames, towers, elapsedS, running, pending, calculating = false }: Props) {
   const sensors = [...towers.map(tower => tower.id), ...frame.drones.map(drone => drone.id)];
   const [selectedSensor, setSelectedSensor] = useState<string | null>(null);
   const selectedId = selectedSensor && sensors.includes(selectedSensor) ? selectedSensor : sensors[0];
@@ -104,8 +111,8 @@ export default function TrainingMissionViews({ surface, profile, frame, towers, 
     {pending ? <div className={styles.pending} role="status"><h3>{calculating ? "Calculating the mission…" : "Run this placement to update all views"}</h3><p>{calculating ? "All views will resume together when the new route and camera observations are ready." : "The placement has changed. Run it to calculate matching aircraft routes and camera observations."}</p></div> : <>
       <div className={styles.overviewScene}><TrainingMissionScene profile={profile} frame={frame} towers={towers} mode="orbit" compact selectedId={selectedId} onSelect={setSelectedSensor} /></div>
       <p className={styles.overviewHelp}>Drag to orbit · scroll to zoom · modeled replay imagery</p>
-      <div className={styles.cameraGrid}>{sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} towers={towers} sensorId={sensorId} compact />)}</div>
-      <p className={styles.overviewNote}>Detail crops magnify reported positions; a model report is not an image-confirmed lock. Imagery shows evaluation truth at the {frame.t.toFixed(1)} s sample.</p>
+      <div className={styles.cameraGrid}>{sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} frames={frames} towers={towers} elapsedS={elapsedS} running={running} sensorId={sensorId} compact />)}</div>
+      <p className={styles.overviewNote}>Zoom stays steady between reports. A last report is not a current visual lock. Imagery shows evaluation truth at the {frame.t.toFixed(1)} s sample.</p>
     </>}
   </section>;
   return <div className={styles.views}>
@@ -121,7 +128,7 @@ export default function TrainingMissionViews({ surface, profile, frame, towers, 
       <p>{calculating ? "All views will resume together when the new route and camera observations are ready." : "The tower sites or boat start have changed. Use “Run this placement” in the overview to calculate matching cameras, aircraft routes, and observations."}</p>
     </div> : <>
       {surface === "cameras" ? <div className={styles.cameraGrid}>
-        {sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} towers={towers} sensorId={sensorId} />)}
+        {sensors.map(sensorId => <SensorView key={sensorId} profile={profile} frame={frame} frames={frames} towers={towers} elapsedS={elapsedS} running={running} sensorId={sensorId} />)}
       </div> : <div className={styles.lab}>
         <div className={styles.labWorld}>
           <div className={styles.labScene}>
@@ -133,10 +140,10 @@ export default function TrainingMissionViews({ surface, profile, frame, towers, 
           <div className={styles.sensorSelector} role="group" aria-label="Choose observer camera">
             {sensors.map(sensorId => <button type="button" key={sensorId} aria-pressed={selectedId === sensorId} onClick={() => setSelectedSensor(sensorId)}>{assetLabel(sensorId)}</button>)}
           </div>
-          {selectedId ? <SensorView profile={profile} frame={frame} towers={towers} sensorId={selectedId} /> : <p className={styles.emptyReports}>No observer poses in this mission sample.</p>}
+          {selectedId ? <SensorView profile={profile} frame={frame} frames={frames} towers={towers} elapsedS={elapsedS} running={running} sensorId={selectedId} /> : <p className={styles.emptyReports}>No observer poses in this mission sample.</p>}
         </aside>
       </div>}
-      <p className={styles.modelNote}>Modeled replay imagery · approximate reconstruction from the mission terrain grid. Accepted reports automatically open a 12× detail crop of the reported position; use Wide to see the recorded field of view. This is synthetic imagery, not a live camera feed.</p>
+      <p className={styles.modelNote}>Modeled replay imagery · camera motion is smoothed between recorded samples. Detail opens after the first report and keeps your magnification through report gaps; use Wide for the full view. Last reports are labeled and do not imply a current visual lock. This is synthetic imagery, not a live camera feed.</p>
       <ObservationTable frame={frame} />
     </>}
   </div>;

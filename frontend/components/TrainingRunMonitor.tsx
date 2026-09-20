@@ -118,7 +118,7 @@ function RecordedExample({ profile, preview, freshnessS, stepS }: {
   return <>
     <div className={styles.recordedViews}>
       <TrainingMap profile={profile} towers={towers} replay={replay} frame={frame} elapsedS={elapsedS} />
-      <TrainingMissionViews surface="overview" profile={profile} frame={frame} towers={towers} elapsedS={elapsedS} pending={false} />
+      <TrainingMissionViews surface="overview" profile={profile} frame={frame} frames={replay.frames} towers={towers} elapsedS={elapsedS} running={running && !reducedMotion} pending={false} />
     </div>
     <div className={styles.exampleStats}>
       <div className={styles.exampleLabel}><strong>Recorded example · training continues</strong><span>Mission {preview.episodeIndex + 1} of {preview.episodeTotal} · seed {replay.seed} · playback at 32×</span><p>The map, 3D lab, cameras and charts share this recorded mission and playback time. Placement results include every completed mission.</p></div>

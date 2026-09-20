@@ -40,6 +40,61 @@ test("smooth drawing interpolates position and wrapped headings without revealin
   assert.equal(first.boat.x, 0); assert.equal(first.towerHeadings[0], 350);
 });
 
+test("camera yaw and pitch move continuously between samples while reports stay at their recorded time", () => {
+  const first = { t: 0, boat: { x: 0, y: 0 }, drones: [{ id: "quad", x: 0, y: 0, z: 60, heading: 90, pitch: -10, cameraHeading: 350, cameraPitch: -30 }], towerPitches: [-5], sources: [], observations: [], estimate: null };
+  const last = { t: 5, boat: { x: 10, y: 0 }, drones: [{ id: "quad", x: 50, y: 0, z: 60, heading: 110, pitch: -20, cameraHeading: 10, cameraPitch: -10 }], towerPitches: [-15], sources: ["quad"], observations: [{ source: "quad", accepted: true, timestamp: 5 }], estimate: { x: 10, y: 0 } };
+  const replay = { frames: [first, last] }, original = JSON.stringify(replay);
+  const halfway = drawFrame(replay, 2.5);
+  assert.equal(halfway.drones[0].heading, 100);
+  assert.equal(halfway.drones[0].cameraHeading, 0, "optical yaw must take the shortest path across north");
+  assert.equal(halfway.drones[0].cameraPitch, -20);
+  assert.equal(halfway.drones[0].pitch, -15);
+  assert.equal(halfway.towerPitches[0], -10);
+  assert.equal(halfway.observations, first.observations);
+  assert.equal(halfway.estimate, null);
+  assert.equal(halfway.t, 0);
+  const before = drawFrame(replay, 4.9999);
+  assert.ok(Math.abs(before.drones[0].cameraHeading - last.drones[0].cameraHeading) < .001);
+  assert.ok(Math.abs(before.drones[0].cameraPitch - last.drones[0].cameraPitch) < .001);
+  assert.ok(Math.abs(before.towerPitches[0] - last.towerPitches[0]) < .001);
+  assert.equal(drawFrame(replay, 0).drones[0].cameraHeading, 350);
+  assert.equal(drawFrame(replay, 5), last);
+  assert.equal(JSON.stringify(replay), original, "interpolation must not modify the saved samples");
+});
+
+test("optional camera poses use recorded body fallbacks and preserve absent mount angles", () => {
+  const drone = { id: "quad", x: 0, y: 0, z: 60, heading: 350, pitch: -20 };
+  const first = { t: 0, boat: { x: 0, y: 0 }, drones: [drone], sources: [] };
+  const last = { ...first, t: 5, drones: [{ ...drone, heading: 10, pitch: -10, cameraHeading: 10, cameraPitch: -10 }] };
+  const halfway = drawFrame({ frames: [first, last] }, 2.5);
+  assert.equal(halfway.drones[0].cameraHeading, 0);
+  assert.equal(halfway.drones[0].cameraPitch, -15);
+  const legacy = drawFrame({ frames: [first, { ...last, drones: [{ ...drone, heading: 10, pitch: -10 }] }] }, 2.5);
+  assert.equal(legacy.drones[0].cameraHeading, undefined);
+  assert.equal(legacy.drones[0].cameraPitch, undefined);
+  assert.equal(legacy.drones[0].pitch, -15);
+  const unknownMount = drawFrame({ frames: [{ ...first, drones: [{ ...drone, pitch: undefined }] }, last] }, 2.5);
+  assert.equal(unknownMount.drones[0].cameraPitch, undefined);
+  assert.equal(unknownMount.towerPitches, undefined);
+});
+
+test("saved handoff camera poses no longer jump at five-second replay boundaries", () => {
+  const report = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../public/experiments/graph-report.json"), "utf8"));
+  const replay = report.replays.find(item => item.seed === 591955);
+  assert.ok(replay);
+  for (const sample of replay.frames.slice(1)) {
+    const before = drawFrame(replay, sample.t - .0001), at = drawFrame(replay, sample.t);
+    for (const drone of sample.drones) {
+      const drawn = before.drones.find(item => item.id === drone.id), exact = at.drones.find(item => item.id === drone.id);
+      const gap = Math.abs(((drone.cameraHeading - drawn.cameraHeading + 540) % 360) - 180);
+      assert.ok(gap < .003, `${drone.id} camera yaw must approach its ${sample.t} s pose continuously`);
+      assert.equal(exact.cameraHeading, drone.cameraHeading);
+      assert.ok(Math.abs(drone.cameraPitch - drawn.cameraPitch) < .001);
+    }
+    sample.towerPitches.forEach((pitch, index) => assert.ok(Math.abs(pitch - before.towerPitches[index]) < .001));
+  }
+});
+
 test("nearest reporting sensor excludes closer sensors with no observation and breaks ties consistently", () => {
   const frame = { boat: { x: 0, y: 0 }, sources: ["plane", "tower-2"], drones: [{ id: "plane", x: 0, y: 200 }] };
   const towers = [{ id: "tower-1", x: 1, y: 0 }, { id: "tower-2", x: 200, y: 0 }];

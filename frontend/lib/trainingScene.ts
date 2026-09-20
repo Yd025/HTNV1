@@ -62,15 +62,46 @@ export interface SensorCrop {
 export function sensorReportCrop(frame: GraphFrame, pose: TrainingSensorPose, zoom = 12): SensorCrop | null {
   const report = acceptedSensorReport(frame, pose);
   if (!report) return null;
+  return sensorImageCrop(report, zoom);
+}
+
+function sensorImageCrop(point: XY, zoom: number): SensorCrop {
   const magnification = Number.isFinite(zoom) ? Math.max(1, zoom) : 1;
   const fraction = 1 / magnification;
   return {
-    x: Math.max(0, Math.min(1 - fraction, report.x - fraction / 2)),
-    y: Math.max(0, Math.min(1 - fraction, report.y - fraction / 2)),
+    x: Math.max(0, Math.min(1 - fraction, point.x - fraction / 2)),
+    y: Math.max(0, Math.min(1 - fraction, point.y - fraction / 2)),
     width: fraction,
     height: fraction,
     zoom: magnification,
   };
+}
+
+/** Keep the image crop through report gaps; only new accepted image positions move it.
+ * Ease recentering over two mission seconds while the camera follows its recorded pose.
+ * Replaying past evidence makes seeking and mission changes independent of render order. */
+export function sensorReplayDetail(profile: ArcticProfile, frames: GraphFrame[], towers: GraphTower[], pose: TrainingSensorPose, elapsedS: number, zoom = 12, animate = false) {
+  let from: XY | null = null, target: XY | null = null, changedAt = 0;
+  let latest: NonNullable<GraphFrame["observations"]>[number] | null = null;
+  const centerAt = (time: number): XY => {
+    const progress = Math.max(0, Math.min(1, (time - changedAt) / 2));
+    const eased = progress * progress * (3 - 2 * progress);
+    return { x: from!.x + (target!.x - from!.x) * eased, y: from!.y + (target!.y - from!.y) * eased };
+  };
+  for (const sample of frames) {
+    if (sample.t > elapsedS) break;
+    const measurement = sample.observations?.filter(item => item.source === pose.id && item.accepted && item.timestamp <= elapsedS)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    if (!measurement || (latest && measurement.timestamp <= latest.timestamp)) continue;
+    const recordedPose = sensorPose(profile, sample, towers, pose.id);
+    const recordedPoint = recordedPose && projectSensorPoint(recordedPose, measurement);
+    if (!recordedPoint) continue;
+    from = target ? centerAt(sample.t) : recordedPoint;
+    target = recordedPoint;
+    changedAt = sample.t;
+    latest = measurement;
+  }
+  return latest ? { crop: sensorImageCrop(animate ? centerAt(elapsedS) : target!, zoom), timestamp: latest.timestamp, inView: !!projectSensorPoint(pose, latest) } : null;
 }
 
 /** Map an image point into the crop, preserving its measurement metadata. */

@@ -86,18 +86,35 @@ export function isTowerFirstReport(value: GraphReport): boolean {
     && value.replays.length > 0 && value.replays.every(replay => replay.frames.length > 0 && typeof replay.frames[0].targetConfirmed === "boolean");
 }
 
-/** Interpolate drawing positions only; detections and estimates remain at the last observed sample. */
+/** Interpolate drawing poses only; detections and estimates remain at the last observed sample. */
 export function drawFrame(replay: GraphReplay, elapsedS: number): GraphFrame {
   const index = Math.max(0, replay.frames.findIndex(frame => frame.t > elapsedS) - 1);
   const a = elapsedS >= replay.frames[replay.frames.length - 1].t ? replay.frames[replay.frames.length - 1] : replay.frames[index];
   const b = replay.frames[index + 1];
   if (!b || elapsedS >= replay.frames[replay.frames.length - 1].t) return a;
   const fraction = Math.max(0, Math.min(1, (elapsedS - a.t) / Math.max(.001, b.t - a.t)));
+  if (fraction === 0) return a;
   const mix = (x: number, y: number) => x + fraction * (y - x);
   const heading = (x: number, y: number) => (x + fraction * (((y - x + 540) % 360) - 180) + 360) % 360;
   return { ...a, boat: { x: mix(a.boat.x, b.boat.x), y: mix(a.boat.y, b.boat.y) },
-    drones: a.drones.map(drone => { const next = b.drones.find(item => item.id === drone.id); return next ? { ...drone, x: mix(drone.x, next.x), y: mix(drone.y, next.y), z: mix(drone.z, next.z), heading: heading(drone.heading, next.heading) } : drone; }),
+    drones: a.drones.map(drone => {
+      const next = b.drones.find(item => item.id === drone.id);
+      if (!next) return drone;
+      const drawn = { ...drone, x: mix(drone.x, next.x), y: mix(drone.y, next.y), z: mix(drone.z, next.z), heading: heading(drone.heading, next.heading) };
+      if (drone.pitch !== undefined && next.pitch !== undefined) drawn.pitch = mix(drone.pitch, next.pitch);
+      if (drone.cameraHeading !== undefined || next.cameraHeading !== undefined) {
+        drawn.cameraHeading = heading(drone.cameraHeading ?? drone.heading, next.cameraHeading ?? next.heading);
+      }
+      // Older samples can use body pitch. Without either recorded endpoint,
+      // keep the existing mount fallback instead of inventing a camera angle.
+      const pitchA = drone.cameraPitch ?? drone.pitch, pitchB = next.cameraPitch ?? next.pitch;
+      if ((drone.cameraPitch !== undefined || next.cameraPitch !== undefined) && pitchA !== undefined && pitchB !== undefined) {
+        drawn.cameraPitch = mix(pitchA, pitchB);
+      }
+      return drawn;
+    }),
     towerHeadings: a.towerHeadings?.map((value, i) => heading(value, b.towerHeadings?.[i] ?? value)),
+    towerPitches: a.towerPitches?.map((value, i) => mix(value, b.towerPitches?.[i] ?? value)),
   };
 }
 
