@@ -1,60 +1,41 @@
-# Branch workflow for HTNV1
+# Freeze branch workflow
 
-The shared team foundation is on `dev`. Four feature branches start from the same foundation:
+`main` is the canonical final release and the starting point for future work. It contains the dashboard, backend, game, badge controller, saved experiment evidence, and submission materials. GitHub's default branch is `main`.
 
-- `codex/ui`
-- `codex/backend`
-- `codex/vision-tracking`
-- `codex/simulator-autonomy`
+`release/0.2` remains the frozen baseline used by the paired simulation comparison. The earlier `dev`, `codex/*`, `boat-game`, and `game-script` branches preserve development history. Their names and older handoff instructions do not identify the current release.
 
-`main` remains the pre-existing application until the team chooses to promote a verified `dev` version. No force-push is needed.
+## Get the final release
 
-## Clone once per person
-
-```powershell
-git clone https://github.com/Yd025/HTNV1.git
-Set-Location HTNV1
-git fetch origin
+```sh
+git clone --branch main https://github.com/Yd025/HTNV1.git
+cd HTNV1
 ```
 
-Run only your row in the fresh clone:
+For an existing clean checkout of `main`:
 
-| Person | Checkout command |
-|---|---|
-| UI | `git switch --track origin/codex/ui` |
-| Backend | `git switch --track origin/codex/backend` |
-| Vision/tracking | `git switch --track origin/codex/vision-tracking` |
-| Simulator/autonomy | `git switch --track origin/codex/simulator-autonomy` |
-
-If the local branch already exists, use `git switch codex/ui` (substitute yours). Separate branches in one working directory do not isolate simultaneous edits; use separate clones or worktrees for multiple people or agents.
-
-## Make a small PR into dev
-
-Example for the UI person after implementing and checking a change:
-
-```powershell
-git add frontend
-git commit -m "feat(ui): show observation freshness"
+```sh
 git fetch origin
-git merge origin/dev
-git push
+git switch main
+git pull --ff-only origin main
 ```
 
-Resolve conflicts and rerun affected checks before pushing. In GitHub, choose **base: `dev`**, **compare: your branch**. Stage your owned files rather than blindly adding the whole repository. Shared contracts/dependencies are coordinated with Person 2.
+Commit or otherwise preserve your local changes before switching branches. Use separate clones or worktrees for simultaneous work.
 
-The PR should state what now works, what was tested, and whether evidence came from the kinematic adapter, recorded data, or live ArcticSim. Merge working slices early instead of waiting for four finished features.
+## Make a change
 
-After another PR merges, update your feature branch:
+Start a focused branch from the latest release:
 
-```powershell
+```sh
 git fetch origin
-git merge origin/dev
+git switch -c codex/your-change origin/main
 ```
 
-Use normal merge commits if repeatedly using the same feature branch. If the team prefers squash merging, start a new feature branch from current `origin/dev` after each merged PR. Do not force-push a branch teammates share.
+Read [AGENTS.md](../../AGENTS.md) and the [team overview](README.md), then coordinate any shared API, coordinate-system, or configuration changes with the affected component owners. Stage the intended files, run the relevant checks from the [root README](../../README.md), and push your branch.
 
-## Integration and demo
+Open a pull request with **base `main`**. Describe what changed, the checks performed, and whether supporting evidence came from synthetic experiments, recorded observations, or live ArcticSim. Preserve explicit limitations. Review and resolve conflicts before merging. Do not force-push shared branches or rewrite the frozen comparison baseline.
 
-Person 2 checks the interfaces and complete flow on `dev`; each author remains responsible for their component. When ready, open a PR **`dev` -> `main`** and run the demo from the verified commit. The existing repo's code and history are preserved.
+## Release contents
 
-Do not commit `.env`, downloaded model weights, generated captures, or the separate ArcticSim checkout. The root ignore file covers common generated files; previously tracked cache files are not removed as part of this setup.
+Commit source, dependency lockfiles, tests, reviewed documentation, and intentionally saved benchmark/demo artifacts. Keep credentials, installed dependencies, build output, machine-specific logs, downloaded model weights, local learning archives, and the independent ArcticSim checkout outside Git.
+
+Use normal Git history to promote verified changes onto `main`. A release is identified by its commit, so keep benchmark provenance and source hashes attached to the experiment that produced them.

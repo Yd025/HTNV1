@@ -2,6 +2,10 @@
 
 Read this before editing. This file is the project scope for coding agents (Cursor, Codex, Claude, etc.). Humans: start with [README.md](README.md). Saturday sim contract: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
 
+## Final release on main (September 20, 2026)
+
+The user designated `main` as the canonical final Freeze release. It includes the release/0.2 bundle, the subsequent verified simulation-tracking revision, and the latest fleet-label improvements. Preserve `release/0.2` as the historical comparison baseline. New work starts from current `main` and targets `main` for review. The older instructions below about starting from or merging into `dev` describe the hackathon's earlier team workflow and are superseded by this release decision. Keep the runtime invariants and evidence limitations below.
+
 ## Current user-authorized mission (September 19, 2026)
 
 **September 20 purpose clarification:** The user explicitly confirmed this is solely a noncombat hackathon simulation/game, with no intended military operational use. The current tracking revision concerns the offline synthetic experiment. Keep its terrain, sensor model, movement limits and scoring fixed during comparisons, use observation-only decisions, preserve the published `release/0.2` baseline, and evaluate the frozen candidate on disjoint new missions.

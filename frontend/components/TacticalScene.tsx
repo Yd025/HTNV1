@@ -2,8 +2,9 @@
 import { Html, Line, OrbitControls } from "@react-three/drei";
 import { Canvas, useThree } from "@react-three/fiber";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ElementRef } from "react";
-import { Box3, Color, Group, InstancedMesh, Object3D, PerspectiveCamera, Vector3 } from "three";
+import { Box3, Color, Group, InstancedMesh, Object3D, PerspectiveCamera, Vector3, type Camera } from "three";
 import { DEFAULT_ARENA, SCENE_SCALE, toScene, type ArenaRef } from "../lib/geo";
+import { layoutFleetLabels } from "../lib/sceneLabels";
 import { sceneColors, type ScenePalette } from "../lib/theme";
 import type { HeatCell, StrategyPlan, TelemetrySample, TrackState, VehicleClass } from "../lib/types";
 import { VehicleModel, useVehicleMaterials, vehicleModelInfo } from "./scene/VehicleModels";
@@ -216,27 +217,88 @@ function ArenaPlate({ half, colors }: { half: number; colors: ScenePalette }) {
     <Line points={boundary} color={colors.muted} lineWidth={1} />
     <Line points={[[-half, 0.12, 0], [half, 0.12, 0]]} color={colors.muted} lineWidth={0.7} dashed dashSize={1.1} gapSize={1} />
     <Line points={[[0, 0.12, -half], [0, 0.12, half]]} color={colors.muted} lineWidth={0.7} dashed dashSize={1.1} gapSize={1} />
-    <Html center position={[0, 0, -half - 4]} style={{ pointerEvents: "none" }}><span className="rounded-sm px-1 py-0.5 text-[11px] font-semibold" style={{ color: colors.chalk, background: colors.ink }}>N</span></Html>
-    <Html center position={[half + 4, 0, 0]} style={{ pointerEvents: "none" }}><span className="rounded-sm px-1 py-0.5 text-[11px]" style={{ color: colors.chalk, background: colors.ink }}>E</span></Html>
-    <Html center position={[-half, -1, half + 5]} style={{ pointerEvents: "none" }}><span className="whitespace-nowrap rounded-sm px-1 py-0.5 text-[10px] tabular-nums" style={{ color: colors.chalk, background: colors.ink }}>{((half * 2) / SCENE_SCALE / 1000).toFixed(1)} km arena</span></Html>
+    <Html center position={[0, 0, -half - 4]} zIndexRange={[10, 0]} style={{ pointerEvents: "none" }}><span className="rounded-sm px-1 py-0.5 text-[11px] font-semibold" style={{ color: colors.chalk, background: colors.ink }}>N</span></Html>
+    <Html center position={[half + 4, 0, 0]} zIndexRange={[10, 0]} style={{ pointerEvents: "none" }}><span className="rounded-sm px-1 py-0.5 text-[11px]" style={{ color: colors.chalk, background: colors.ink }}>E</span></Html>
+    <Html center position={[-half, -1, half + 5]} zIndexRange={[10, 0]} style={{ pointerEvents: "none" }}><span className="whitespace-nowrap rounded-sm px-1 py-0.5 text-[10px] tabular-nums" style={{ color: colors.chalk, background: colors.ink }}>{((half * 2) / SCENE_SCALE / 1000).toFixed(1)} km arena</span></Html>
   </group>;
 }
 
 function Fleet({ vehicles, arena, colors, selectedId, onSelect }: { vehicles: TelemetrySample[]; arena: ArenaRef; colors: ScenePalette; selectedId: string | null; onSelect: (id: string) => void }) {
   const materials = useVehicleMaterials(colors);
-  return <>{vehicles.map((vehicle) => {
+  const labelElements = useRef(new Map<string, HTMLButtonElement>());
+  const entries = vehicles.map((vehicle) => {
     const position = toScene(vehicle.lat as number, vehicle.lon as number, vehicle.alt ?? 0, arena);
     const kind = vehicle.vehicle_class ?? "copter";
+    const labelHeight = kind === "tower" ? 10 : 4.4;
+    return { vehicle, position, kind, labelHeight };
+  });
+  const placeLabel = (id: string, camera: Camera, size: { width: number; height: number }) => {
+    const projected = entries.map(({ vehicle, position, labelHeight }) => {
+      const point = new Vector3(position[0], position[1] + labelHeight, position[2]).project(camera);
+      const element = labelElements.current.get(vehicle.vehicle_id);
+      return {
+        id: vehicle.vehicle_id,
+        x: (point.x + 1) * size.width / 2,
+        y: (1 - point.y) * size.height / 2,
+        width: element?.offsetWidth || 140,
+        height: element?.offsetHeight || 28,
+        visible: Number.isFinite(point.x) && Number.isFinite(point.y) && point.z >= -1 && point.z <= 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1,
+      };
+    });
+    const anchor = projected.find((label) => label.id === id)!;
+    // Move only screen labels. Offscreen vehicles retain their original projection.
+    const position = layoutFleetLabels(projected.filter((label) => label.visible), size).get(id) ?? anchor;
+    return { anchor, position };
+  };
+  return <>{entries.map(({ vehicle, position, kind, labelHeight }) => {
     const selected = selectedId === vehicle.vehicle_id;
     return <group key={vehicle.vehicle_id} position={position}>
       {position[1] > 0.5 && <Line points={[[0, 0, 0], [0, -position[1] + 0.2, 0]]} color={colors.ink} lineWidth={0.7} dashed dashSize={0.5} gapSize={0.5} transparent opacity={0.5} />}
       <group rotation={[0, -((vehicle.heading ?? 0) * Math.PI) / 180, 0]} onClick={(event) => { event.stopPropagation(); onSelect(vehicle.vehicle_id); }}><VehicleModel kind={kind} materials={materials} /></group>
       {selected && <mesh position={[0, -position[1] + 0.2, 0]} rotation={[-Math.PI / 2, 0, 0]}><ringGeometry args={[3.6, 3.9, 48]} /><meshBasicMaterial color={colors.rust} /></mesh>}
-      <Html center position={[0, kind === "tower" ? 10 : 4.4, 0]} zIndexRange={[20, 0]}>
-        <button type="button" aria-label={`Inspect ${vehicle.vehicle_id}, ${vehicle.role ?? "role unavailable"}`} aria-pressed={selected} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(vehicle.vehicle_id); }} className="whitespace-nowrap rounded-sm border px-2 py-1 text-[10px] leading-tight shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2" style={{ color: colors.chalk, background: colors.ink, borderColor: selected ? colors.rust : colors.muted, outlineColor: colors.chalk }}><span className="font-semibold">{vehicle.vehicle_id}</span><span className="ml-1.5 opacity-80">{vehicle.role ?? "Unassigned"}</span></button>
-      </Html>
+      <FleetLabel vehicle={vehicle} height={labelHeight} colors={colors} selected={selected} onSelect={onSelect} elements={labelElements.current} placeLabel={placeLabel} />
     </group>;
   })}</>;
+}
+
+function FleetLabel({ vehicle, height, colors, selected, onSelect, elements, placeLabel }: {
+  vehicle: TelemetrySample;
+  height: number;
+  colors: ScenePalette;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  elements: Map<string, HTMLButtonElement>;
+  placeLabel: (id: string, camera: Camera, size: { width: number; height: number }) => { anchor: { x: number; y: number }; position: { x: number; y: number } };
+}) {
+  const leader = useRef<SVGLineElement>(null);
+  const resizeObserver = useRef<ResizeObserver | null>(null);
+  const invalidate = useThree((state) => state.invalidate);
+  const measure = useCallback((element: HTMLButtonElement | null) => {
+    resizeObserver.current?.disconnect();
+    resizeObserver.current = null;
+    if (element) {
+      elements.set(vehicle.vehicle_id, element);
+      // Html mounts a separate DOM root after its first position calculation.
+      invalidate();
+      resizeObserver.current = new ResizeObserver(() => invalidate());
+      resizeObserver.current.observe(element);
+    } else {
+      elements.delete(vehicle.vehicle_id);
+    }
+  }, [elements, vehicle.vehicle_id, invalidate]);
+  return <Html center position={[0, height, 0]} zIndexRange={[20, 0]} calculatePosition={(_, camera, size) => {
+    const { anchor, position } = placeLabel(vehicle.vehicle_id, camera, size);
+    leader.current?.setAttribute("x2", String(anchor.x - position.x));
+    leader.current?.setAttribute("y2", String(anchor.y - position.y));
+    return [position.x, position.y];
+  }}>
+    <div className="relative flex">
+      <svg aria-hidden="true" width="1" height="1" className="pointer-events-none absolute left-1/2 top-1/2 overflow-visible">
+        <line ref={leader} x1="0" y1="0" x2="0" y2="0" stroke={colors.chalk} strokeWidth="1" />
+      </svg>
+      <button ref={measure} type="button" aria-label={`Inspect ${vehicle.vehicle_id}, ${vehicle.role ?? "role unavailable"}`} aria-pressed={selected} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(vehicle.vehicle_id); }} className="relative whitespace-nowrap rounded-sm border px-2 py-1 text-[10px] leading-tight shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2" style={{ color: colors.chalk, background: colors.ink, borderColor: selected ? colors.rust : colors.muted, outlineColor: colors.chalk }}><span className="font-semibold">{vehicle.vehicle_id}</span><span className="ml-1.5 opacity-80">{vehicle.role ?? "Unassigned"}</span></button>
+    </div>
+  </Html>;
 }
 
 function Heatmap({ cells, arena, colors }: { cells: HeatCell[]; arena: ArenaRef; colors: ScenePalette }) {

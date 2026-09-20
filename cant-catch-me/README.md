@@ -1,98 +1,152 @@
-# Can't Catch Me
+# Can't Catch Me — Freeze's playable demo
 
-A standalone Next.js + Three.js boat survival game that starts in the supplied Fort Ross terrain and continues along an endless generated river. Every new stretch brings two towers, two pursuing quadcopters and a scouting plane, with tougher drones each time. Stay within 65 metres of either drone with a clear line of sight for two uninterrupted seconds and the run ends. Survival time is the score. There is no finish line or scripted capture deadline.
+Pilot a boat through Fort Ross and an endless generated river while two quadcopters, a scouting plane and two towers share sightings and search for you. Survive as long as possible, break their view and collect speed boosts. The game is a standalone Next.js + Three.js application included in Freeze's final release on `main`.
 
-## Play locally
+The game runs its own deterministic simulation in the browser. It does not control the ArcticSim fleet. Its optional learning service replays opening-stretch attempts to evaluate tower placement and aircraft search policies; the Freeze dashboard shows those results separately from simulator telemetry.
 
-Requires Node.js 18.17+.
+## Run locally
+
+From the repository root, with Node.js 18.17 or newer and npm installed:
 
 ```sh
+cd cant-catch-me
 npm ci
 npm run dev
 ```
 
-Open http://localhost:3100. The existing Next.js server also records anonymous opening-stretch attempts and learns tower positions and aircraft flight policies; no separate simulator or model service is needed to play. Sentry configuration is required for the recording-to-model pipeline described below. The first visit downloads approximately 2 MB of local world and model data, plus the game code and fonts. If the learning service is unavailable, the game remains playable with its original tower sites and default coordinated surveillance policy.
+Open [localhost:3100](http://localhost:3100). No simulator, database, API key or separate model service is required to play. World data, models and fonts are bundled in `public/`. The repository's Docker Compose stack does not start this game; run it separately.
 
-## Play with your HTN badge
+For a production server:
 
-Choose **Connect a badge** on the start screen or in the pause menu. The live button check lights up as you press the badge controls. Up accelerates, Down brakes, Left/Right steer, Start starts/pauses/resumes, A changes camera, and B looks back. Keyboard and touch controls remain available. Losing the connection pauses an active run and releases held controls; release and press buttons again after resuming.
+```sh
+npm run build
+npm start
+```
 
-- **HTN OS · Wi-Fi:** For badges already running the firmware from [solana-htn.com/badge](https://solana-htn.com/badge), join Wi-Fi, enter the home screen's five-character HTN-ID and the app key from **Settings → App key**, then connect. The game displays instructions on the badge to enter canvas mode and receives live button events through the [documented app WebSocket](https://solana-htn.com/badge/docs#app-websocket). Hold Home to leave controller mode. The key is kept only in this tab and sent directly to the badge service; it is not saved to local storage or sent to the game's server. This connection depends on the public badge service being available.
-- **Lua script · USB:** Keep the original badge firmware, use a USB data cable, and run **Game Controller** from the linked `game-script` branch. Disconnect the badge editor's serial monitor before choosing the badge in the game's USB picker. Desktop Chrome/Edge and HTTPS or localhost are required. The original script's Up/Left/Right/Start events work unchanged; press and release a control to initialize the button check. Download the extended script from the menu (also at `public/badge/boat_game.lua`) for Down/A/B and periodic button snapshots. The read-only USB connection opens at 115200 baud and handles the script's log messages; actual hardware validation is still needed.
+The game remains playable when learning or Sentry is unavailable, using its supplied tower layout and default flight policy.
 
-These are two different firmware paths. Installing HTN OS replaces the original Lua firmware; the game itself does not flash anything. Automated fake-device tests cover transport events, connection failures, input merging, held-button recovery and cleanup. A physical badge was not available during implementation.
+## Controls and survival rules
 
-## Learning from players
+| Action | Keyboard | Badge |
+| --- | --- | --- |
+| Accelerate | W / Up arrow | Up |
+| Brake | S / Down arrow | Down |
+| Steer | A / D or Left / Right arrows | Left / Right |
+| Start or retry | Enter / Space on the start or capture screen | Start |
+| Pause or resume | Escape / P | Start |
+| Switch helm/chase camera | C | A |
+| Look back | Hold Space while playing | Hold B |
 
-The opening Fort Ross stretch shares a versioned mission layout across players using the same game server. Before each run, the server pins tower positions, `algorithm: coordinated-surveillance-v1`, and a bounded `flightPolicy`; the client records its original pickup seed and control changes at simulation-tick boundaries. A capture or crossing the first map boundary completes the opening attempt; the endless game continues normally after crossing. Pauses add no active time. Quitting or exceeding five active minutes ends recording as an abandoned attempt, without ending the game. Abandoned attempts never train the optimizer.
+Touch steering and throttle buttons appear during play. The curved-arrow button toggles the rear view. The pause menu includes camera sway settings; reduced-motion preferences also disable camera effects. Losing window focus pauses the run, and personal bests are saved locally when browser storage is available.
 
-Completed uploads are replayed through `lib/game.ts` to verify the actual drone capture or escape. After eight verified completed attempts have been uploaded to and imported from Sentry, the server evaluates flight-only, tower-only and joint candidates against up to 24 recent attempts. Candidate selection uses the training group; at least four other attempts validate only the selected proposal. The six flight parameters are sweep spacing (200–1600 m), route phase (0–1), quad search radius (250–2200 m), observation prediction horizon (0–40 s), forward support offset (100–1000 m), and reacquisition width (50–700 m). Tower headings, sweeps, sensing ranges, aircraft speed/turn limits, boosts and capture rules stay fixed. Tower elevation follows the terrain at its new site.
+- **Capture:** one drone must remain within 65 metres with clear terrain line of sight for two uninterrupted active real seconds. Each drone maintains its own lock; partial locks do not transfer. The plane spots you but cannot capture you.
+- **Detection:** towers use viewing sectors; aircraft spot within a 65-metre downward-looking footprint. They share observed positions and estimated velocity. Losing contact triggers searches around the last observation, without using hidden boat movement.
+- **Movement:** thrust, drag and steering build momentum. Braking stops the boat without reversing; steering works while stopped. Heading is limited to 75° either side of the initial downriver course. Shoreline collisions slow or stop the boat instead of ending the run.
+- **Boosts:** orange pickups provide four active real seconds of extra thrust and a 1.65× speed limit. Pausing freezes the timer. Each retry gets a fresh pickup seed.
+- **Endless patrols:** leaving the first map starts a new patrol; subsequent patrols arrive every 6,500 metres of downriver progress. Each replaces the previous two towers, two drones and plane, clears old locks, and gives three active real seconds of grace. Drone speed and acceleration increase gradually, capped at 30% and 20% above base values.
 
-Two quadcopters search separate nearby water routes; the plane sweeps complementary water beyond their search areas and tower proximity. A real game sensor sighting creates the shared position estimate, and subsequent sightings estimate velocity. One quad follows the estimate while the second supports ahead. The plane keeps making observation passes while the lead quad provides close pursuit; a quad sighting does not make the plane abandon its own surveillance. Lost contact produces bounded, complementary searches around the last observation and its predicted motion; hidden ship position/velocity never steers these searches. Routes reset on the next river section using the same pinned policy. This game retains its 65 m downward spotting rule and 200 m default search spacing; ArcticSim uses the same policy vocabulary with defaults appropriate to its forward cameras. Neither game sensing nor this flight training is trained image recognition.
+Movement and sensing run at 2× simulation pace. Survival score, boost duration and capture time use active real seconds. The radar centers on the boat: orange D1/D2 are drones, cyan P1 is the plane, and sectors show tower coverage. An amber T1/T2 warning appears only while a tower actually sees you.
 
-Promotion requires a shorter capped capture-time score without a lower capture rate on both the evaluation set and its validation group. Uncaught replays receive a 300-second penalty, so missing a ship cannot improve the score. When a recording ended at capture, an alternative layout that has not captured it by that point is labeled **censored**, not a successful escape. A candidate must retain at least one recorded validation escape, stay at or below 80% validation captures, and cause no new or earlier capture under 12 active seconds (an unchanged early capture by the existing aircraft is allowed). Towers must stand on land, keep their range outside the 250-metre starting area, remain at least 350 metres apart, and stay inside the opening map. These are conservative sample-based guards, not a guarantee for every player.
+## Connect a Hack the North badge
 
-The optimizer changes tower positions and flight policies only for **future runs**. Active attempts keep their pinned mission policy, including after a server restart. More attempts supply new evidence; no improvement is fabricated when no candidate passes. Replayed controls cannot predict how a human would react to a different surveillance strategy, so the dashboard keeps observed player results separate from replay estimates. This is a numerical strategy optimizer, not a trained neural network. Held-out rounds also report detection rate/time, fresh visual-contact fraction, longest contact gap and total aircraft distance. A never-detected attempt reports its full duration as the gap; otherwise the gap measures losses after first detection. These diagnostics accompany the unchanged capture and escape promotion guards.
+Choose **Connect a badge** on the start screen or pause menu, then use the live button check. Keyboard and touch remain available. A lost badge connection releases held controls and pauses an active run. Release and press controls again after reconnecting or resuming.
 
-The Overwatch dashboard has a separate **Game** tab with outcome and capture-rate graphs, placement evaluation history, and a 2D opening-stretch preview driven by the game's actual ship, tower and aircraft telemetry. It explicitly labels paused, stale and completed attempts. The recordings table shows Sentry replay links and pending/uploaded/imported/error states. Game telemetry is separate from operational ArcticSim telemetry.
+### HTN OS over Wi-Fi
 
-### Sentry recordings → model
+This path is for badges running [HTN OS](https://solana-htn.com/badge).
 
-Create the read token under [Sentry Personal Tokens](https://sentry.io/settings/account/api/auth-tokens/), choose `project:read`, and save it only as `SENTRY_API_TOKEN` in `.env.local`. The DSN uploads data; this separate token reads it back.
+1. Connect the badge to Wi-Fi.
+2. Enter the five-character **HTN-ID** from its home screen and the app key from **Settings → App key**.
+3. Connect and check that button presses light up in the game.
 
-This integration reuses the Sentry setup and manual canvas capture pattern from GitHub branch `sentra-change` (`ca5cacf`). Copy `.env.example` to `.env.local`, set the server/browser DSNs for the same project, and add a **server-only `SENTRY_API_TOKEN` with `project:read`**. The project must allow event attachments. Organization and project IDs are derived from the DSN; optional `SENTRY_ORG` and `SENTRY_PROJECT` overrides accept IDs or slugs. Use the matching regional API origin. Replay links resolve from project metadata after read access is available. Changing the DSN destination resets import eligibility and queues structured records for that project; old visual replay associations are cleared. Never use `NEXT_PUBLIC_` for the API token. Restart after environment changes; rebuild production bundles after browser DSN changes.
+The browser connects directly to the badge service, displays controller instructions and enters canvas mode. Hold Home on the badge to leave that mode. The app key stays in this tab and is sent to the badge service; the game does not save it to local storage or send it to its server. This mode depends on the public badge service and a working network connection.
 
-Starting a game explicitly starts Sentry Replay. Only the game canvas is captured, at up to two frames per second and 960×540, immediately after rendering; text and inputs remain masked. A Sentry replay can span several attempts, linked by attempt breadcrumbs and each saved attempt's replay ID. Upload and attachment import are independent of canvas playback. Historical attempts can backfill their structured data but cannot acquire past visual replays.
+### Original Lua firmware over USB
 
-After local physics verification, a durable outbox uploads a Sentry event with `cant-catch-me-opening-v1.json`: original seed, tower layout, flight algorithm/policy, compressed controls, tick count, outcome and game/world versions. Session tokens, credentials and player identities are excluded. The server retrieves that attachment through Sentry's API, checks its version and exact content hash, and feeds the downloaded data into the existing strategy optimizer. Duplicate imports do not add attempts. Failed uploads/imports retry with bounded backoff, and restarts resume the outbox.
+1. Use a USB data cable and open the [badge editor](https://badge.hackthenorth.com).
+2. Install and run the bundled [Game Controller script](public/badge/boat_game.lua), also downloadable from the game's badge menu.
+3. Disconnect the editor's serial monitor so the game can open the port.
+4. Choose **Lua script · USB**, select the badge and test its buttons.
 
-With only DSNs, recordings upload but the model waits for read access. Without Sentry configuration, gameplay and local attempt storage still work, but **no new model training occurs**. Successful upload is not claimed as successful import. Existing tower layouts remain usable while waiting. The dashboard's historical replay-comparison rounds remain preserved; only newly imported records qualify for subsequent learning.
+USB requires desktop Chrome or Edge on HTTPS or localhost. The game reads script log events at 115200 baud. The original `game-script` controller supports Up, Left, Right and Start; the bundled version adds Down/A/B and periodic state snapshots for held-button recovery.
 
-The game API lives at `/api/learning/{start,live,finish,dashboard,layout,replay}`. Attempt tokens authorize updates; finish delivery is idempotent and transient upload failures are retried. Versioned layouts, input recordings and results persist in `.game-learning/`, excluded from Git. The `opening-observation-shadowing-v4` upgrade preserves v1/v2/v3 attempts, recordings, tower positions, pinned flight policies, Sentry hashes and evaluation history; only new current-rule runs train the flight-and-tower model. Older replays use their original camera and flight mechanics, and already-started older runs can still finish. Refresh the game before starting a new run after the update. Set `GAME_LEARNING_DIR` to an absolute durable directory when deploying or validating. Run one game server process per data directory; this filesystem archive is intended for the shared local/demo server, not multi-instance hosting. The directory contains the learning history. The game records no player names or accounts.
+These paths use different firmware. Installing HTN OS replaces the original Lua firmware; connecting through this game does not flash the badge. Automated fake-device tests cover both transports and connection recovery. Physical badge validation remains outstanding.
 
-The v4 plane plans feasible observation passes from the last camera report and its measured velocity. Every simulated second it evaluates 17 seconds of bounded turns, rewarding time inside the unchanged 65-metre downward spotting footprint. It keeps supporting the observed boat after a quad takes over close pursuit. The plane still flies at 100 metres/second with a 0.43 radian/second turn limit, so it cannot hover or promise uninterrupted contact with a slower boat. Prediction stops at the learned lookahead limit; reports expire after 45 simulation seconds and the aircraft resumes its map-defined search. Hidden vessel movement never enters flight planning. Replay diagnostics now include the plane's own visual-contact fraction, independently of tower/quad sightings. A 120-second deterministic straight-course fixture at a 60-metre/second observed boat speed improves plane-visible time from 9.85 to 19.45 seconds and reduces the longest gap from 33.25 to 17.5 seconds; this is a regression fixture, not a measured general detection rate.
+## Opening-stretch learning
 
-In the dashboard frontend, `GAME_SERVICE_URL` points to the game server (default `http://127.0.0.1:3100`) and `NEXT_PUBLIC_GAME_URL` sets the player-facing link (default `http://localhost:3100`). Both are origins, not API paths. When serving remote players, configure URLs reachable from the dashboard server and each player's browser respectively. Restart the frontend after changing them.
+Each run pins its tower layout, `coordinated-surveillance-v1` algorithm and six bounded flight settings. The client records the initial pickup seed and control changes at simulation ticks. Capture or crossing the first map boundary completes an opening attempt. Crossing continues the endless game normally. Quitting or reaching five active minutes abandons the recording; abandoned attempts do not train the optimizer.
 
-- **W / ↑**: accelerate
-- **S / ↓**: brake (never reverse)
-- **A / D or ← / →**: steer (also while stopped)
-- **Escape / P**: pause and resume
-- **C**: switch between the close helm view and chase camera
-- **Hold Space**: look back (or tap the curved-arrow button to toggle looking back)
-- **Touch**: use the four on-screen controls
+The server verifies completed attempts by replaying the same game engine. Eligible recordings then follow this pipeline:
 
-Movement uses arcade boat physics: engine thrust builds momentum against linear and quadratic water resistance, the rudder and yaw respond gradually, and turns lose speed while allowing a little sideways slip. Braking brings the boat to a stop without reversing. Steering is limited to 75° either side of the initial downriver course, preventing U-turns and backward progress. You can steer while stopped to clear a shoreline.
+```text
+Completed attempt → deterministic verification → Sentry attachment upload
+                  → attachment readback and content-hash check
+                  → candidate evaluation → validation → future-run policy
+```
 
-The default view sits just above and beside the bridge so the bow and nearby water remain visible. Both cameras follow the same interpolated hull position, avoiding a jittering boat against a separately smoothed camera. Four water samples around the hull drive damped buoyancy, pitch and roll, alongside its response to acceleration and turning. Broad swells, filtered small ripples, soft sky reflections and a continuous foam trail animate the water. Each drone casts a silhouette on the water. Turn gentle camera sway off in the pause menu; the device's reduced-motion preference also disables these camera effects.
+After at least eight current-rule completed attempts have been imported from Sentry, the optimizer can evaluate flight-only, tower-only and joint candidates against up to 24 recent attempts. Training selects a proposal; at least four separate attempts validate it. The settings cover sweep spacing, route phase, quad search radius, prediction horizon, support offset and reacquisition width. Camera geometry, aircraft speed and turn limits, boosts and capture rules stay fixed.
 
-The game automatically pauses when its window loses focus. Personal bests are saved in this browser when local storage is available. A small amber warning names T1, T2, or both only while those towers actually see the boat; it leaves steering available and disappears when tower contact breaks. Any live tower, drone or plane sighting makes the drones accelerate harder. Searching a last-known position alone does not trigger that faster pursuit.
+Promotion requires improved capped capture time without reduced capture rate on both the full evaluation set and validation group. Uncaught replays receive a 300-second penalty. The candidate must preserve at least one recorded validation escape, stay at or below 80% validation captures and introduce no new or earlier capture below 12 active seconds. Tower placement also enforces land, starting-area protection and separation constraints. A recording that ended at capture cannot establish a later escape: such alternative outcomes are marked censored.
 
-The radar stays centered on the boat as the terrain moves beneath it. Sectors indicate tower coverage; orange D1/D2 marks the drones, cyan P1 is the scout plane, and the white arrow is your boat. Shoreline contact sheds momentum or stops the boat without ending the run; brake and steer back toward the channel. The old map edge flows into connected terrain without teleporting the boat or interrupting play.
+Only future runs receive a promoted policy. Active runs keep their pinned policy, including across a server restart. Historical rule versions and recordings remain preserved; only eligible current-version attempts train new rounds. Replayed controls cannot predict a player's reaction to a different policy, so observed player outcomes and replay estimates remain separate.
 
-Collect an orange boost pickup for **four active real seconds** of increased thrust and a **1.65× top-speed limit** (99 simulation metres/second). Speed builds with momentum, and excess speed decays through water resistance when the boost ends. Pickups appear at random navigable positions ahead, with the first placed close to the starting course. Braking still works, pausing freezes the boost timer, and no more than four pickups remain active. Each new browser session and retry after capture uses a fresh pickup seed.
+This is numerical strategy optimization, not image-recognition training or a trained neural network. These are implemented pipeline and validation rules, not evidence of a successful live promotion. At the final-release evidence check, no eligible current-version Sentry imports or promoted game strategy were established. The supplied strategy remains the baseline until actual imported attempts pass the gates.
 
-The first stretch begins with the original two saved tower sites, then uses learned layouts when validation supports a change. Crossing the original square's boundary downriver starts the next patrol; later patrols arrive every 6,500 metres of progress along the initial downriver direction. Each transition replaces the existing patrol with two towers on the generated riverbanks, two drones and the scout plane. The fleet stays bounded at those counts. Old sightings and drone locks clear, and the new patrol receives a short grace period. Drone speeds rise by 3% of their base values per loop, capped at 30%; acceleration rises by 2% per loop, capped at 20%. The stretch counter and a brief new-patrol notice mark progress while the boat, river and score continue.
+## Configure Sentry and persistence
 
-## Build and verify
+Copy `.env.example` to `.env.local` in this directory and configure:
+
+| Setting | Purpose |
+| --- | --- |
+| `SENTRY_DSN` | Server event and structured-record upload destination |
+| `NEXT_PUBLIC_SENTRY_DSN` | Browser errors and game-canvas Replay; use the same project |
+| `SENTRY_API_TOKEN` | Server-only token with `project:read`, used to retrieve attachments |
+| `SENTRY_API_BASE` | Matching Sentry API origin, such as `https://us.sentry.io` |
+| `SENTRY_ORG`, `SENTRY_PROJECT` | Optional IDs or slugs when DSN-derived values need overriding |
+| `GAME_LEARNING_DIR` | Optional absolute path for a durable learning archive |
+
+Create the read token in [Sentry Personal Tokens](https://sentry.io/settings/account/api/auth-tokens/) and enable event attachments for the project. Never prefix the token with `NEXT_PUBLIC_` or commit `.env.local`. Restart after environment changes; rebuild production bundles after changing browser settings. Optional source-map uploads use a separate `SENTRY_AUTH_TOKEN` plus organization/project settings; the read token does not authorize build uploads.
+
+Starting an attempt explicitly starts Replay. Manual snapshots capture only the game canvas, at up to two frames per second and 960×540; text and inputs are masked. A replay may span multiple attempts, linked by attempt breadcrumbs. Visual Replay and structured attachment import are independent. Historical attempts can backfill structured data, but cannot gain past visual footage.
+
+The durable outbox uploads `cant-catch-me-opening-v1.json` with rules/world versions, pinned policy, seed, controls, ticks and outcome. It excludes player identities, credentials and session tokens. Readback checks the version and exact content hash; duplicate imports do not count twice. Upload/import failures retry with bounded backoff and resume after restart. Changing the Sentry destination resets import eligibility and queues records for the new destination.
+
+With DSNs alone, records can upload but training waits for read access. Without Sentry, local recording and gameplay still work, but new attempts do not train the model. An uploaded record is not necessarily an imported record; inspect the dashboard's pending/uploaded/imported/error states.
+
+Layouts, attempts and evaluation history live in the Git-ignored `.game-learning/` directory by default. Preserve that directory between deployments or set `GAME_LEARNING_DIR` to durable storage. Run **one game server process per data directory**; this filesystem archive is intended for a shared demo server, not multi-instance deployment.
+
+## Connect the Freeze dashboard
+
+Run the dashboard from [`../frontend`](../frontend/) using the [project setup instructions](../README.md), then open its **Game** tab. It presents attempt outcomes, capture-rate graphs, policy evaluations, recording status and a 2D view based on game telemetry. Paused, stale and completed attempts are labeled.
+
+Set these variables in the dashboard's environment, then restart it:
+
+- `GAME_SERVICE_URL`: origin reachable by the dashboard server; native default `http://127.0.0.1:3100`, Docker Compose default `http://host.docker.internal:3100`.
+- `NEXT_PUBLIC_GAME_URL`: origin reachable by the player's browser; default `http://localhost:3100`.
+
+Use origins, not API paths. Remote players need a browser-reachable game URL. The game's endpoints are `/api/learning/{start,live,finish,dashboard,layout,replay}`. Per-attempt tokens authorize updates, and finishing an attempt is idempotent.
+
+## Verify and navigate the code
+
+From `cant-catch-me/`:
 
 ```sh
 npm test
 npm run typecheck
 npm run build
-npm start
 ```
 
-The deterministic engine tests cover thrust and drag, steering inertia, momentum and shoreline collision, sensor occlusion, detection-driven pursuit, hidden-target searching, independent uninterrupted tagging, pause and reset, fixed-step timing, seeded boosts, terrain continuity, patrol replacement and capped difficulty. Actual Fort Ross terrain is included in the continuous-travel and patrol-transition checks.
+Tests cover deterministic boat physics, terrain and collision, capture timing, coordinated surveillance, observation-only search, seeded boosts, patrol transitions, learning verification and migration, promotion guards, Sentry privacy/import behavior, and badge transports/input recovery. Automated checks do not establish physical badge compatibility, live Sentry availability or real-world aircraft performance.
 
-## Sources and game rules
+| Path | Responsibility |
+| --- | --- |
+| `lib/game.ts`, `lib/surveillance.ts` | Deterministic rules, terrain, boat physics and aircraft coordination |
+| `lib/learning*.ts`, `pages/api/learning/` | Attempt archive, replay evaluation, Sentry synchronization and API |
+| `components/Game.tsx` | Menus, input, lifecycle and run seeds |
+| `components/Scene.tsx`, `components/Ocean.tsx` | Terrain, models, cameras, water and wake |
+| `components/Radar.tsx`, `components/TowerWarning.tsx` | Live situational displays |
+| `components/BadgePanel.tsx`, `hooks/useBadgeController.ts`, `lib/badge*.ts` | Badge setup, transports and input merging |
+| `public/badge/boat_game.lua` | Extended USB controller script |
+| `public/assets/`, `scripts/prepare_assets.py` | Bundled assets and optional regeneration |
 
-See [ASSET_SOURCES.md](ASSET_SOURCES.md) for the exact branch revision, supplied model attributions, terrain conversion, coordinate conventions, and tower sites. The supplied interior geography and tower sites are retained. The outer 500 metres of the original square blend smoothly into generated river terrain so the old boundary becomes a navigable connection. The extension is game terrain, not surveyed Fort Ross geography. The two tower positions are the selected pair from the existing placement experiment, rather than a claim of globally optimal placement.
-
-Gameplay runs locally in the browser and does not control or connect to the surveillance simulator. Boat physics, speeds and visible vehicle sizes are tuned for arcade play. All aircraft follow shared observations and search last-known locations; hidden boat movement cannot guide them. At base difficulty the drone's detected pursuit ceiling is 96 simulation metres/second, with lower patrol and search speeds, versus the boat's normal 60 and boosted limit of 99. Drones slow on approach to the boat. Detection raises their acceleration from 19 to 30 simulation metres/second² before loop difficulty is applied. The plane flies repeated surveillance passes at 100 and cannot tag. Towers retain the source PDF's 60° horizontal view. Earlier aircraft recordings used 114.6° quadcopter and 69° plane views. New aircraft spotting uses a downward-looking, 65-metre horizontal radius with terrain line of sight, independent of aircraft heading. Aircraft follow terrain-defined patrol routes until a tower or overhead aircraft sees the boat; losing sight starts a bounded search predicted from the last observed position and velocity. Earlier recordings preserve the original heading-based aircraft camera rules. The source quadcopter's independent gimbal and vertical camera angles are not simulated.
-
-Movement, radar sweeps and search run at **2× pace**. Survival score and boost duration measure real active seconds. Capture takes **two uninterrupted real seconds** inside the same 65-metre radius with clear line of sight, tracked separately for each drone; partial locks cannot transfer between them. Each new patrol clears prior locks and sightings, then begins observing after six simulation seconds (three active real seconds). Selected first-stretch tower positions, sensor ranges, line of sight and shoreline collision remain in effect. The overhead spotting radius, pursuit speeds, two-drone fleet, tagging rule, boosts and repeating patrols are game adaptations; the PDF does not specify those values. The overhead-only rule set uses the separate local-storage record `cant-catch-me-best-overhead-spotting-v2`, leaving earlier records intact. Retry restores the starting terrain, original fleet, initial difficulty, boat momentum and score with a fresh pickup layout.
-
-Terrain generation uses global coordinates, so neighbouring regions share a continuous surface. Rendering keeps only a **3×3 neighbourhood** of 6,500-metre terrain tiles around the boat and disposes of tiles left behind. The deterministic terrain function is shared by rendering, navigation, collision and the radar. The radar caches an oversized terrain image at 250-metre intervals while keeping the boat continuously centered. Only the pickup seed varies between browser runs; `createGame(world, seed)` permits reproducible engine tests.
-
-`lib/game.ts` owns the deterministic game rules, boat physics, patrol transitions, continuous terrain sampler and seeded pickups. `components/Scene.tsx` renders the terrain neighbourhood, hull buoyancy, supplied fleet geometry, pickups and synchronized cameras; `components/Ocean.tsx` owns the sea and foam wake. `components/Game.tsx` owns menus, input and new-run seeds; `components/TowerWarning.tsx` presents live tower contacts, and `components/Radar.tsx` renders the boat-centered geographic minimap.
+Read [ASSET_SOURCES.md](ASSET_SOURCES.md) for source revisions, attributions, coordinate conventions and regeneration inputs. The opening terrain derives from supplied Fort Ross data; its outer border blends into generated game terrain. Later river sections are not surveyed geography. Arcade physics, downward spotting, the extra drone, tagging and boosts are game adaptations, not ArcticSim sensor specifications. See the [project README](../README.md) for the rest of Freeze.

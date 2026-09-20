@@ -77,7 +77,7 @@ Detection requires repeated consistent observations and an estimate within 150 m
 
 ### Software verification
 
-On September 20, **484 automated tests passed with zero failures or skips** at revision `6422823`: **261 backend, 118 dashboard, and 105 game tests**. Dashboard and game TypeScript checks also passed. Tests cover observation freshness and rejection, tracking and handoffs, replay consistency, game verification and promotion safeguards, and map-boundary coverage counting. The latest coverage fix prevents positions just outside the map from being counted inside its boundary.
+For the final `main` release on September 20, **492 automated tests passed with zero failures or skips**: **261 backend, 126 dashboard, and 105 game tests**. Dashboard and game TypeScript checks also passed. Tests cover observation freshness and rejection, tracking and handoffs, replay consistency, game verification and promotion safeguards, map-boundary coverage counting, and fleet-label layout. Both production builds completed and served their main pages. The dashboard's Windows dependency-junction warning leaves standalone deployment packaging unverified. [Release validation evidence](docs/release-validation.json).
 
 These checks support software reliability; they do not establish camera recognition accuracy, successful Sentry cloud delivery, or official live competition scores. Test coverage and observed arena coverage measure different things.
 
@@ -98,7 +98,7 @@ Python, TypeScript, Next.js, React, Three.js, React Three Fiber, Tailwind CSS, F
 
 ## Try it out
 
-[Current implementation](https://github.com/Yd025/HTNV1/tree/codex/simulation-tracking) · [Frozen release 0.2](https://github.com/Yd025/HTNV1/tree/release/0.2)
+[Final release on main](https://github.com/Yd025/HTNV1/tree/main) · [Frozen release 0.2](https://github.com/Yd025/HTNV1/tree/release/0.2)
 
 ## Gallery captions
 

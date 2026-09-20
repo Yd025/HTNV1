@@ -1,0 +1,89 @@
+{
+  "date": "2026-09-20",
+  "branch": "main",
+  "baseRevision": "ad277f8fa0528c21843915fc496479a83322aa4b",
+  "additionalSourceSha256": {
+    "frontend/components/TacticalScene.tsx": "1281b01ac9ffa95b7e815341d0df0184d53efdfb0ac9332feb7fc42d9cf1781a",
+    "frontend/lib/sceneLabels.ts": "1a666e4b9be17a1fef3405ffe2d3935774a7fe66c6136c30c634b79c61fc5f9f",
+    "frontend/tests/sceneLabels.test.cjs": "12e10b3e927b6716401bf347da4d5f7f663f48d457aece941edee0e5c7e1a436"
+  },
+  "tests": {
+    "backend": {
+      "passed": 261,
+      "failed": 0,
+      "skipped": 0
+    },
+    "dashboard": {
+      "passed": 126,
+      "failed": 0,
+      "skipped": 0
+    },
+    "game": {
+      "passed": 105,
+      "failed": 0,
+      "skipped": 0
+    },
+    "totalPassed": 492
+  },
+  "typechecks": {
+    "dashboard": "passed",
+    "game": "passed"
+  },
+  "productionBuilds": {
+    "dashboard": {
+      "exitCode": 0,
+      "standalonePackageValidated": false,
+      "warning": "Windows dependency junction prevented standalone node_modules symlink copying. Standard next start served successfully."
+    },
+    "game": {
+      "exitCode": 0
+    }
+  },
+  "httpSmokeChecks": [
+    {
+      "app": "frontend",
+      "path": "/",
+      "status": 200,
+      "bytes": 10978
+    },
+    {
+      "app": "frontend",
+      "path": "/backend",
+      "status": 200,
+      "bytes": 17925
+    },
+    {
+      "app": "frontend",
+      "path": "/experiments/release-comparison.json",
+      "status": 200,
+      "bytes": 786579
+    },
+    {
+      "app": "cant-catch-me",
+      "path": "/",
+      "status": 200,
+      "bytes": 3890
+    },
+    {
+      "app": "cant-catch-me",
+      "path": "/badge/boat_game.lua",
+      "status": 200,
+      "bytes": 2119
+    }
+  ],
+  "benchmarkEvidence": {
+    "sourceHashesMatch": true,
+    "candidateModelHashMatchesComparison": true,
+    "savedPerMissionMetricsRecomputed": true
+  },
+  "commands": {
+    "backend": "python -B -m unittest discover -s tests -v (cwd backend, ADAPTER=local, FORCE_KINEMATIC=1, DATABASE_ENABLED=1 for mocked database lifecycle tests)",
+    "dashboard": "node --test tests/*.test.cjs; node node_modules/typescript/bin/tsc --noEmit; npm run build (cwd frontend, TELEMETRY_TEST_PYTHON set)",
+    "game": "npm test; npm run typecheck; npm run build (cwd cant-catch-me)"
+  },
+  "limitations": [
+    "Synthetic mission evidence is not live camera accuracy or official competition scoring.",
+    "Live ArcticSim fleet behavior, physical badge use, and Sentry cloud import/promotion were not validated in this release check.",
+    "Dashboard standalone deployment packaging was not validated on this Windows checkout."
+  ]
+}
