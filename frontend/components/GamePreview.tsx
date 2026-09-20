@@ -1,46 +1,161 @@
-import { useEffect, useMemo, useRef } from "react";
-import type { GameDashboard, LiveFrame, PathSample } from "../lib/gameLearningTypes";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AttemptReplay, AttemptSummary, GameDashboard, LiveFrame, PathSample } from "../lib/gameLearningTypes";
+import { advancePlayback, frameIndexAtTime } from "../lib/gamePlayback";
 import styles from "./GameLearning.module.css";
 
 const seconds = (value: number) => `${value.toFixed(1)} s`;
 const percent = (value: number) => `${Math.round(value * 100)}%`;
-const outcomeName = { caught: "Captured", escaped: "Escaped", abandoned: "Abandoned" };
-const ingestionName = { pending: "Waiting to upload", uploaded: "In Sentry · awaiting import", imported: "Available to model", error: "Needs attention" };
-
-function sentryUrl(value: string | undefined) {
-  if (!value) return undefined;
-  try { const url = new URL(value); return url.protocol === "https:" && (url.hostname === "sentry.io" || url.hostname.endsWith(".sentry.io")) && !url.username && !url.password ? url.toString() : undefined; }
-  catch { return undefined; }
-}
+const outcomeName = { caught: "Captured", escaped: "Escaped", abandoned: "Left early" };
+const ingestionName = { pending: "Waiting to save", uploaded: "Saved in Sentry", imported: "Ready for learning", error: "Needs attention" };
 
 export default function Preview({ data, now, connectionStale }: { data: GameDashboard; now: number; connectionStale: boolean }) {
+  const attempts = data.attempts.map((attempt, i) => ({ ...attempt, number: data.totals.attempts - data.attempts.length + i + 1 })).reverse();
+  const [chosenRun, setChosenRun] = useState<(AttemptSummary & { number: number }) | null>(() => attempts.find(attempt => attempt.replayAvailable) ?? null);
+  const selection = chosenRun?.id ?? "live";
+  const player = useRef<HTMLDivElement>(null);
+  const selected = attempts.find(attempt => attempt.id === selection) ?? chosenRun;
+  const choose = (id: string) => setChosenRun(attempts.find(attempt => attempt.id === id) ?? (id === chosenRun?.id ? chosenRun : null));
+  const watch = (id: string) => {
+    choose(id);
+    player.current?.scrollIntoView({ block: "start", behavior: "auto" });
+  };
+  return <>
+    <div ref={player} className={styles.recordingPlayer}>
+      <div className={styles.previewHeader}>
+        <div><h3 id="game-preview-heading">Player recordings · 2D replay</h3><p>Watch a saved opening run from above, or follow the current player live.</p></div>
+        <label className={styles.attemptPicker}>Choose a run<select value={selection} onChange={event => choose(event.target.value)}>
+          {selected && !attempts.some(attempt => attempt.id === selected.id) && <option value={selected.id}>Run {selected.number} · {outcomeName[selected.outcome]} · {seconds(selected.seconds)}</option>}
+          {attempts.map(attempt => <option key={attempt.id} value={attempt.id} disabled={!attempt.replayAvailable}>Run {attempt.number} · {outcomeName[attempt.outcome]} · {seconds(attempt.seconds)}{!attempt.replayAvailable ? " · Unavailable" : ""}</option>)}
+          <option value="live">Live / next player</option>
+        </select></label>
+      </div>
+      {selection === "live" ? <LivePreview data={data} now={now} connectionStale={connectionStale} /> : <RecordedPreview key={selection} attemptId={selection} runNumber={selected?.number} data={data} />}
+      <MapLegend />
+    </div>
+    <section className={styles.sentryRecordings} aria-labelledby="game-recordings-heading">
+      <div className={styles.recordingsHeading}><div><h3 id="game-recordings-heading">Saved player runs</h3><p>Choose a run to play it on the map above.</p></div><span className={styles.status} data-stale={data.sentry?.status === "error"}>{!data.sentry ? "Checking connection" : data.sentry.status === "unconfigured" ? "Setup needed" : data.sentry.status === "syncing" ? "Saving runs" : data.sentry.status === "error" ? "Needs attention" : "Connected to Sentry"}</span></div>
+      {data.sentry && <dl className={styles.ingestionCounts}><div><dt>Waiting to sync</dt><dd>{data.sentry.pending}</dd></div><div><dt>Received from Sentry</dt><dd>{data.sentry.imported}</dd></div><div><dt>Needs attention</dt><dd>{data.sentry.failed}</dd></div></dl>}
+      {attempts.length ? <div className={styles.tableWrap}><table><caption>Latest {Math.min(10, attempts.length)} opening runs</caption><thead><tr><th>Run</th><th>Result</th><th>Game time</th><th>Learning data</th><th>2D replay</th></tr></thead><tbody>{attempts.slice(0, 10).map(attempt => {
+        const modelStatus = attempt.sentry?.state === "imported" && (!attempt.verified || attempt.outcome === "abandoned") ? "Saved · not used for learning" : attempt.sentry ? ingestionName[attempt.sentry.state] : "Waiting to save";
+        return <tr key={attempt.id} data-selected={selection === attempt.id}><th>{attempt.number}<small>Layout {attempt.layoutVersion}</small></th><td>{outcomeName[attempt.outcome]}</td><td>{seconds(attempt.seconds)}</td><td>{modelStatus}</td><td>{attempt.replayAvailable ? <button onClick={() => watch(attempt.id)} aria-label={`Watch run ${attempt.number}`} aria-pressed={selection === attempt.id}>{selection === attempt.id ? "Selected" : "Watch run"}</button> : <span className={styles.recordingUnavailable}>Unavailable</span>}</td></tr>;
+      })}</tbody></table></div> : <p className={styles.recordingEmpty}>Completed runs will appear here. Open the game to record the first one.</p>}
+      <p className={styles.note}>The 2D replay recreates each run from the player’s saved controls and original tower positions. The model learns from attempt data received from Sentry.</p>
+    </section>
+  </>;
+}
+
+function RecordedPreview({ attemptId, runNumber, data }: { attemptId: string; runNumber?: number; data: GameDashboard }) {
+  const [replay, setReplay] = useState<AttemptReplay | null>(null);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    let disposed = false;
+    const timeout = setTimeout(() => controller.abort(), 22000);
+    setReplay(null);
+    setError("");
+    void (async () => {
+      try {
+        const response = await fetch(`/api/game-learning?attemptId=${encodeURIComponent(attemptId)}`, { signal: controller.signal, cache: "no-store" });
+        const result: AttemptReplay = await response.json();
+        if (!response.ok || result.attempt?.id !== attemptId || !result.layout || !Array.isArray(result.frames) || !result.frames.length) throw new Error("Recording unavailable");
+        if (!disposed) setReplay(result);
+      } catch {
+        if (!disposed) setError("This run could not be loaded. Try again or choose another run.");
+      } finally { clearTimeout(timeout); }
+    })();
+    return () => { disposed = true; controller.abort(); clearTimeout(timeout); };
+  }, [attemptId, retry]);
+  if (!replay) return <div className={styles.recordingState} role={error ? "alert" : "status"}><p>{error || "Loading the saved run…"}</p>{error && <button onClick={() => setRetry(value => value + 1)}>Try again</button>}</div>;
+  return <ReplayPlayer replay={replay} runNumber={runNumber} data={data} />;
+}
+
+function ReplayPlayer({ replay, runNumber, data }: { replay: AttemptReplay; runNumber?: number; data: GameDashboard }) {
+  const [time, setTime] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [loop, setLoop] = useState(true);
+  const playhead = useRef(0);
+  const finishedAt = useRef<number | null>(null);
+  const duration = replay.frames[replay.frames.length - 1].time;
+  const seek = (value: number) => {
+    // Native range inputs can round the final fractional game tick slightly down.
+    const bounded = value >= duration - 0.000001 ? duration : Math.max(0, value);
+    finishedAt.current = null;
+    playhead.current = bounded;
+    setTime(bounded);
+  };
+  useEffect(() => {
+    if (!playing) return;
+    let animation = 0;
+    let previous: number | null = null;
+    const tick = (now: number) => {
+      const elapsed = previous == null ? 0 : (now - previous) / 1000;
+      previous = now;
+      const next = advancePlayback(playhead.current, elapsed * speed, duration, false);
+      playhead.current = next.time;
+      setTime(next.time);
+      if (next.ended) {
+        if (!loop) { setPlaying(false); return; }
+        // Keep the actual terminal frame visible before repeating the run.
+        if (finishedAt.current == null) finishedAt.current = now;
+        if (now - finishedAt.current >= 1000) {
+          playhead.current = 0;
+          finishedAt.current = null;
+          setTime(0);
+        }
+      } else finishedAt.current = null;
+      animation = requestAnimationFrame(tick);
+    };
+    const pauseWhenHidden = () => { if (document.hidden) setPlaying(false); };
+    document.addEventListener("visibilitychange", pauseWhenHidden);
+    animation = requestAnimationFrame(tick);
+    return () => { cancelAnimationFrame(animation); document.removeEventListener("visibilitychange", pauseWhenHidden); };
+  }, [playing, speed, duration, loop]);
+  const index = frameIndexAtTime(replay.frames, time);
+  const frame = replay.frames[index];
+  const path = useMemo(() => replay.frames.slice(0, index + 1).map(item => ({ t: item.time, x: item.boat.x, z: item.boat.z, detected: item.detected, tagProgress: item.tagProgress })), [replay.frames, index]);
+  const atEnd = time >= duration;
+  const toggle = () => {
+    if (!playing && atEnd) seek(0);
+    setPlaying(value => !value);
+  };
+  const replayData = { ...data, layout: replay.layout };
+  return <>
+    <div className={styles.playbackControls}>
+      <div className={styles.playbackActions}>
+        <button className={styles.primaryPlayback} onClick={toggle} disabled={duration <= 0} aria-label={playing ? "Pause replay" : "Play replay"}>{playing ? "Pause" : atEnd ? "Play again" : "Play"}</button>
+        <button onClick={() => { seek(0); setPlaying(false); }} aria-label="Restart replay">Restart</button>
+        <label className={styles.speedPicker}>Speed<select value={speed} onChange={event => setSpeed(Number(event.target.value))}><option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option></select></label>
+        <label className={styles.repeatPicker}><input type="checkbox" checked={loop} onChange={event => setLoop(event.target.checked)} />Repeat</label>
+        <span className={styles.status}>{atEnd ? playing && loop ? "Repeating shortly" : "End of recording" : playing ? "Playing recording" : time > 0 ? "Paused" : "Ready to play"}</span>
+      </div>
+      <div className={styles.playbackTimeline}><label htmlFor="game-replay-timeline" className={styles.srOnly}>Replay position</label><input id="game-replay-timeline" type="range" min={0} max={duration || 1} step="any" value={time} disabled={duration <= 0} aria-valuetext={`${seconds(time)} of ${seconds(duration)}`} onChange={event => seek(Number(event.target.value))} /><output htmlFor="game-replay-timeline" aria-live="off">{seconds(time)} / {seconds(duration)}</output></div>
+    </div>
+    <div className={styles.previewLayout}><GameMap data={replayData} frame={frame} path={path} /><aside className={styles.previewInfo}>
+      <h4>{runNumber == null ? "Saved opening run" : `Run ${runNumber}`} · {outcomeName[replay.attempt.outcome]}</h4><p>Replay of the player’s saved controls with the tower positions used in this run.</p>
+      <dl><div><dt>At this moment</dt><dd>{atEnd ? outcomeName[replay.attempt.outcome] : "Ship moving through the opening"}</dd></div><div><dt>Radar contact</dt><dd>{frame.detected ? "Detected" : "Clear"}</dd></div><div><dt>Capture progress</dt><dd>{percent(frame.tagProgress)}</dd></div><div><dt>Tower layout</dt><dd>{replay.layout.version}</dd></div><div><dt>First detected</dt><dd>{replay.attempt.firstDetectionSeconds == null ? "Not detected" : seconds(replay.attempt.firstDetectionSeconds)}</dd></div></dl>
+      <p className={styles.note}>Drag the timeline to inspect any moment. Time is measured on the game clock. Repeat plays this run again automatically.</p>
+    </aside></div>
+  </>;
+}
+
+function LivePreview({ data, now, connectionStale }: { data: GameDashboard; now: number; connectionStale: boolean }) {
   const live = data.live;
   const frame = live?.frame;
   const age = live ? Math.max(0, Math.floor((now - Date.parse(live.receivedAt)) / 1000)) : null;
   const ended = frame && ["caught", "escaped", "abandoned"].includes(frame.status);
   const stale = connectionStale || !!live?.stale || (age != null && age > 8);
-  const label = !live ? "Next layout" : ended ? "Last attempt" : stale ? "Stale preview" : frame?.status === "paused" ? "Paused" : "Live";
-  const attempts = data.attempts.map((attempt, i) => ({ ...attempt, number: data.totals.attempts - data.attempts.length + i + 1 })).slice(-10).reverse();
-  return <>
-    <section className={styles.sentryRecordings} aria-labelledby="game-recordings-heading">
-      <div className={styles.recordingsHeading}><div><h3 id="game-recordings-heading">Recordings &amp; model data</h3><p>Gameplay → Sentry → tower-placement model</p></div><span className={styles.status} data-stale={data.sentry?.status === "error"}>{!data.sentry ? "Checking connection" : data.sentry.status === "unconfigured" ? "Setup needed" : data.sentry.status === "syncing" ? "Syncing attempts" : data.sentry.status === "error" ? "Needs attention" : "Connected"}</span></div>
-      <p className={styles.note}>{data.sentry?.message ?? "Restart the updated game service to connect Sentry recordings and attempt data."}</p>
-      {data.sentry && <dl className={styles.ingestionCounts}><div><dt>Waiting for import</dt><dd>{data.sentry.pending}</dd></div><div><dt>Imported from Sentry</dt><dd>{data.sentry.imported}</dd></div><div><dt>Needs attention</dt><dd>{data.sentry.failed}</dd></div></dl>}
-      {attempts.length ? <div className={styles.tableWrap}><table><caption>Latest {attempts.length} opening runs · visual playback opens in Sentry</caption><thead><tr><th>Run</th><th>Outcome</th><th>Time</th><th>Model data</th><th>Recording</th></tr></thead><tbody>{attempts.map(attempt => {
-        const replay = sentryUrl(attempt.sentry?.replayUrl);
-        const modelStatus = attempt.sentry?.state === "imported" && (!attempt.verified || attempt.outcome === "abandoned") ? "Imported · excluded from learning" : attempt.sentry ? ingestionName[attempt.sentry.state] : "Waiting to upload";
-        return <tr key={attempt.id}><th>{attempt.number}<small>Layout {attempt.layoutVersion}</small></th><td>{outcomeName[attempt.outcome]}</td><td>{seconds(attempt.seconds)}</td><td>{modelStatus}{attempt.sentry?.error && <small>{attempt.sentry.error}</small>}</td><td>{replay ? <a href={replay} target="_blank" rel="noopener noreferrer" aria-label={`Open Sentry replay for run ${attempt.number}`}>Open replay <span aria-hidden="true">↗</span></a> : <span className={styles.recordingUnavailable}>{attempt.sentry?.replayId ? "Replay recorded · link pending" : "No Sentry replay"}</span>}</td></tr>;
-      })}</tbody></table></div> : <p className={styles.recordingEmpty}>Start a game to collect the first recording. Completed attempts will appear here with their Sentry replay link and import status.</p>}
-      <p className={styles.note}>The model learns from recorded controls, positions, and outcomes retrieved from Sentry. Visual replays let you inspect the gameplay. Earlier runs retain their attempt data, but cannot gain a Sentry visual recording retroactively.</p>
-    </section>
-    <div className={styles.previewHeader}><div><h3 id="game-preview-heading">Opening stretch · 2D game preview</h3><p>{live ? `Layout ${live.layoutVersion} · ${seconds(frame!.time)} elapsed${ended ? ` · ${outcomeName[frame!.status as keyof typeof outcomeName]}` : ""}` : `Layout ${data.layout.version} is ready for the next player.`}</p></div><span className={styles.status} data-stale={stale && !ended} data-live={label === "Live"}>{label}</span></div>
-    <div className={styles.previewLayout}><GameMap data={data} frame={frame} path={live?.path ?? []} /><aside className={styles.previewInfo}>
-      <h4>{live ? "Player’s opening run" : "Waiting for a player"}</h4><p>{!live ? "Open the game and start a run. Ship and aircraft positions will appear here as the player moves." : ended ? "The final frame and route are shown here. Use the recordings above to review gameplay in Sentry, or watch this view for the next live player." : stale ? "Position updates have stopped. This is the last received frame; it is not moving live." : frame?.status === "paused" ? "The player paused the game. The run clock and tower layout are held." : "Receiving ship, tower, drone, and plane positions from the game."}</p>
-      <dl><div><dt>Radar contact</dt><dd>{frame ? frame.detected ? "Detected" : "Clear" : "Awaiting play"}</dd></div><div><dt>Drone capture progress</dt><dd>{frame ? percent(frame.tagProgress) : "—"}</dd></div><div><dt>Last frame received</dt><dd>{age == null ? "—" : `${age} s ago`}</dd></div><div><dt>Protected start</dt><dd>{data.policy.spawnProtectionMetres} m tower-free</dd></div></dl>
-      <p className={styles.note}>Terrain comes from the game’s height map. Radar sectors show their 60° field of view; terrain can block visibility inside a sector.</p>
-    </aside></div>
-    <div className={styles.mapLegend}><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2L16 16 10 13 4 16Z" fill="#edc68a" /></svg>Ship &amp; route</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="none" stroke="#b6d4b2" strokeWidth="2" /></svg>Tower &amp; radar</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="#cad7ee" strokeWidth="2" /></svg>Drone</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1v17M2 10h16M6 17h8" stroke="#cad7ee" strokeWidth="2" /></svg>Plane</span><span>Dashed circle: protected start</span></div>
-  </>;
+  const label = !live ? "Waiting for a player" : ended ? "Run finished" : stale ? "Updates paused" : frame?.status === "paused" ? "Player paused" : "Live";
+  return <div className={styles.previewLayout}><GameMap data={data} frame={frame} path={live?.path ?? []} /><aside className={styles.previewInfo}>
+    <h4>{label}</h4><p>{!live ? "Start a game to see the player move through the opening." : ended ? "Choose a saved run above to replay it from the beginning." : stale ? "Showing the last received position while updates reconnect." : "Following the current player’s ship, towers, drones, and plane."}</p>
+    <dl><div><dt>Game time</dt><dd>{frame ? seconds(frame.time) : "—"}</dd></div><div><dt>Radar contact</dt><dd>{frame ? frame.detected ? "Detected" : "Clear" : "Awaiting play"}</dd></div><div><dt>Capture progress</dt><dd>{frame ? percent(frame.tagProgress) : "—"}</dd></div><div><dt>Last update</dt><dd>{age == null ? "—" : `${age} s ago`}</dd></div></dl>
+    <p className={styles.note}>New completed runs appear in the run picker. Saved playback stays on the run you choose.</p>
+  </aside></div>;
+}
+
+function MapLegend() {
+  return <div className={styles.mapLegend}><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2L16 16 10 13 4 16Z" fill="#edc68a" /></svg>Ship &amp; route</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="none" stroke="#b6d4b2" strokeWidth="2" /></svg>Tower &amp; radar</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="#cad7ee" strokeWidth="2" /></svg>Drone</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1v17M2 10h16M6 17h8" stroke="#cad7ee" strokeWidth="2" /></svg>Plane</span><span>Dashed circle: protected start</span></div>;
 }
 
 function GameMap({ data, frame, path }: { data: GameDashboard; frame?: LiveFrame; path: PathSample[] }) {

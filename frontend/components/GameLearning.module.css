@@ -83,7 +83,23 @@
 .sentryRecordings .note:last-child { margin-top: 18px; }
 .recordingUnavailable { color: var(--text-muted); }
 .game .recordingEmpty { margin: 24px 0; }
-.previewLayout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; }
+.previewLayout { display: grid; grid-template-columns: minmax(0, 720px) minmax(220px, 1fr); }
+.recordingPlayer { scroll-margin-top: 24px; }
+.attemptPicker, .speedPicker { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted); }
+.attemptPicker { flex-wrap: wrap; }
+.attemptPicker select, .speedPicker select { min-height: 42px; padding: 8px 12px; max-width: 100%; border: 1px solid var(--line-strong); border-radius: 4px; font: inherit; background: var(--surface-muted); color: var(--text); cursor: pointer; }
+.playbackControls { padding: 18px 26px; border-bottom: 1px solid var(--line); }
+.playbackActions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; }
+.game .primaryPlayback { min-width: 96px; color: var(--accent-contrast); background: var(--accent); border-color: var(--accent); }
+.game .primaryPlayback:hover { background: var(--accent); filter: brightness(1.15); }
+.game button:disabled { cursor: not-allowed; opacity: .5; }
+.repeatPicker { display: flex; align-items: center; gap: 8px; min-height: 42px; font-size: 12px; cursor: pointer; }
+.repeatPicker input { width: 17px; height: 17px; accent-color: var(--accent); }
+.playbackTimeline { display: flex; align-items: center; gap: 18px; margin-top: 13px; }
+.playbackTimeline input { min-width: 0; flex: 1; height: 26px; margin: 0; accent-color: var(--accent-text); cursor: pointer; }
+.playbackTimeline output { min-width: 115px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.recordingState { min-height: 280px; padding: 32px 26px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 18px; }
+.sentryRecordings tr[data-selected=true] { background: var(--accent-soft); }
 .map { position: relative; aspect-ratio: 1; background: #193142; min-width: 0; overflow: hidden; }
 .map canvas, .map > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .map canvas { image-rendering: auto; }
@@ -117,6 +133,12 @@
   .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 16px; }
   .summary dd { font-size: 21px; }
   .previewLayout { grid-template-columns: 1fr; }
+  .playbackControls { padding: 16px 18px; }
+  .attemptPicker { width: 100%; }
+  .attemptPicker select { width: 100%; }
+  .playbackActions { gap: 10px 12px; }
+  .playbackTimeline { gap: 10px; }
+  .playbackTimeline output { min-width: 102px; font-size: 11px; }
   .previewInfo { border-left: 0; border-top: 1px solid var(--line); padding: 22px 18px; }
   .previewInfo dl { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; margin: 20px 0 10px; }
   .previewInfo dl > div { min-width: 0; }
