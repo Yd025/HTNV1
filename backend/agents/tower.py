@@ -14,7 +14,8 @@ from agents.base import AgentDecision, PlatformAgent
 
 class TowerAgent(PlatformAgent):
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        own = self.own_detections(world)
+        accepted = world.accepted_detections if world.accepted_detections is not None else world.detections
+        own = [d for d in accepted if d.source_id == me.vehicle_id]
         if own:
             det = own[0]
             self.intent = "cue"
@@ -32,12 +33,13 @@ class TowerAgent(PlatformAgent):
             return AgentDecision(command=cmd, calls=self.calls_of(call), intent=self.intent)
 
         track = world.track
-        if track and track.confidence >= 0.25:
+        if track and track.age_s <= 2.0 and track.confidence >= 0.25:
             self.intent = "stare"
             return AgentDecision(command=_slew(me, track.lat, track.lon), calls=[], intent=self.intent)
 
         self.intent = "scan"
-        sector = (int(time.monotonic() / 22.0) + (0 if "1" in me.vehicle_id else 3)) % 6
+        now = world.observation_now if world.observation_now is not None else time.time()
+        sector = (int(now / 22.0) + (0 if "1" in me.vehicle_id else 3)) % 6
         lat, lon = water_stare(sector, me)
         call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1), "sector": sector})
         return AgentDecision(

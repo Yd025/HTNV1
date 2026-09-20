@@ -63,6 +63,10 @@ class PlatformAgent:
         if (
             prev is not None
             and prev.type == cmd.type
+            and prev.alt == cmd.alt
+            and ((prev.yaw_deg is None and cmd.yaw_deg is None)
+                 or (prev.yaw_deg is not None and cmd.yaw_deg is not None
+                     and abs((prev.yaw_deg - cmd.yaw_deg + 180.0) % 360.0 - 180.0) < 3.0))
             and prev.lat is not None
             and cmd.lat is not None
             and prev.lon is not None

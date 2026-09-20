@@ -1,4 +1,19 @@
-import type { GraphReplay, XY } from "./graphExperiment";
+import type { GraphReplay, MissionEvent, XY } from "./graphExperiment";
+
+/** Mission facts from the observed prefix; never read the final evaluation. */
+export function missionStatusAt(replay: GraphReplay, elapsedS: number) {
+  validateTime(elapsedS, "elapsedS");
+  const prefix = replay.frames.filter(frame => Number.isFinite(frame.t) && frame.t >= 0 && frame.t <= elapsedS).sort((a, b) => a.t - b.t);
+  const frame = prefix.at(-1);
+  const events: MissionEvent[] = [];
+  const seen = new Set<string>();
+  for (const sample of prefix) for (const event of sample.events ?? []) {
+    if (!Number.isFinite(event.t) || event.t < 0 || event.t > sample.t) continue;
+    const key = JSON.stringify([event.type, event.t, event.source, event.receivers]);
+    if (!seen.has(key)) { seen.add(key); events.push(event); }
+  }
+  return { frame, events, towerConfirmed: frame?.towerConfirmed ?? false, handoffConfirmed: frame?.handoffConfirmed ?? false };
+}
 
 export interface LiveMetrics {
   observedThroughS: number;
@@ -12,6 +27,7 @@ export interface LiveMetrics {
   distanceM: number;
   handoffs: number;
   bySource: Record<string, number>;
+  postTowerCustodyPct: number | null;
 }
 
 export interface LiveMetricPoint {
@@ -50,7 +66,9 @@ function scan(replay: GraphReplay, elapsedS: number, freshnessS: number, withSer
   let coveragePct = 0;
   let lastObservationS: number | null = null;
   let lastReportingSource: string | null = null;
-  let freshEstimates = 0;
+  let custodySamples = 0;
+  let estimateSamples = 0;
+  let postTowerSamples = 0, postTowerCustodySamples = 0;
   let errorSamples = 0;
   let squaredError = 0;
   let distanceM = 0;
@@ -64,14 +82,13 @@ function scan(replay: GraphReplay, elapsedS: number, freshnessS: number, withSer
     detectedAt,
     detected: detectedAt !== null,
     coveragePct,
-    // A sample has custody only while its observation-derived estimate is fresh.
-    // These are sample fractions, matching the offline runner's definition.
-    custodyPct: samples ? freshEstimates / samples * 100 : 0,
+    custodyPct: samples ? custodySamples / samples * 100 : 0,
     rmseM: errorSamples ? Math.sqrt(squaredError / errorSamples) : null,
-    estimateAvailabilityPct: samples ? freshEstimates / samples * 100 : 0,
+    estimateAvailabilityPct: samples ? estimateSamples / samples * 100 : 0,
     distanceM,
     handoffs,
     bySource: { ...bySource },
+    postTowerCustodyPct: postTowerSamples ? postTowerCustodySamples / postTowerSamples * 100 : null,
   });
 
   for (const frame of frames) {
@@ -89,19 +106,29 @@ function scan(replay: GraphReplay, elapsedS: number, freshnessS: number, withSer
     // Do not invent a straight transit across frames with a missing aircraft pose.
     previousDrones = currentDrones;
     const sources = new Set(frame.sources.filter(source => typeof source === "string" && source.length > 0));
+    const towerMission = frame.phase !== undefined;
+    if (towerMission && frame.targetConfirmed && detectedAt === null) detectedAt = frame.t;
     if (sources.size) {
-      if (detectedAt === null) detectedAt = frame.t;
+      if (!towerMission && detectedAt === null) detectedAt = frame.t;
       lastObservationS = frame.t;
-      for (const source of sources) bySource[source] = (bySource[source] ?? 0) + 1;
+      const reports = frame.observations?.map(observation => observation.source) ?? [...sources];
+      for (const source of reports) bySource[source] = (bySource[source] ?? 0) + 1;
       // The backend supplies the chosen reporting source. Missing source metadata
       // cannot justify inferring a handoff from source-array ordering.
-      if (frame.trackingSource && sources.has(frame.trackingSource)) {
+      if (!towerMission && frame.trackingSource && sources.has(frame.trackingSource)) {
         if (lastReportingSource !== null && frame.trackingSource !== lastReportingSource) handoffs += 1;
         lastReportingSource = frame.trackingSource;
       }
     }
-    if (lastObservationS !== null && frame.t - lastObservationS <= freshnessS && validPoint(frame.estimate)) {
-      freshEstimates += 1;
+    const legacyFresh = lastObservationS !== null && frame.t - lastObservationS <= freshnessS && validPoint(frame.estimate);
+    if (towerMission) {
+      const droneFresh = frame.targetCustody ?? false;
+      custodySamples += Number(droneFresh);
+      if (frame.targetConfirmed && frame.towerVisible === false) { postTowerSamples += 1; postTowerCustodySamples += Number(droneFresh); }
+      handoffs = frame.targetHandoffConfirmed ? 1 : 0;
+    } else custodySamples += Number(legacyFresh);
+    if (validPoint(frame.estimate) && (towerMission || legacyFresh)) {
+      estimateSamples += 1;
       if (validPoint(frame.boat)) {
         squaredError += (frame.estimate.x - frame.boat.x) ** 2 + (frame.estimate.y - frame.boat.y) ** 2;
         errorSamples += 1;

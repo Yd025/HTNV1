@@ -164,6 +164,47 @@ def parameter(path: Path, name: str) -> float:
     raise ValueError(f"Missing {name}: {path}")
 
 
+def rotate_rpy(vector, pose):
+    """SDF intrinsic roll/pitch/yaw, applied as Rz(yaw) Ry(pitch) Rx(roll)."""
+    x,y,z=vector
+    roll,pitch,yaw=pose[3:]
+    y,z=math.cos(roll)*y-math.sin(roll)*z,math.sin(roll)*y+math.cos(roll)*z
+    x,z=math.cos(pitch)*x+math.sin(pitch)*z,-math.sin(pitch)*x+math.cos(pitch)*z
+    return (math.cos(yaw)*x-math.sin(yaw)*y,math.sin(yaw)*x+math.cos(yaw)*y,z)
+
+
+def fixed_quad_camera(sim_root: Path) -> dict:
+    """Resolve the actual iris fixed mount, rather than inventing a gimbal pose."""
+    mount_path=sim_root/"sim/models/iris_with_ardupilot/model.sdf"
+    camera_path=sim_root/"sim/models/gimbal_small_2d/model.sdf"
+    airframe,gimbal=sdf(mount_path),sdf(camera_path)
+    mount=next((item for item in airframe.findall("./model/include")
+                if item.findtext("uri")=="model://gimbal_small_2d"),None)
+    mount_joint=airframe.find(".//joint[@name='iris_gimbal_mount']")
+    tilt_joint=gimbal.find(".//joint[@name='tilt_joint']")
+    if mount is None or mount_joint is None or tilt_joint is None or any(joint.get("type")!="fixed" for joint in (mount_joint,tilt_joint)):
+        raise ValueError("Quad camera mount changed; fixed-mount planning requires verified camera kinematics")
+    sensor=gimbal.find(".//sensor[@type='camera']")
+    link=gimbal.find(".//link[@name='tilt_link']")
+    model=gimbal.find("./model")
+    if sensor is None or link is None or model is None:
+        raise ValueError("Missing quad optical frame")
+    poses=[[float(value) for value in node.findtext("pose","0 0 0 0 0 0").split()]
+           for node in (sensor,link,model,mount)]
+    if any(len(pose)!=6 for pose in poses):
+        raise ValueError("Invalid quad camera transform")
+    axis=(1.,0.,0.)  # Gazebo camera boresight is local +X.
+    for pose in poses:
+        axis=rotate_rpy(axis,pose)
+    quad=camera(camera_path)
+    quad.update(pitchDeg=round(math.degrees(math.atan2(axis[2],math.hypot(axis[0],axis[1]))),1),
+                yawOffsetDeg=round(math.degrees(math.atan2(axis[1],axis[0])),1),
+                mountType="fixed",gimbalActuated=False,pitchIsPlanningAssumption=False,
+                mountSource="sim/models/iris_with_ardupilot/model.sdf",
+                mountPoseRad=poses[-1][3:],opticalPoseRad=poses[0][3:])
+    return quad
+
+
 def build_profile(sim_root: Path, size: int = 49) -> dict:
     meta_path = sim_root / "out/fort_ross/terrain.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -179,7 +220,8 @@ def build_profile(sim_root: Path, size: int = 49) -> dict:
                sim_root / "terrain/tower.py", sim_root / "terrain/course.py",
                sim_root / "terrain/make_world.py",
                sim_root / "sim/models/tower-1/model.sdf", sim_root / "sim/models/tower-2/model.sdf",
-               sim_root / "sim/models/gimbal_small_2d/model.sdf", sim_root / "sim/models/skywalker_x8/model.sdf",
+               sim_root / "sim/models/gimbal_small_2d/model.sdf", sim_root / "sim/models/iris_with_ardupilot/model.sdf",
+               sim_root / "sim/models/skywalker_x8/model.sdf",
                sim_root / "sitl/params/tower.parm", sim_root / "sitl/params/copter.parm", sim_root / "sitl/params/plane.parm"]
     tower = camera(sim_root / "sim/models/tower-1/model.sdf")
     head_match = re.search(r"^HEAD_Z\s*=\s*([0-9.]+)",
@@ -193,14 +235,13 @@ def build_profile(sim_root: Path, size: int = 49) -> dict:
     second_tower = camera(sim_root / "sim/models/tower-2/model.sdf")
     if any(tower[key] != value for key, value in second_tower.items()):
         raise ValueError("Tower camera profiles differ; exporter requires separate sensor profiles")
-    quad = camera(sim_root / "sim/models/gimbal_small_2d/model.sdf")
-    quad.update(pitchDeg=-45.0, pitchIsPlanningAssumption=True)
+    quad = fixed_quad_camera(sim_root)
     plane = camera(sim_root / "sim/models/skywalker_x8/model.sdf")
     plane_sensor = sdf(sim_root / "sim/models/skywalker_x8/model.sdf").find(".//sensor[@type='camera']")
     if plane_sensor is None:
         raise ValueError("Missing plane camera")
     plane_pose = [float(v) for v in plane_sensor.findtext("pose", "0 0 0 0 0 0").split()]
-    plane.update(pitchDeg=round(-math.degrees(plane_pose[4]), 6))
+    plane.update(pitchDeg=round(-math.degrees(plane_pose[4]), 6),mountType="fixed",gimbalActuated=False)
     assets, tower_defaults = [], []
     for include in [*world.findall(".//world/include"), *world.findall(".//world/model")]:
         name = include.get("name") or include.findtext("name", "")
@@ -246,7 +287,7 @@ def build_profile(sim_root: Path, size: int = 49) -> dict:
             "VFOV derives from square pixels and source image aspect ratio.",
             f"Tower camera center is {tower_height:g} m above the candidate ground. Default groundM values are source world base poses.",
             "Quad/plane heights 60/120 m above terrain are planning clearances, not source autopilot cruise settings.",
-            "Quad camera pitch -45 degrees is a planning assumption; actual gimbal pose requires telemetry calibration.",
+            "Quad camera is fixed approximately 20 degrees below body forward, derived from iris mount and optical-frame rotations; both mount joints are fixed and no independent gimbal aim is modeled. Aircraft roll/pitch dynamics remain unmodeled.",
             "Aircraft speeds are configured waypoint/cruise references; wind, acceleration, turns, and climb performance require a dynamics model.",
             "Water comes from the float DEM <=0.05 m, never the quantized heightmap. At least 25 m shore clearance uses conservative square erosion.",
             "Water graph edges are undirected, densely checked against the buffered full-resolution DEM mask, and forbid diagonal corner cutting.",

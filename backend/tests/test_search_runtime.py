@@ -135,7 +135,9 @@ class SearchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await brain.tick()
             self.assertEqual(commands.call_count, 1)
             self.assertEqual(commands.call_args.args[1], 0)
-            dispatched = adapter.send_command.await_count
+            tower_ids = {t.vehicle_id for t in adapter.arena().towers}
+            tower_dispatches = lambda: sum(call.args[0].vehicle_id in tower_ids for call in adapter.send_command.await_args_list)
+            dispatched = tower_dispatches()
             belief = brain.search_planner.belief
             self.clock += .1
             await brain.tick()
@@ -143,7 +145,11 @@ class SearchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await brain.tick()
             self.assertEqual(commands.call_count, 1)
             self.assertEqual(brain.search_planner.belief, belief)
-            self.assertEqual(adapter.send_command.await_count, dispatched)
+            self.assertEqual(tower_dispatches(), dispatched)
+            # Legacy search policies may steer towers; aircraft stay in reserve
+            # and an already airborne plane may update its reserve orbit.
+            self.assertTrue(all(v.role == "reserve" for v in brain.world.vehicles.values()
+                                if v.vehicle_class in {"plane", "copter"}))
             self.clock += .1
             await brain.tick()
             self.assertEqual(commands.call_count, 2)

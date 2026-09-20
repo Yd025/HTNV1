@@ -228,13 +228,16 @@ class APILifecycleTests(unittest.TestCase):
         class CameraFixtureAdapter(FakeAdapter):
             mode = "live"
 
+            async def list_vehicles(self):
+                return [VehicleState("tower-1", 1, "tower", 74.6973, -94.8297, alt=120)]
+
             def camera_catalog(self):
-                return [{"vehicle_id": "quadcopter", "label": "test camera"}]
+                return [{"vehicle_id": "tower-1", "label": "test camera"}]
 
             async def poll_detections(self):
                 self.polls += 1
                 return [Detection(
-                    "quadcopter", 74.6975, -94.8295, "vessel", 0.85, time.time(),
+                    "tower-1", 74.6975, -94.8295, "vessel", 0.85, time.time(),
                     observation_id="camera-fixture:1", frame_id="fixture-frame:1",
                     provenance="camera-fixture",
                 )]
@@ -249,10 +252,12 @@ class APILifecycleTests(unittest.TestCase):
             self.assertEqual(state["detections"][0]["observation_id"], "camera-fixture:1")
             self.assertAlmostEqual(state["track"]["lat"], 74.6975)
             self.assertAlmostEqual(state["track"]["lon"], -94.8295)
+            self.assertEqual(state["c2"]["phase"], "tower_confirm")
+            self.assertFalse(state["c2"]["mission_active"])
             self.assertIsNone(state["truth"])
             before = (adapter.polls, len(adapter.commands))
             with patch("sim.cameras.grab_jpeg", AsyncMock(return_value=b"\xff\xd8fixture")):
-                response = client.get("/cameras/quadcopter/snapshot.jpg")
+                response = client.get("/cameras/tower-1/snapshot.jpg")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["content-type"], "image/jpeg")
             self.assertEqual((adapter.polls, len(adapter.commands)), before)

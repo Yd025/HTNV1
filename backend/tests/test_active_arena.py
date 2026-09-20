@@ -28,7 +28,10 @@ class ActiveArenaTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def vehicle(self, name, kind, role="search"):
-        return VehicleState(name, 1, kind, FORT_ROSS.origin_lat, FORT_ROSS.origin_lon, role=role)
+        # The geometry test models aircraft already airborne. Grounded reserve
+        # aircraft intentionally receive no command that could trigger takeoff.
+        alt = 90.0 if kind == "plane" else 40.0 if kind == "copter" else 0.0
+        return VehicleState(name, 1, kind, FORT_ROSS.origin_lat, FORT_ROSS.origin_lon, alt=alt, role=role)
 
     def assert_inside_site(self, lat, lon):
         north, east = geo.ll_to_ne(lat, lon, FORT_ROSS.origin_lat, FORT_ROSS.origin_lon)
@@ -74,7 +77,7 @@ class ActiveArenaTests(unittest.TestCase):
 
     def test_track_prediction_uses_active_latitude_for_eastward_meters(self):
         tracker = TargetTracker()
-        now = tracker._t + 0.1
+        now = 100.0
         track = tracker.update([Detection("camera", FORT_ROSS.origin_lat, FORT_ROSS.origin_lon, "vessel", 0.9, 0.0)], now=now)
         track.ve = 20.0
         predicted = tracker.update([], now=now + 0.5)

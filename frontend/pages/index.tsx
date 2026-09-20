@@ -3,6 +3,7 @@ import Head from "next/head";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CameraRail from "../components/CameraRail";
 import GraphTrainingDemo from "../components/GraphTrainingDemo";
+import GameLearning from "../components/GameLearning";
 import TelemetryMonitor, { getBackendStatusNotice } from "../components/TelemetryMonitor";
 import { BrandMark, Icon } from "../components/ui/Icons";
 import { Tabs } from "../components/ui/Tabs";
@@ -23,7 +24,7 @@ const FleetModelPreview = dynamic(
   { ssr: false, loading: () => <Loading>Loading platform models…</Loading> },
 );
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-type Section = "overview" | "fleet" | "cameras" | "activity" | "system";
+type Section = "overview" | "fleet" | "cameras" | "activity" | "system" | "game";
 const sections: {
   value: Section;
   label: string;
@@ -34,7 +35,7 @@ const sections: {
     value: "overview",
     label: "Overview",
     icon: "arena",
-    description: "Train the search fleet, test unseen boats, then follow the live mission below.",
+    description: "Optimize tower sites, test detection and drone handoff, then follow the live mission below.",
   },
   {
     value: "fleet",
@@ -53,6 +54,12 @@ const sections: {
     label: "Activity",
     icon: "route",
     description: "Reported tasking, recent commands, and advisor reasoning.",
+  },
+  {
+    value: "game",
+    label: "Game",
+    icon: "target",
+    description: "Learn tower placements from Cant Catch Me players and follow the opening stretch live.",
   },
   {
     value: "system",
@@ -92,6 +99,9 @@ export default function CommandCenter() {
         ? "WHITEOUT simulator"
         : (state.adapter ?? "Awaiting simulation");
   const activeSection = sections.find((item) => item.value === section)!;
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "game") setSection("game");
+  }, []);
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [section]);
@@ -224,7 +234,7 @@ export default function CommandCenter() {
               <span>/</span>
               <strong>{activeSection.label}</strong>
             </div>
-            <button
+            {section !== "game" && <button
               className={`connection-pill ${isFresh ? "is-live" : stale || state.status === "failed" ? "is-stale" : ""}`}
               onClick={() => setSection("system")}
               type="button"
@@ -232,7 +242,7 @@ export default function CommandCenter() {
               <i />
               {linkLabel}
               <Icon name="chevron" />
-            </button>
+            </button>}
           </header>
           <div
             className="dashboard-content"
@@ -250,25 +260,25 @@ export default function CommandCenter() {
                 </h1>
                 <p>{activeSection.description}</p>
               </div>
-              <div className="mission-badges">
+              {section !== "game" && <div className="mission-badges">
                 <span className="phase-badge">
                   {state.c2?.phase
-                    ? `Phase: ${state.c2.phase}`
+                    ? `Phase: ${state.c2.phase.replaceAll("_", " ")}`
                     : "Awaiting mission phase"}
                 </span>
                 <span className="read-only-badge">
                   <Icon name="eye" />
                   Live fleet read only
                 </span>
-              </div>
+              </div>}
             </section>
-            {backendNotice && (
+            {section !== "game" && backendNotice && (
               <div className="connection-notice" role="status">
                 <Icon name="pulse" />
                 <div><strong>{backendNotice.title}</strong> {backendNotice.description}</div>
               </div>
             )}
-            {stale && (
+            {section !== "game" && stale && (
               <div className="connection-notice" role="status">
                 <Icon name="signal" />
                 <div>
@@ -444,6 +454,7 @@ export default function CommandCenter() {
                         {state.c2?.intent ??
                           "Waiting for the mission controller’s tasking."}
                       </p>
+                      {state.c2?.handoff && <p>Handoff: {state.c2.handoff.state ?? "waiting"}{state.c2.custody ? ` · Observer: ${state.c2.custody}` : " · No current observer"}{state.c2.metrics?.successful_handoffs !== undefined ? ` · ${state.c2.metrics.successful_handoffs} confirmed transfers` : ""}</p>}
                     </div>
                     <div className="roster-list">
                       {vehicles.length ? (
@@ -732,9 +743,10 @@ export default function CommandCenter() {
                 </section>
               </div>
             )}
+            {section === "game" && <GameLearning />}
             {section === "system" && <TelemetryMonitor telemetry={telemetry} />}
           </div>
-          <footer className="mission-footer">
+          {section !== "game" && <footer className="mission-footer">
             <span>
               <i className={`footer-dot ${isFresh ? "is-live" : ""}`} />
               {source}
@@ -748,7 +760,7 @@ export default function CommandCenter() {
               {vehicles.length} assets<span className="footer-divider">/</span>
               {fmt(state.tick_hz, 1)} Hz controller
             </span>
-          </footer>
+          </footer>}
         </div>
       </main>
     </>

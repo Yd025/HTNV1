@@ -1,6 +1,57 @@
-# Learning two-tower placement and fleet search
+# Tower placement, confirmed detection, and drone tracking
 
-Research date: September 19, 2026. This document separates published evidence, verified local implementation facts, the first implementation, and proposed follow-up experiments. Research recommendations are not measured ArcticSim performance.
+Research and implementation revision: September 19, 2026.
+
+## Current mission and PDF interpretation
+
+The supplied ArcticSim slides specify two fixed sensor towers, one quadcopter and one fixed-wing aircraft (page 11), a moving vessel without AIS (page 9), camera fields of view (page 18), and a geographic track submission interface (page 24). They do not require a tower-first strategy or promise that the two towers cover every random boat spawn. The user selected the following architecture: place towers before the mission, acquire and confirm a moving boat with tower imagery, dispatch both aircraft, and maintain the track from aircraft observations when tower visibility ends.
+
+"Best placement" means the best validated candidate among legal terrain sites and tested vessel/condition distributions. It is not a proof of a global optimum. A strict tower-first mission can miss boats that never cross observable water; those misses must remain in evaluation.
+
+## Research basis and engineering decisions
+
+- **Separate sensing, assignment, and motion.** Zhang et al. decompose cooperative coverage and tracking into information fusion, task assignment, and vehicle decisions. Their use of detection probability and information-based tracking rewards motivates scoring useful observations rather than map coverage alone. This implementation uses a smaller, explicit state machine and numerical placement search, not their complete algorithm. [Primary paper](https://arxiv.org/abs/2303.09003).
+- **Verify the receiving sensor.** PATH studies geometry-assisted target handoff and receiver verification, and identifies relative-pose uncertainty as a major projection-error source. Here a dispatch command, command acknowledgement, or proximity to an estimated point never proves visual custody: a fresh accepted aircraft observation does. [Primary paper](https://arxiv.org/abs/2609.12456).
+- **Train perception on maritime imagery.** SeaDronesSee provides maritime visual detection and tracking benchmarks. It is a relevant evaluation source, not evidence that a detector already works in ArcticSim or Arctic field conditions. Partition video by sequence/site rather than randomly splitting adjacent frames. [Dataset authors](https://seadronessee.cs.uni-tuebingen.de/).
+- **Use a deployable detector independently of the planner.** The optional Ultralytics path loads explicitly supplied local weights and uses class names, bounding boxes and confidence. Its separate training and validation entry points follow the supported model APIs. No field-trained model or dataset is bundled. [Prediction](https://docs.ultralytics.com/modes/predict/), [training](https://docs.ultralytics.com/modes/train/), [validation](https://docs.ultralytics.com/modes/val/).
+
+## Implemented mission contract
+
+1. **Place and freeze:** compare legal tower sites with terrain occlusion and camera geometry, select on validation missions, then freeze before untouched tests. Detection and post-cue aircraft custody are evaluated for the complete mission.
+2. **Watch and confirm:** repeated fresh, spatially consistent tower measurements establish a cue. Cached camera frames, outliers, and drone-only sightings do not unlock the tower-first response.
+3. **Dispatch:** the quadcopter moves to maintain a useful close view; the fixed-wing supports forward observation and reacquisition. Routes use observation-derived position and velocity, never the hidden boat coordinates.
+4. **Transfer custody:** only fresh accepted aircraft detections confirm the receiver. Tower loss alone does not stop an aircraft with fresh observations.
+5. **Handle gaps honestly:** predict for a bounded interval with increasing uncertainty, attempt reacquisition, and expire the contact when evidence is too old. Predictions are not new measurements.
+
+The offline graph experiment and runtime C2 enforce this sequence through separate environment adapters. The graph experiment uses projected terrain XY; the live controller uses geographic observations. Their results are not interchangeable, and an offline learned tower pair does not automatically relocate physical or live-simulator towers.
+
+## What learns, and what must be calibrated
+
+Placement/motion training learns a sparse boat-motion model and evaluates candidate fixed tower sites under explicit camera and environment assumptions. The synthetic camera model varies detectability with viewing geometry, apparent target size, distance and conditions; location error is also variable. These assumptions are a sensitivity-testing model, not measured hardware performance.
+
+Image-detector training is a separate supervised task: local labeled vessel imagery and explicit local initial weights produce candidate detector weights, which must be validated on held-out sequences. The repository supplies the execution path, not a claim that this training was completed without data. Conventional target filtering, geometric projection and the bounded mission state machine do not need to be neural networks.
+
+Prioritize confirmed tower acquisition, receiver-confirmed handoff, continued aircraft custody outside tower view, time to acquire, localization error, false confirmations, losses and reacquisition. Ground truth is allowed only for synthetic observation generation, training labels and evaluation; it is not a deployed planner or controller input. Save sample counts/denominators and null results when a metric has no qualifying samples.
+
+## Real sensor scope
+
+The supplied simulator documents cameras, not working radar, lidar or sonar feeds. The implementation consumes camera evidence; it does not synthesize additional sensor feeds and label them real. Radar and visible/thermal camera fusion is a plausible surface-vessel extension, subject to hardware, calibration and field evaluation. Marine radar needs sea/weather clutter processing ([Furuno](https://www.furuno.com/en/technology/radar/display/index.html)); thermal cameras still lose range in rain/fog ([FLIR](https://www.flir.com/discover/rd-science/can-thermal-imaging-see-through-fog-and-rain/)); sonar requires suitable underwater acoustic sensing ([NOAA](https://oceanservice.noaa.gov/facts/sonar.html)).
+
+Before claiming field readiness, measure real detector precision/recall by range and weather, synchronize camera/pose timestamps, calibrate optical orientation and sea-relative camera height, verify transport and battery/flight constraints, and test repeated handoff/loss scenarios with the actual fleet.
+
+### Verified aircraft camera mounts and pointing
+
+The inspected quad camera points **20 degrees below body forward**. The nested mount has roll `1.9199` in [`iris_with_ardupilot/model.sdf`](../../../arctic-sim/sim/models/iris_with_ardupilot/model.sdf#L10); its accompanying rotation-composition comment explicitly derives elevation −20 degrees and unchanged azimuth. Its mounting joint is `type="fixed"` at line 31. The camera's [`tilt_joint`](../../../arctic-sim/sim/models/gimbal_small_2d/model.sdf#L168) is also fixed; that source explains there is no actuator and the airframe plugin drives only four rotor channels. `MNT1_TYPE=0` in [`copter.parm`](../../../arctic-sim/sitl/params/copter.parm#L519) matches that implementation. Mentions of a ROS `gimbal_bridge` and `/set_joint_trajectory` in old comments do not establish a working control interface: no corresponding plugin is present in the inspected model.
+
+The live camera catalog therefore uses a −20-degree fixed mounting bias. Projection rotates the camera ray into body coordinates **before** applying measured body roll, pitch, and yaw; simply adding mounting pitch to body pitch would misproject a banked aircraft. At level attitude, the image center intersects a flat water plane at horizontal distance `camera_height_above_water / tan(20 degrees)`. This supports a viewing standoff instead of hovering directly above the vessel. The fixed-wing camera is independently mounted **8 degrees downward**, with the sensor pose and explanation in [`skywalker_x8/model.sdf`](../../../arctic-sim/sim/models/skywalker_x8/model.sdf#L198).
+
+Steering the quad view in this checkout requires vehicle yaw, not an invented gimbal command. ArduPilot documents guided position-plus-yaw targets and `MAV_CMD_CONDITION_YAW` for Copter. Position and heading commands remain separate from visual confirmation: camera projection uses measured attitude, and only fresh receiver detections establish custody. [Official Copter guided command interface](https://ardupilot.org/dev/docs/copter-commands-in-guided-mode.html). ArduPlane has a different command contract: its global position-target message accepts altitude, while geographic navigation uses its supported movement commands. [Official Plane guided command interface](https://ardupilot.org/dev/docs/plane-commands-in-guided-mode.html).
+
+The offline graph experiment now also uses the source-derived fixed quad mount (approximately −20 degrees), body yaw limited to 45 degrees per second toward the observation-derived estimate, and a viewing standoff derived from sea-relative height. Its multirotor translation is independent of yaw; it does not steer an independent gimbal. The plane retains its source-derived fixed mount (approximately −8 degrees). Offline roll and pitch remain level, aircraft dynamics are simplified, and tower slew is approximate. Matching these mounting constraints does not validate the synthetic detector or establish live flight performance.
+
+## Historical first-detection experiment
+
+The following records earlier work for reproducibility. Its first-hit objectives, permissive independent drone search, ideal sensor assumptions and historical scores do not describe the current tower-first mission.
 
 ## Goal and recommended approach
 

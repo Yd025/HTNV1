@@ -10,6 +10,7 @@ export type TelemetrySample = {
   lat: number | null;
   lon: number | null;
   alt?: number | null;
+  alt_msl?: number | null;
   heading?: number | null;
   groundspeed?: number | null;
   battery_remaining?: number | null;
@@ -29,6 +30,7 @@ export type TrackState = {
   age_s?: number;
   sigma_m?: number;
   history?: [number, number][];
+  status?: "tentative" | "observed" | "coasting";
 };
 
 export type HeatCell = { lat: number; lon: number; heat: number };
@@ -67,9 +69,15 @@ export type SwarmState = {
   heatmap?: HeatCell[];
   blackboard?: { sender: string; recipient: string; kind: string; body: Record<string, unknown> }[];
   advisor?: StrategyPlan | null;
-  c2?: { phase?: string; intent?: string };
+  c2?: {
+    phase?: string; intent?: string; mission_active?: boolean; custody?: string | null;
+    handoff?: { state?: string; receiver?: string | null; evidence?: string | null; cue_source?: string | null };
+    tower_confirmation?: { hits: number; required_hits: number; window_s: number };
+    observation_age_s?: number | null;
+    metrics?: { confirmed_tower_cues?: number; successful_handoffs?: number; reacquisitions?: number; custody_breaks?: number };
+  };
   intents?: Record<string, string>;
-  commands?: { vehicle_id: string; type: string; lat?: number | null; lon?: number | null; alt?: number | null; sector?: number | null; command_id?: string | null }[];
+  commands?: { vehicle_id: string; type: string; lat?: number | null; lon?: number | null; alt?: number | null; yaw_deg?: number | null; sector?: number | null; command_id?: string | null }[];
   arena?: { origin_lat: number; origin_lon: number; half_m: number; heading_offset_deg?: number };
 };
 

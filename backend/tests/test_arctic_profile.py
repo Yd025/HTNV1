@@ -1,12 +1,39 @@
 import math
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from export_arctic_profile import sampled_grid, safe_water, water_mask, water_segment, world_pixel
+from export_arctic_profile import fixed_quad_camera, sampled_grid, safe_water, water_mask, water_segment, world_pixel
 
 
 class ArcticProfileTests(unittest.TestCase):
+    def test_quad_optics_compose_verified_fixed_mount_not_planning_gimbal(self):
+        with TemporaryDirectory() as directory:
+            root=Path(directory)
+            mount=root/"sim/models/iris_with_ardupilot/model.sdf"
+            camera=root/"sim/models/gimbal_small_2d/model.sdf"
+            mount.parent.mkdir(parents=True)
+            camera.parent.mkdir(parents=True)
+            mount.write_text('''<sdf><model><include><uri>model://gimbal_small_2d</uri>
+                <pose>0 -0.01 0.070 1.9199 0 1.57</pose></include>
+                <joint name="iris_gimbal_mount" type="fixed"/></model></sdf>''')
+            camera.write_text('''<sdf><model><link name="tilt_link"><sensor type="camera">
+                <pose>0 0 0 -1.57 -1.57 0</pose><update_rate>10</update_rate><camera>
+                <horizontal_fov>2</horizontal_fov><image><width>960</width><height>720</height></image>
+                <clip><near>0.05</near><far>1500</far></clip></camera></sensor></link>
+                <joint name="tilt_joint" type="fixed"/></model></sdf>''')
+            optics=fixed_quad_camera(root)
+            self.assertEqual(optics["pitchDeg"],-20.)
+            self.assertEqual(optics["yawOffsetDeg"],0.)
+            self.assertEqual(optics["mountType"],"fixed")
+            self.assertFalse(optics["gimbalActuated"])
+            self.assertFalse(optics["pitchIsPlanningAssumption"])
+            mount.write_text(mount.read_text().replace('type="fixed"','type="revolute"'))
+            with self.assertRaisesRegex(ValueError,"mount changed"):
+                fixed_quad_camera(root)
+
     def test_world_rows_increase_northwhile_raster_rows_decrease(self):
         self.assertEqual(world_pixel(-100, -100, 100, 21), (0, 20))
         self.assertEqual(world_pixel(100, 100, 100, 21), (20, 0))

@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(__dirname, "../lib/graphLiveMetrics.ts"
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText;
 const exportsForTest = {};
 vm.runInNewContext(compiled, { exports: exportsForTest });
-const { computeLiveMetrics, liveSeries } = exportsForTest;
+const { computeLiveMetrics, liveSeries, missionStatusAt } = exportsForTest;
 const plain = value => JSON.parse(JSON.stringify(value));
 const drone = (id, x, y, z = 60) => ({ id, x, y, z, heading: 0 });
 const frame = (t, extra = {}) => ({ t, boat: { x: 0, y: 0 }, drones: [drone("quad", 0, 0)], sources: [], coveragePct: 0, estimate: null, trackingSource: null, ...extra });
@@ -126,6 +126,35 @@ test("invalid playback times fail explicitly", () => {
     assert.throws(() => computeLiveMetrics(replay([]), 0, invalid));
     assert.throws(() => liveSeries(replay([]), invalid));
   }
+});
+
+test("mission confirmation and events appear only after the observed handoff and rewind cleanly", () => {
+  const mission = replay([
+    frame(0, { phase: "tower_watch", towerConfirmed: false, handoffConfirmed: false, events: [] }),
+    frame(5, { phase: "dispatch", towerConfirmed: true, targetConfirmed: true, handoffConfirmed: false, events: [{ type: "tower_confirmed", t: 5, source: "tower-1" }] }),
+    frame(10, { phase: "drone_track", towerConfirmed: true, targetConfirmed: true, handoffConfirmed: true, targetHandoffConfirmed: true, targetCustody: true, custodian: "quad", events: [{ type: "drone_handoff_confirmed", t: 10, source: "quad" }] }),
+    frame(15, { phase: "reacquire", towerConfirmed: true, handoffConfirmed: true, custodian: null, events: [{ type: "untrusted_future", t: 100 }] }),
+  ]);
+  assert.equal(missionStatusAt(mission, 7).handoffConfirmed, false);
+  assert.equal(missionStatusAt(mission, 10).frame.custodian, "quad");
+  assert.deepEqual(plain(missionStatusAt(mission, 15).events.map(event => event.type)), ["tower_confirmed", "drone_handoff_confirmed"]);
+  assert.equal(computeLiveMetrics(mission, 7).handoffs, 0);
+  assert.equal(computeLiveMetrics(mission, 10).handoffs, 1);
+  assert.equal(computeLiveMetrics(mission, 0).handoffs, 0);
+  assert.equal(missionStatusAt(mission, 0).towerConfirmed, false);
+  assert.deepEqual(plain(missionStatusAt(mission, 0).events), []);
+});
+
+test("a confirmed clutter contact earns no verified boat detection or custody", () => {
+  const mission = replay([frame(0, { phase: "dispatch", towerConfirmed: true, targetConfirmed: false, sources: ["tower-1"], estimate: { x: 1000, y: 1000 } }),
+    frame(5, { phase: "drone_track", towerConfirmed: true, handoffConfirmed: true, targetConfirmed: false, targetHandoffConfirmed: false, targetCustody: false,
+      acceptedSources: ["quad"], sources: ["quad"], towerVisible: false, estimate: { x: 1000, y: 1000 }, events: [{ type: "drone_handoff_confirmed", t: 5, source: "quad" }] })]);
+  const metrics = computeLiveMetrics(mission, 5);
+  assert.equal(metrics.detectedAt, null);
+  assert.equal(metrics.handoffs, 0);
+  assert.equal(metrics.custodyPct, 0);
+  assert.equal(metrics.postTowerCustodyPct, null);
+  assert.equal(metrics.estimateAvailabilityPct, 100, "a reported estimate is separate from correct custody");
 });
 
 test("complete prefixes reproduce every saved benchmark replay's mission statistics", () => {

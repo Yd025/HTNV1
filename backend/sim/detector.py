@@ -1,7 +1,8 @@
-"""Find the shadow vessel in an arctic-sim camera frame and project it to WGS84.
+"""Simulator blob baseline and shared pixel-to-water projection.
 
-No neural net. The hull reads as a compact mid-tone / red blob on dark water;
-foam sparkles are tiny and white. Ground intersection assumes a sea plane at 0.
+Learned vessel detection is selected by vision.vessel.CameraDetector. Projection
+requires camera altitude above the water plane, calibrated intrinsics and camera
+orientation; a bounding-box bottom is only an approximate hull water contact.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ class PixelHit:
     height: float
     confidence: float
     class_hint: str
+    bbox: tuple[float, float, float, float] | None = None
+    detector: str = "simulator_blob"
 
 
 def detect_jpeg(jpeg: bytes) -> PixelHit | None:
@@ -70,7 +73,7 @@ def detect_image(im: Image.Image) -> PixelHit | None:
     rust = [[red[y][x] and _near(sea, x, y, 5) for x in range(w)] for y in range(h)]
     marked = [[islands[y][x] or rust[y][x] for x in range(w)] for y in range(h)]
     blobs = _components(marked)
-    best: tuple[float, float, float, int] | None = None
+    best: tuple[float, float, float, int, tuple[int, int, int, int]] | None = None
     for cells in blobs:
         area = len(cells)
         if area < 24 or area > 280:
@@ -92,18 +95,19 @@ def detect_image(im: Image.Image) -> PixelHit | None:
         cy = sum(ys) / area
         score = area * fill
         if best is None or score > best[0]:
-            best = (score, cx, cy, area)
+            best = (score, cx, cy, area, (min(xs), min(ys), max(xs) + 1, max(ys) + 1))
     if best is None:
         return None
-    _, cx, cy, area = best
+    _, cx, cy, area, bbox = best
     conf = max(0.35, min(0.92, 0.28 + area / 400.0))
     return PixelHit(
         u=cx * (w0 / w),
-        v=cy * (h0 / h),
+        v=min(h0 - 1.0, bbox[3] * (h0 / h)),
         width=float(w0),
         height=float(h0),
         confidence=conf,
         class_hint="vessel",
+        bbox=(bbox[0] * w0 / w, bbox[1] * h0 / h, bbox[2] * w0 / w, bbox[3] * h0 / h),
     )
 
 
@@ -116,16 +120,14 @@ def project_hit(
     pitch_rad: float = 0.0,
 ) -> Detection | None:
     heading = float(pose.heading or 0.0)
-    pitch = math.degrees(pitch_rad) + spec.pitch_bias_deg
+    pitch = math.degrees(pitch_rad)
     roll = math.degrees(roll_rad)
     alt = float(pose.alt or 0.0)
-    if pose.vehicle_class == "tower":
-        alt = max(alt, 2.7)
     if alt < 1.2:
         return None
     ground = _ground_hit(
         hit.u, hit.v, hit.width, hit.height, spec.hfov_rad,
-        heading, pitch, roll, alt,
+        heading, pitch, roll, alt, mount_pitch_deg=spec.pitch_bias_deg,
     )
     if ground is None:
         return None
@@ -138,21 +140,32 @@ def project_hit(
         class_hint=hit.class_hint,
         confidence=hit.confidence,
         timestamp=now,
-        bearing=_bearing(heading, hit.u, hit.width, spec.hfov_rad),
+        bearing=(math.degrees(math.atan2(ge, gn)) + 360.0) % 360.0,
         range_m=rng,
+        provenance=f"{hit.detector}:bbox_waterline:flat_sea_pinhole",
     )
 
 
 def _ground_hit(
     u: float, v: float, width: float, height: float, hfov: float,
     heading_deg: float, pitch_deg: float, roll_deg: float, alt_m: float,
+    mount_pitch_deg: float = 0.0,
 ) -> tuple[float, float, float] | None:
+    values = (u, v, width, height, hfov, heading_deg, pitch_deg, roll_deg, alt_m, mount_pitch_deg)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    if width <= 0 or height <= 0 or not (0 < hfov < math.pi) or not (0 <= u < width and 0 <= v < height) or alt_m <= 0:
+        return None
     fx = width / (2.0 * math.tan(hfov / 2.0))
     fy = fx
     # body: X fwd, Y right, Z down
     x = 1.0
     y = (u - width / 2.0) / fx
     z = (v - height / 2.0) / fy
+    # Camera-to-body rotation precedes the measured body attitude. Adding the
+    # mount angle to body pitch alone is incorrect while the aircraft banks.
+    mount = math.radians(mount_pitch_deg)
+    x, z = x * math.cos(mount) + z * math.sin(mount), -x * math.sin(mount) + z * math.cos(mount)
     n, e, d = _body_to_ned(x, y, z, heading_deg, pitch_deg, roll_deg)
     if d <= 0.035:
         return None

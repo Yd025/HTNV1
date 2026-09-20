@@ -12,6 +12,20 @@
 .heading h2 { font-size: 26px; font-weight: 500; letter-spacing: -.025em; }
 .heading p { font-size: 14px; color: var(--text-muted); margin-top: 7px; }
 .modelTag { max-width: 180px; color: var(--text-muted); font-size: 11px; line-height: 1.6; text-align: right; }
+.missionSequence { padding: 18px 26px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
+.missionSequence ol { display: flex; flex-wrap: wrap; gap: 12px 25px; list-style: none; margin: 0 0 18px; padding: 0; }
+.missionSequence li { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
+.missionSequence li span { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--line-strong); border-radius: 50%; font-variant-numeric: tabular-nums; }
+.missionSequence li[aria-current=step] { color: var(--text); font-weight: 600; }
+.missionSequence li[aria-current=step] span { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+.missionSequence li[data-complete=true] span { border-color: var(--status); color: var(--status); }
+.missionState { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; }
+.missionState p { color: var(--text-muted); font-size: 12px; line-height: 1.7; margin-top: 5px; max-width: 70ch; }
+.missionState dl { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 0; }
+.missionState dt { color: var(--text-muted); font-size: 11px; }
+.missionState dd { font-size: 12px; margin: 5px 0 0; font-variant-numeric: tabular-nums; }
+.missionEvents { margin: 16px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-muted); }
+.missionEvents li { padding: 7px 0; border-top: 1px solid var(--line); }
 .workbench { display: grid; grid-template-columns: minmax(0, 1fr) 290px; }
 .stage { background: var(--canvas); min-width: 0; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
