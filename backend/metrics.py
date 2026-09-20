@@ -58,8 +58,8 @@ class CoverageGrid:
     def cell_of_ne(self, north: float, east: float) -> tuple[int, int] | None:
         u = (east + self.half) / (2 * self.half)
         v = (north + self.half) / (2 * self.half)
-        i = int(u * self.n)
-        j = int(v * self.n)
+        i = math.floor(u * self.n)
+        j = math.floor(v * self.n)
         if 0 <= i < self.n and 0 <= j < self.n:
             return i, j
         return None
