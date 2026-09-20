@@ -49,7 +49,7 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_whiteout_ground_to_air_paths_and_follow_commands_without_tower(self):
         class Bridge:
             def __init__(self):
-                self.state = {"alt": 0, "armed": False, "mode": "MANUAL", "groundspeed": 0}
+                self.state = {"lat": 71.99, "lon": -94.82, "alt": 0, "armed": False, "mode": "MANUAL", "groundspeed": 0}
                 self.calls = []
             def is_connected(self): return True
             def snapshot(self): return dict(self.state)

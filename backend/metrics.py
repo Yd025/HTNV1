@@ -140,6 +140,11 @@ class MetricsEngine:
         now = now or time.monotonic()
         search_cells: dict[tuple[int, int], int] = {}
         for v in vehicles:
+            if not v.connected:
+                # Home placeholders and lost poses are not observed travel or
+                # coverage. Resume from a new baseline after a telemetry gap.
+                self._prev_ne.pop(v.vehicle_id, None)
+                continue
             n, e = ll_to_ne(v.lat, v.lon)
             prev = self._prev_ne.get(v.vehicle_id)
             if prev:
@@ -156,7 +161,7 @@ class MetricsEngine:
         self.score.coverage = cov
         self.score.cells_seen = seen
 
-        roles = {v.role for v in vehicles if v.role}
+        roles = {v.role for v in vehicles if v.connected and v.role}
         self.score.unique_roles = len(roles)
         overlap = 0
         stacked = 0

@@ -197,6 +197,7 @@ class HeartbeatFreshnessTests(unittest.IsolatedAsyncioTestCase):
         vid = "tower-1"
         connection = Mock(is_connected=Mock(return_value=True), close=AsyncMock())
         adapter._bridges[vid] = connection
+        adapter._last_ok[vid] = True
         adapter._poses[vid] = VehicleState(vid, 1, "tower", 72, -94, 119.5)
         adapter._taps._receive(vid, b"frame")
 

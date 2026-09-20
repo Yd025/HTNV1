@@ -72,6 +72,14 @@ def _host() -> str:
     return os.getenv("ARCTIC_HOST") or ("host.docker.internal" if os.path.exists("/.dockerenv") else "127.0.0.1")
 
 
+def _position_ready(snap: dict[str, Any]) -> bool:
+    lat, lon = snap.get("lat"), snap.get("lon")
+    # This adapter is for Fort Ross: (0, 0) is SITL's initial no-position value.
+    # Keep generic MAVLink coordinates unchanged, including equator/meridian use.
+    return (lat is not None and lon is not None and math.isfinite(lat) and math.isfinite(lon)
+            and -90 <= lat <= 90 and -180 <= lon <= 180 and (lat, lon) != (0, 0))
+
+
 def _fleet_spec() -> list[dict[str, Any]]:
     h = _host()
     spec = [
@@ -238,9 +246,12 @@ class WhiteoutAdapter:
                 # The bridge receive worker owns transport reads. Taking its
                 # cached snapshot never waits on a command/transport lock.
                 snap = bridge.snapshot()
-            self._last_ok[vid] = mav_ok
-            lat = snap.get("lat") if snap.get("lat") is not None else home_lat
-            lon = snap.get("lon") if snap.get("lon") is not None else home_lon
+            pose_ok = mav_ok and _position_ready(snap)
+            if not pose_ok:
+                self._clear_vehicle_cache(vid)
+            self._last_ok[vid] = pose_ok
+            lat = snap["lat"] if pose_ok else home_lat
+            lon = snap["lon"] if pose_ok else home_lon
             vclass: VehicleClass = spec["vehicle_class"]
             look = self._look.get(vid)
             if vclass == "tower":
@@ -262,13 +273,13 @@ class WhiteoutAdapter:
                     battery_remaining=float(snap.get("battery_remaining") or 100.0),
                     armed=bool(snap.get("armed")),
                     mode=str(snap.get("mode") or "—"),
-                    connected=mav_ok,
+                    connected=pose_ok,
                     mavlink=mav_ok,
                     role="cue" if vclass == "tower" else None,
                     alt_msl=float(snap["alt_msl"]) if snap.get("alt_msl") is not None else None,
                 )
             )
-            if mav_ok and snap.get("lat") is not None and snap.get("lon") is not None:
+            if pose_ok:
                 self._poses[vid] = out[-1]
                 if snap.get("alt_msl") is not None:
                     self._alt_msl[vid] = float(snap["alt_msl"])
@@ -292,7 +303,7 @@ class WhiteoutAdapter:
     async def send_command(self, command: Command) -> None:
         spec = next((s for s in self._spec if s["vehicle_id"] == command.vehicle_id), None)
         bridge = self._bridges.get(command.vehicle_id)
-        if spec is None or bridge is None or not bridge.is_connected():
+        if spec is None or bridge is None or not bridge.is_connected() or not _position_ready(bridge.snapshot()):
             return
         ready = await self._advance(spec, bridge)
         vclass: str = spec["vehicle_class"]
@@ -448,7 +459,7 @@ class WhiteoutAdapter:
             self._frame_ids[spec.vehicle_id] = frame_id
             pose = self._poses.get(spec.vehicle_id)
             bridge = self._bridges.get(spec.vehicle_id)
-            if pose is None or bridge is None or not bridge.is_connected():
+            if pose is None or bridge is None or not bridge.is_connected() or not self._last_ok.get(spec.vehicle_id, False):
                 self._camera_status[spec.vehicle_id] = {"state": "pose_unavailable"}
                 continue
             # Freeze own-sensor telemetry before inference yields to the loop.
@@ -473,7 +484,8 @@ class WhiteoutAdapter:
             if time.time() - received_at > 4.0:
                 self._camera_status[spec.vehicle_id] = {"state": "inference_too_slow"}
                 continue
-            if self._bridges.get(spec.vehicle_id) is not bridge or not bridge.is_connected():
+            if (self._bridges.get(spec.vehicle_id) is not bridge or not bridge.is_connected()
+                    or not self._last_ok.get(spec.vehicle_id, False)):
                 self._camera_status[spec.vehicle_id] = {"state": "pose_unavailable"}
                 continue
             projected = 0
