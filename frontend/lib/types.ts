@@ -40,6 +40,7 @@ export type Scorecard = {
   collaboration: number;
   efficiency: number;
   tracking: number | null;
+  tracking_basis?: "truth" | "residual" | null;
   time_to_detect_s?: number | null;
   meters_flown?: number;
   commands_issued?: number;
@@ -74,7 +75,21 @@ export type SwarmState = {
     handoff?: { state?: string; receiver?: string | null; evidence?: string | null; cue_source?: string | null };
     tower_confirmation?: { hits: number; required_hits: number; window_s: number };
     observation_age_s?: number | null;
-    metrics?: { confirmed_tower_cues?: number; successful_handoffs?: number; reacquisitions?: number; custody_breaks?: number };
+    metrics?: { confirmed_tower_cues?: number; confirmed_cues?: number; successful_handoffs?: number; reacquisitions?: number; custody_breaks?: number };
+  };
+  judge_track?: {
+    enabled?: boolean;
+    url?: string | null;
+    name?: string;
+    state?: string;
+    created?: boolean;
+    uuid?: string | null;
+    lat?: number | null;
+    lon?: number | null;
+    heading?: number | null;
+    speed?: number | null;
+    error?: string | null;
+    judge_tracks?: { name?: string; uuid?: string; lat?: number; lon?: number }[];
   };
   intents?: Record<string, string>;
   commands?: { vehicle_id: string; type: string; lat?: number | null; lon?: number | null; alt?: number | null; yaw_deg?: number | null; sector?: number | null; command_id?: string | null }[];

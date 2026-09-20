@@ -1,8 +1,8 @@
-"""Airborne reserve, then forward corridor coverage after a confirmed tower cue."""
+"""Long-range racetrack along the channel, then forward corridor after a cue."""
 
 from __future__ import annotations
 
-from behaviors.trees import CRUISE_ALT, forward_search_wp, reacquire_wp, reserve_orbit_wp
+from behaviors.trees import CRUISE_ALT, forward_search_wp, reacquire_wp, river_racetrack_wp
 from geo import haversine_m
 from sim.types import Command, VehicleState
 from world import WorldModel
@@ -13,20 +13,14 @@ from agents.base import AgentDecision, PlatformAgent
 class PlaneAgent(PlatformAgent):
     def __init__(self, vehicle_id: str, vehicle_class: str) -> None:
         super().__init__(vehicle_id, vehicle_class)
-        self._reserve_center: tuple[float, float] | None = None
         self._leg = 0
 
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        if self._reserve_center is None:
-            self._reserve_center = (me.lat, me.lon)
         if not world.mission_active or world.track is None:
-            self.intent = "reserve_ground" if me.alt < 5.0 else "reserve_orbit"
-            # Even a hold command advances the live adapter's takeoff machine.
-            if me.alt < 5.0:
-                return AgentDecision(command=None, intent=self.intent)
-            lat, lon = reserve_orbit_wp(me, self._reserve_center)
-            cmd = Command(me.vehicle_id, "loiter", lat, lon, CRUISE_ALT["plane"])
-            return AgentDecision(command=self.hold_setpoint(cmd, min_m=45.0), intent=self.intent)
+            self.intent = "patrol"
+            lat, lon = river_racetrack_wp(me)
+            cmd = Command(me.vehicle_id, "search_sector", lat, lon, CRUISE_ALT["plane"])
+            return AgentDecision(command=self.hold_setpoint(cmd, min_m=35.0), intent=self.intent)
 
         if world.phase == "reacquire":
             lat, lon = reacquire_wp(world, me)

@@ -85,23 +85,28 @@ class TowerHandoffTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(1002, ["quad-alpha"])
         return await self.tick(1003, ["quad-alpha"])
 
-    async def test_drone_only_contact_and_advisor_cannot_unlock_mission(self):
+    async def test_drone_two_hits_open_the_mission_for_the_plane(self):
         self.brain.world.advisor = {"role_bias": {"copter": "track", "plane": "search"}}
-        for when in (1000, 1001, 1002):
-            state = await self.tick(when, ["quad-alpha", "hawk-alpha"])
-            self.assertFalse(state["c2"]["mission_active"])
-            self.assertIsNone(state["track"])
-            self.assertEqual(state["fleet"]["quad-alpha"]["role"], "reserve")
-            self.assertEqual(state["fleet"]["hawk-alpha"]["role"], "reserve")
+        first = await self.tick(1000, ["quad-alpha"])
+        self.assertFalse(first["c2"]["mission_active"])
+        self.assertEqual(first["c2"]["phase"], "tower_confirm")
+        self.assertEqual(first["fleet"]["hawk-alpha"]["role"], "search")
+        state = await self.tick(1001, ["quad-alpha"])
+        self.assertTrue(state["c2"]["mission_active"])
+        self.assertEqual(state["c2"]["handoff"]["cue_source"], "quad-alpha")
+        self.assertEqual(state["fleet"]["quad-alpha"]["role"], "track")
+        self.assertEqual(state["fleet"]["hawk-alpha"]["role"], "search")
+        self.assertTrue(any(c["vehicle_id"] == "hawk-alpha" for c in state["commands"]))
 
-    async def test_grounded_aircraft_receive_no_takeoff_trigger_before_cue(self):
+    async def test_grounded_aircraft_patrol_commands_advance_takeoff_before_cue(self):
         for v in self.adapter.vehicles:
             if v.vehicle_class in {"plane", "copter"}:
                 v.alt = 0.0
                 v.armed = False
         state = await self.tick(1000)
-        self.assertFalse(any(c["vehicle_id"] in {"quad-alpha", "hawk-alpha"} for c in state["commands"]))
-        self.assertEqual(state["intents"]["hawk-alpha"], "reserve_ground")
+        self.assertTrue({"quad-alpha", "hawk-alpha"}.issubset({c["vehicle_id"] for c in state["commands"]}))
+        self.assertEqual(state["intents"]["hawk-alpha"], "patrol")
+        self.assertEqual(state["intents"]["quad-alpha"], "patrol")
         await self.tick(1001, ["mast-alpha"])
         state = await self.tick(1002, ["mast-alpha"])
         self.assertTrue({"quad-alpha", "hawk-alpha"}.issubset({c["vehicle_id"] for c in state["commands"]}))
@@ -171,6 +176,7 @@ class TowerHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["c2"]["metrics"]["custody_breaks"], 1)
         state = await self.tick(1030, ["quad-alpha"])
         self.assertFalse(state["c2"]["mission_active"])
+        self.assertEqual(state["c2"]["phase"], "tower_confirm")
         state = await self.tick(1031, ["mast-alpha"])
         self.assertEqual(state["c2"]["phase"], "tower_confirm")
         state = await self.tick(1032, ["mast-alpha"])
@@ -196,10 +202,15 @@ class TowerHandoffTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_late_air_frame_cannot_bridge_expired_mission(self):
         await self.acquire()
-        state = await self.tick(1030, ["quad-alpha"])
+        state = await self.tick(1030)
         self.assertEqual(state["c2"]["phase"], "lost")
         self.assertFalse(state["c2"]["mission_active"])
         self.assertIsNone(state["track"])
+        state = await self.tick(1030.4, ["quad-alpha"])
+        self.assertFalse(state["c2"]["mission_active"])
+        state = await self.tick(1031.4, ["quad-alpha"])
+        self.assertTrue(state["c2"]["mission_active"])
+        self.assertEqual(state["c2"]["handoff"]["cue_source"], "quad-alpha")
 
     async def test_expired_tentative_contact_does_not_block_different_tower_candidate(self):
         await self.tick(1000, ["mast-alpha"])

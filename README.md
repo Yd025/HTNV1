@@ -248,4 +248,4 @@ docker compose run --rm --no-deps -e ADAPTER=whiteout backend python -m agent --
 
 Do not run the API controller and the headless controller against the same fleet simultaneously.
 
-The baseline hull detector, projection, background camera polling and HUD camera panels are present. Validate their accuracy, timing and repeated-observation handling before claiming reliable tracking. Confirm the current competition's submission interface before implementing an assumed track-upload endpoint. Keep `ADAPTER=local` for kinematic eval. Do not start compose profile `sitl` alongside arctic-sim (host 5760 collides). Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).
+The baseline hull detector, projection, background camera polling and HUD camera panels are present. After a visual confirm the live adapter posts the fused track to `POST /api/tracks` on simulator port 8010. Keep `ADAPTER=local` for kinematic eval. Do not start compose profile `sitl` alongside arctic-sim (host 5760 collides). Checklist: [docs/SATURDAY_WORKSHOP.md](docs/SATURDAY_WORKSHOP.md).

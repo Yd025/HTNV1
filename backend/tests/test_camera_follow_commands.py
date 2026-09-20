@@ -12,7 +12,7 @@ from geo import bearing_deg, haversine_m, ne_to_ll
 from mavlink_connection import MavlinkBridge
 from sim.cameras import QUAD_CAMERA_PITCH_DEG
 from sim.types import Command, VehicleState
-from sim.whiteout import WhiteoutAdapter
+from sim.whiteout import TAKEOFF_RETRY_S, WhiteoutAdapter
 from tracker import Track
 from world import WorldModel
 
@@ -51,7 +51,7 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
             async def set_mode(self, *args): self.calls.append(("mode", args))
             async def arm(self, *args, **kwargs): self.calls.append(("arm", args))
             async def rc_override(self, *args): self.calls.append(("rc", args))
-            async def takeoff(self, *args): self.calls.append(("takeoff", args))
+            async def takeoff(self, *args, **kwargs): self.calls.append(("takeoff", args, kwargs))
             async def send_goto(self, *args, **kwargs): self.calls.append(("copter_goto", args, kwargs))
             async def send_plane_goto(self, *args): self.calls.append(("plane_goto", args))
         adapter = WhiteoutAdapter()
@@ -61,11 +61,11 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
         targets = {"quadcopter": Command("quadcopter", "goto", 71.99, -94.82, 40, yaw_deg=45),
                    "fixed-wing": Command("fixed-wing", "search_sector", 71.992, -94.825, 90)}
         schedules = {
-            "quadcopter": [{}, {"mode": "GUIDED"}, {"mode": "GUIDED", "armed": True},
-                           {"mode": "GUIDED", "armed": True, "alt": 20}],
-            "fixed-wing": [{}, {"mode": "FBWA", "armed": True},
-                           {"mode": "FBWA", "armed": True, "alt": 7, "groundspeed": 10},
-                           {"mode": "GUIDED", "armed": True, "alt": 20, "groundspeed": 20}],
+            "quadcopter": [{}, {"mode": "GUIDED"}, {"mode": "GUIDED", "armed": True, "lat": 71.995, "lon": -94.84},
+                           {"mode": "GUIDED", "armed": True, "alt": 20, "lat": 71.995, "lon": -94.84}],
+            "fixed-wing": [{}, {"mode": "TAKEOFF", "armed": True, "lat": 71.996, "lon": -94.838},
+                           {"mode": "TAKEOFF", "armed": True, "alt": 1, "lat": 71.996, "lon": -94.838},
+                           {"mode": "TAKEOFF", "armed": True, "alt": 20, "lat": 71.996, "lon": -94.838}],
         }
         with patch("sim.whiteout.time", SimpleNamespace(monotonic=lambda: clock[0])):
             for tick in range(4):
@@ -81,7 +81,75 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bridge.calls[-1][0], expected)
                 self.assertEqual(bridge.calls[-1][1], (targets[name].lat, targets[name].lon, targets[name].alt))
             self.assertEqual(bridges["quadcopter"].calls[-1][2], {"yaw_deg": 45})
-            self.assertTrue(any(call[0] == "plane_goto" and call[1][2] == 60 for call in bridges["fixed-wing"].calls))
+            self.assertEqual(sum(1 for call in bridges["quadcopter"].calls if call[0] == "takeoff"), 1)
+            # ArduPlane rejects NAV_TAKEOFF outside AUTO; TAKEOFF mode flies the climb.
+            self.assertFalse(any(call[0] == "takeoff" for call in bridges["fixed-wing"].calls))
+            self.assertFalse(any(call[0] == "rc" for call in bridges["fixed-wing"].calls))
+            self.assertTrue(any(call[0] == "mode" and call[1][0] == "TAKEOFF" for call in bridges["fixed-wing"].calls))
+
+    async def test_grounded_aircraft_launch_once_per_retry_window(self):
+        class Bridge:
+            def __init__(self, vehicle_id, mode):
+                self.vehicle_id = vehicle_id
+                self.state = {"mode": mode, "armed": True, "alt": 0, "lat": 71.995, "lon": -94.84}
+                self.calls = []
+            def is_connected(self): return True
+            def snapshot(self): return dict(self.state)
+            async def set_mode(self, *args): self.calls.append(("mode", args))
+            async def arm(self, *args, **kwargs): self.calls.append(("arm", args))
+            async def rc_override(self, *args): self.calls.append(("rc", args))
+            async def takeoff(self, *args, **kwargs): self.calls.append(("takeoff", args, kwargs))
+            async def send_goto(self, *args, **kwargs): self.calls.append(("copter_goto", args, kwargs))
+            async def send_plane_goto(self, *args): self.calls.append(("plane_goto", args))
+        adapter = WhiteoutAdapter()
+        clock = [50.0]
+        bridges = {"quadcopter": Bridge("quadcopter", "GUIDED"), "fixed-wing": Bridge("fixed-wing", "TAKEOFF")}
+        adapter._bridges = bridges
+        dummy = {"quadcopter": Command("quadcopter", "goto", 71.99, -94.82, 40),
+                 "fixed-wing": Command("fixed-wing", "search_sector", 71.992, -94.825, 90)}
+        with patch("sim.whiteout.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            for _ in range(6):
+                for name, bridge in bridges.items():
+                    await adapter.send_command(dummy[name])
+                clock[0] += 2
+            self.assertEqual(sum(1 for c in bridges["quadcopter"].calls if c[0] == "takeoff"), 1)
+            takeoff_modes = [c for c in bridges["fixed-wing"].calls if c[0] == "mode" and c[1][0] == "TAKEOFF"]
+            self.assertEqual(len(takeoff_modes), 1)
+            copter_gotos = [call for call in bridges["quadcopter"].calls if call[0] == "copter_goto"]
+            self.assertEqual(len(copter_gotos), 1)
+            self.assertEqual(copter_gotos[0][1][2], 40)
+            # Grounded means the launch failed; nothing may be prosecuted yet.
+            self.assertFalse(any(call[0] == "plane_goto" for call in bridges["fixed-wing"].calls))
+            self.assertFalse(any(call[0] == "rc" for call in bridges["fixed-wing"].calls))
+
+            # Past the retry window a still-grounded aircraft starts over.
+            clock[0] += TAKEOFF_RETRY_S
+            for _ in range(3):
+                for name in bridges:
+                    await adapter.send_command(dummy[name])
+                clock[0] += 2
+        self.assertEqual(sum(1 for c in bridges["quadcopter"].calls if c[0] == "takeoff"), 2)
+        self.assertEqual(len([c for c in bridges["fixed-wing"].calls if c[0] == "mode" and c[1][0] == "TAKEOFF"]), 2)
+
+    async def test_tick_actuation_advances_aircraft_without_a_mission_command(self):
+        class Bridge:
+            def __init__(self):
+                self.state = {"mode": "MANUAL", "armed": False, "alt": 0}
+                self.calls = []
+            def is_connected(self): return True
+            def snapshot(self): return dict(self.state)
+            async def set_mode(self, *args): self.calls.append(("mode", args))
+            async def arm(self, *args, **kwargs): self.calls.append(("arm", args))
+            async def rc_override(self, *args): self.calls.append(("rc", args))
+            async def takeoff(self, *args, **kwargs): self.calls.append(("takeoff", args, kwargs))
+            async def send_goto(self, *args, **kwargs): self.calls.append(("copter_goto", args, kwargs))
+            async def send_plane_goto(self, *args): self.calls.append(("plane_goto", args))
+        adapter = WhiteoutAdapter()
+        adapter._bridges = {"quadcopter": Bridge(), "fixed-wing": Bridge(), "tower-1": Bridge()}
+        await adapter.tick_actuation()
+        self.assertTrue(any(call[0] == "mode" and call[1][0] == "GUIDED" for call in adapter._bridges["quadcopter"].calls))
+        self.assertTrue(any(call[0] == "arm" for call in adapter._bridges["fixed-wing"].calls))
+        self.assertEqual(adapter._bridges["tower-1"].calls, [])
 
 
 class CameraFollowTests(unittest.TestCase):

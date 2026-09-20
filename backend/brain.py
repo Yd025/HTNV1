@@ -30,6 +30,7 @@ except ImportError:  # local eval without Docker deps
 
 from agents import MissionCommand, Squad
 from evidence import ObservationGate
+from judge_tracks import JudgeTrackPublisher
 from metrics import MetricsEngine, Scorecard
 from sim.adapter import build_adapter
 from sim.types import Command, SimAdapter
@@ -76,6 +77,8 @@ class SwarmBrain:
         self._search_sample_time_s: float | None = None
         self._search_commands: dict[str, Command] = {}
         self._search_detected = False
+        self.judge = JudgeTrackPublisher(enabled=self.adapter.name == "whiteout")
+        self._judge_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         if self._closed:
@@ -169,12 +172,10 @@ class SwarmBrain:
                 if expired or (tentative_stamp is not None and receipt_time - tentative_stamp > self.c2.confirmation_window_s):
                     self.tracker.reset()
                     self.world.track = None
-                # Before the first confirmed tower cue, airborne observations
-                # cannot initialize the mission or poison its target association.
                 mission_detections = [d for d in detections
                                       if d.source_id in self.world.vehicles
                                       and comms.get(d.source_id, False)
-                                      and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower")]
+                                      and self.world.vehicles[d.source_id].vehicle_class in {"tower", "plane", "copter"}]
                 self.world.track = self.tracker.update(mission_detections, now=self._started + elapsed_s,
                                                        observation_now=receipt_time)
                 self.world.accepted_detections = list(self.tracker.accepted_detections)
@@ -236,6 +237,14 @@ class SwarmBrain:
                     self.metrics.note_command()
                 self.last_command_at = receipt_time
                 self.world.last_command = cmd.as_dict()
+            tick_actuation = getattr(self.adapter, "tick_actuation", None)
+            if callable(tick_actuation):
+                try:
+                    await asyncio.wait_for(tick_actuation(), timeout=0.5)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("adapter tick_actuation failed")
             self.commands_last = cmds
 
             truth = self.adapter.truth_target()
@@ -251,6 +260,10 @@ class SwarmBrain:
                 self._hz_t = now
             self.last_error = None
             self._published_sequence = self.sequence
+            payload = self.judge.offer(self.c2.active, self.world.track)
+            if payload is not None:
+                if self._judge_task is None or self._judge_task.done():
+                    self._judge_task = asyncio.create_task(self.judge.publish(payload), name="judge-track")
             state = self.snapshot()
             if self.recorder:
                 self.recorder.offer({
@@ -269,10 +282,9 @@ class SwarmBrain:
         heatmap = self.metrics.heatmap if self.metrics else []
         scores = self.score.as_dict()
         if self._truth is None:
-            # Metrics owner retains the legacy heuristic internally. Do not expose
-            # uncertainty/confidence as measured tracking accuracy on the wire.
-            scores["tracking"] = None
-            scores["track_error_m"] = None
+            scores["tracking_basis"] = "residual" if track else None
+        else:
+            scores["tracking_basis"] = "truth"
         return {
             "type": "state",
             "adapter": getattr(self.adapter, "name", "unknown"),
@@ -298,6 +310,7 @@ class SwarmBrain:
             "blackboard": self.world.blackboard[-12:],
             "advisor": self.world.advisor,
             "c2": self.c2.snapshot(),
+            "judge_track": self.judge.snapshot(),
             "intents": self.squad.intents(),
             "commands": [c.as_dict() for c in self.commands_last],
             "arena": {
@@ -340,11 +353,16 @@ class SwarmBrain:
             return
         self._closed = True
         self.connected = False
+        task, self._judge_task = self._judge_task, None
+        if task is not None:
+            task.cancel()
         try:
             close = getattr(self.adapter, "close", None)
             if close:
                 await close()
         finally:
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
             if self.recorder:
                 await self.recorder.close()
 

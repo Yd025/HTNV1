@@ -38,15 +38,17 @@ FORT_ROSS_HALF_M = 3250.0
 HEADING_OFFSET_DEG = -49.8
 
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
-AIRBORNE_ALT = {"plane": 15.0, "copter": 8.0, "rover": 0.0, "tower": 0.0}
-# Camera optical centre AMSL from fort_ross.world pose.z + HEAD_Z (terrain/tower.py).
-CAM_ALT_MSL = {"tower-1": 119.5, "tower-2": 229.3}
+# Mission gotos are legal once the craft has left the pad, not only at cruise.
+CLIMB_READY_M = 3.0
+TAKEOFF_WAIT_S = 6.0
+# Still on the pad this long after a takeoff plus climb waypoint means the
+# attempt failed (rejected launch, crash-disarm). Start the sequence over.
+TAKEOFF_RETRY_S = 20.0
+# Camera optical centre AMSL from the rebuilt Fort Ross world pose.z.
+CAM_ALT_MSL = {"tower-1": 28.821, "tower-2": 13.991}
 PITCH_MIN_DEG = -30.0
 PITCH_MAX_DEG = 45.0
 CAM_FAR_M = 1480.0
-# Fort Ross: vessel is ~5° down from either hilltop. Steeper than this
-# is the near slope (tower-2 sits 229 m over rock that fills a 60° EO).
-SEA_MAX_DOWN_DEG = 8.5
 
 
 def _wrap180(deg: float) -> float:
@@ -87,23 +89,23 @@ def _fleet_spec() -> list[dict[str, Any]]:
             "vehicle_class": "plane",
             "conn": os.getenv("ARCTIC_PLANE", f"udpout:{h}:14560"),
             "fallback": f"udpout:{h}:14561",
+            # Sea-ice strip from arctic-sim .env.example; TAKEOFF mode rolls and
+            # climbs on the spawn heading, so no aim point is needed.
             "home": (71.998195, -94.841967),
-            # Strip heading from arctic-sim ASSET_3 `>lat,lon`.
-            "takeoff_aim": (71.997790, -94.846245),
         },
         {
             "vehicle_id": "tower-1",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER1", f"udpout:{h}:14580"),
             "fallback": f"udpout:{h}:14581",
-            "home": (71.980671, -94.853711),
+            "home": (71.990402, -94.749271),
         },
         {
             "vehicle_id": "tower-2",
             "vehicle_class": "tower",
             "conn": os.getenv("ARCTIC_TOWER2", f"udpout:{h}:14590"),
             "fallback": f"udpout:{h}:14591",
-            "home": (72.011778, -94.804721),
+            "home": (71.997531, -94.874296),
         },
     ]
     rover = os.getenv("ARCTIC_ROVER", "").strip()
@@ -121,14 +123,21 @@ def _fleet_spec() -> list[dict[str, Any]]:
 
 
 class _Air:
-    __slots__ = ("phase", "last_cmd_at", "last_takeoff_at", "takeoff_sent", "arm_tries")
+    __slots__ = ("phase", "last_cmd_at", "last_takeoff_at", "takeoff_sent", "climb_sent", "arm_tries")
 
     def __init__(self) -> None:
         self.phase = "boot"
         self.last_cmd_at = 0.0
         self.last_takeoff_at = 0.0
         self.takeoff_sent = False
+        self.climb_sent = False
         self.arm_tries = 0
+
+    def rearm_takeoff(self) -> None:
+        """Forget a spent takeoff attempt so the sequence can run again."""
+        self.phase = "boot"
+        self.takeoff_sent = False
+        self.climb_sent = False
 
 
 class WhiteoutAdapter:
@@ -144,8 +153,8 @@ class WhiteoutAdapter:
             half_m=FORT_ROSS_HALF_M,
             heading_offset_deg=HEADING_OFFSET_DEG,
             towers=[
-                TowerMount("tower-1", 71.980671, -94.853711, heading=0.0, fov_deg=60.0, range_m=1500.0),
-                TowerMount("tower-2", 72.011778, -94.804721, heading=0.0, fov_deg=60.0, range_m=1500.0),
+                TowerMount("tower-1", 71.990402, -94.749271, heading=29.471640, fov_deg=60.0, range_m=1500.0),
+                TowerMount("tower-2", 71.997531, -94.874296, heading=186.840964, fov_deg=60.0, range_m=1500.0),
             ],
         )
         self._spec = _fleet_spec()
@@ -237,7 +246,7 @@ class WhiteoutAdapter:
             vclass: VehicleClass = spec["vehicle_class"]
             look = self._look.get(vid)
             if vclass == "tower":
-                alt = CAM_ALT_MSL.get(vid, 120.0)
+                alt = CAM_ALT_MSL.get(vid, 25.0)
                 heading = look[0] if look else float(snap.get("heading") or 0.0)
             else:
                 alt = float(snap.get("alt") or 0.0)
@@ -309,6 +318,16 @@ class WhiteoutAdapter:
         else:
             await bridge.send_goto(command.lat, command.lon, alt)
 
+    async def tick_actuation(self) -> None:
+        """Arm/takeoff even when the squad emitted no command this tick."""
+        for spec in self._spec:
+            if spec["vehicle_class"] not in {"plane", "copter", "rover"}:
+                continue
+            bridge = self._bridges.get(spec["vehicle_id"])
+            if bridge is None or not bridge.is_connected():
+                continue
+            await self._advance(spec, bridge)
+
     def comms_ok(self, vehicle_id: str) -> bool:
         return self._last_ok.get(vehicle_id, False)
 
@@ -366,16 +385,9 @@ class WhiteoutAdapter:
             self._tower_manual.add(vid)
         want = bearing_deg(pose.lat, pose.lon, lat, lon)
         true_rng = max(40.0, haversine_m(pose.lat, pose.lon, lat, lon))
-        cam_alt = CAM_ALT_MSL.get(vid, max(float(pose.alt or 0.0), 80.0))
+        cam_alt = CAM_ALT_MSL.get(vid) or self._alt_msl.get(vid) or max(float(pose.alt or 0.0), 5.0)
         want_pitch = math.degrees(math.atan2((alt or 0.0) - cam_alt, true_rng))
-        if (alt or 0.0) < 2.0:
-            want_pitch = max(want_pitch, -SEA_MAX_DOWN_DEG)
-        if vid == "tower-2":
-            # Origin/west bearings hit the pad. Ship lane is the south gap
-            # (pan ≈ −70°, true ≈ 110°) with the head 8° above the crest.
-            if 150.0 <= want <= 260.0:
-                want = 110.0
-            want_pitch = 8.0
+        want_pitch = max(PITCH_MIN_DEG, min(PITCH_MAX_DEG, want_pitch))
         rng = min(CAM_FAR_M, true_rng)
         yaw = _yaw_pwm(want)
         pitch = _pitch_pwm(want_pitch)
@@ -473,20 +485,11 @@ class WhiteoutAdapter:
         air = self._air[spec["vehicle_id"]]
         now = time.monotonic()
         snap = bridge.snapshot()
-        alt_now = float(snap.get("alt") or 0.0)
-        # Belly X8: RC override expires in ~3 s. Keep the pusher lit
-        # every tick of the ground roll or TAKEOFF/NAV_TAKEOFF never moves.
-        if vclass == "plane" and alt_now < AIRBORNE_ALT["plane"] and snap.get("armed"):
-            # GUIDED ignores RC throttle (NAV_TAKEOFF ACK 4). FBWA uses the sticks.
-            gs_now = float(snap.get("groundspeed") or 0.0)
-            pitch_stick = 1620 if gs_now >= 9.0 else 1500
-            await bridge.rc_override(1500, pitch_stick, 1900, 1500)
+        alt = float(snap.get("alt") or 0.0)
         if now - air.last_cmd_at < 1.8:
             return air.phase == "ready"
         mode = str(snap.get("mode") or "").upper()
         armed = bool(snap.get("armed"))
-        alt = alt_now
-        need_alt = AIRBORNE_ALT[vclass]
 
         logger.info(
             "advance %s phase=%s mode=%s armed=%s alt=%.1f",
@@ -508,53 +511,102 @@ class WhiteoutAdapter:
             return True
 
         if vclass == "plane":
-            gs = float(snap.get("groundspeed") or 0.0)
-            if not armed:
-                await bridge.set_mode("FBWA")
-                air.arm_tries += 1
-                await bridge.arm(True, force=True)
-                air.last_cmd_at = now
-                return False
-            if alt < need_alt:
-                # FBWA rolls the belly; once it has energy, GUIDED holds the climb.
-                if alt >= 6.0 and gs >= 8.0:
-                    await bridge.rc_override(0, 0, 0, 0)
-                    await bridge.set_mode("GUIDED")
-                    aim = spec.get("takeoff_aim") or spec.get("home")
-                    if aim:
-                        await bridge.send_plane_goto(aim[0], aim[1], 60.0)
-                    air.last_cmd_at = now
-                    return False
-                if "FBWA" not in mode:
-                    await bridge.set_mode("FBWA")
-                    air.last_cmd_at = now
-                    return False
-                air.takeoff_sent = True
-                air.last_cmd_at = now
-                return False
-            await bridge.rc_override(0, 0, 0, 0)
+            return await self._advance_plane(spec, bridge, air, snap, mode, armed, alt, now)
+        return await self._advance_copter(spec, bridge, air, snap, mode, armed, alt, now)
+
+    async def _advance_plane(
+        self,
+        spec: dict[str, Any],
+        bridge: MavlinkBridge,
+        air: _Air,
+        snap: dict[str, Any],
+        mode: str,
+        armed: bool,
+        alt: float,
+        now: float,
+    ) -> bool:
+        if not armed:
+            # Disarmed while grounded means the previous launch is spent.
+            if air.takeoff_sent:
+                air.rearm_takeoff()
+            # ArduPlane rejects NAV_TAKEOFF outside AUTO; TAKEOFF mode owns the
+            # ground roll and climb to TKOFF_ALT, then hands back to GUIDED.
+            await bridge.set_mode("TAKEOFF")
+            air.arm_tries += 1
+            await bridge.arm(True, force=True)
+            air.last_cmd_at = now
+            return False
+        if alt >= CLIMB_READY_M:
             if "GUIDED" not in mode:
                 await bridge.set_mode("GUIDED")
-                air.last_cmd_at = now
             air.phase = "ready"
+            air.last_cmd_at = now
             return True
+        # A fix is only needed to start a launch, not to keep flying one.
+        if snap.get("lat") is None or alt < -5.0:
+            air.last_cmd_at = now
+            return False
+        if not air.takeoff_sent:
+            await bridge.set_mode("TAKEOFF")
+            air.takeoff_sent = True
+            air.last_takeoff_at = now
+            air.last_cmd_at = now
+            return False
+        if "TAKEOFF" not in mode:
+            # Something knocked it out of the climb; put it back on the ramp.
+            await bridge.set_mode("TAKEOFF")
+            air.last_cmd_at = now
+            return False
+        if (now - air.last_takeoff_at) >= TAKEOFF_RETRY_S:
+            air.rearm_takeoff()
+        air.last_cmd_at = now
+        return False
 
-        # copter
+    async def _advance_copter(
+        self,
+        spec: dict[str, Any],
+        bridge: MavlinkBridge,
+        air: _Air,
+        snap: dict[str, Any],
+        mode: str,
+        armed: bool,
+        alt: float,
+        now: float,
+    ) -> bool:
         if "GUIDED" not in mode:
             await bridge.set_mode("GUIDED")
             air.last_cmd_at = now
             return False
         if not armed:
+            if air.takeoff_sent:
+                air.rearm_takeoff()
             air.arm_tries += 1
             await bridge.arm(True, force=True)
             air.last_cmd_at = now
             return False
-        if alt < need_alt:
-            if not air.takeoff_sent or (now - air.last_takeoff_at) >= 4.0:
-                await bridge.takeoff(CRUISE_ALT["copter"])
-                air.takeoff_sent = True
-                air.last_takeoff_at = now
-                air.last_cmd_at = now
+        if alt >= CLIMB_READY_M:
+            air.phase = "ready"
+            air.last_cmd_at = now
+            return True
+        # A fix is only needed to start a launch, not to keep flying one.
+        if snap.get("lat") is None or alt < -5.0:
+            air.last_cmd_at = now
             return False
-        air.phase = "ready"
-        return True
+        if air.climb_sent and (now - air.last_takeoff_at) >= TAKEOFF_RETRY_S:
+            air.rearm_takeoff()
+        if not air.takeoff_sent:
+            await bridge.takeoff(CRUISE_ALT["copter"])
+            air.takeoff_sent = True
+            air.last_takeoff_at = now
+            air.last_cmd_at = now
+            return False
+        if not air.climb_sent and (now - air.last_takeoff_at) >= TAKEOFF_WAIT_S:
+            home = spec.get("home") or (0.0, 0.0)
+            lat = float(snap["lat"]) if snap.get("lat") is not None else home[0]
+            lon = float(snap["lon"]) if snap.get("lon") is not None else home[1]
+            await bridge.send_goto(lat, lon, CRUISE_ALT["copter"])
+            air.climb_sent = True
+            air.last_cmd_at = now
+            return False
+        air.last_cmd_at = now
+        return False

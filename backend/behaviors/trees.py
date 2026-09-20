@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import geo
 import math
+import time
 from geo import bearing_deg, heading_to_ne, ll_to_ne, ne_to_ll
 from sim.types import Command, VehicleState
 from tracker import Track
@@ -11,6 +12,25 @@ from world import WorldModel
 
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
 HOLD = {"copter": (-80.0, 40.0), "rover": (-250.0, -80.0), "plane": (200.0, -300.0)}
+CAM_FAR_M = 1480.0
+SWEEP_DEG_S = 6.0
+# Fort Ross channel, fitted to the 401 DEM water cells in arctic-sim
+# out/fort_ross/terrain.json: a 1.4 km wide strait on true 073.3 deg, centred
+# 218 m north / 394 m east of the arena origin. Terrain, not the target's
+# course — re-derive from the water mask if the site changes.
+RIVER_CENTRE_NE = (218.0, 394.0)
+RIVER_BEARING_DEG = 73.3
+# Plane racetrack: 3 km straights, 400 m apart, joined by 400 m radius turns.
+RIVER_LEG_HALF_M = 1500.0
+RIVER_LANE_OFFSET_M = 400.0
+# Quad works a compact box on the centreline, well along-channel from the plane.
+RIVER_BOX_HALF_M = 320.0
+RIVER_QUAD_STANDOFF_M = 700.0
+# 180° water arcs. Tower-2 is +160° clockwise from the uphill 186.8° look.
+TOWER_SWEEP = {
+    "tower-1": {"center": 29.471640, "half": 90.0},
+    "tower-2": {"center": 346.840964, "half": 90.0},
+}
 
 
 def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
@@ -23,8 +43,8 @@ def tick_vehicle(v: VehicleState, world: WorldModel) -> Command | None:
     return squad.tick(v, world).command
 
 
-def water_stare(sector: int, observer: VehicleState | None = None) -> tuple[float, float]:
-    """Look points on water. From a tower, stay inside the 1.5 km camera clip."""
+def water_stare(sector: int, observer: VehicleState | None = None, now: float | None = None) -> tuple[float, float]:
+    """Look point on water at the camera far clip along the current sweep bearing."""
     if observer is None:
         rings = (
             (800.0, 30.0),
@@ -37,18 +57,20 @@ def water_stare(sector: int, observer: VehicleState | None = None) -> tuple[floa
         dist, bearing = rings[int(sector) % len(rings)]
         n, e = heading_to_ne(bearing)
         return ne_to_ll(n * dist, e * dist)
-    # Tower-1: channel through the origin. Tower-2: south gap over the
-    # crest — origin bearing stares into the hill; the ship lane is ~110° true.
-    if "2" in observer.vehicle_id:
-        brg = 110.0
-        sweep = (-8.0, -4.0, 0.0, 4.0, 8.0, 2.0)[int(sector) % 6]
-        dist = 1800.0
-    else:
-        brg = bearing_deg(observer.lat, observer.lon, geo.ORIGIN_LAT, geo.ORIGIN_LON)
-        sweep = (-6.0, 0.0, 6.0, -6.0, 0.0, 6.0)[int(sector) % 6]
-        dist = 2200.0
-    n, e = heading_to_ne(brg + sweep)
-    return ne_to_ll(n * dist, e * dist, observer.lat, observer.lon)
+    bearing = sweep_bearing(observer.vehicle_id, now)
+    n, e = heading_to_ne(bearing)
+    return ne_to_ll(n * CAM_FAR_M, e * CAM_FAR_M, observer.lat, observer.lon)
+
+
+def sweep_bearing(vehicle_id: str, now: float | None = None) -> float:
+    """Triangle wave at 6 deg/s across the tower's water sector."""
+    cfg = TOWER_SWEEP.get(vehicle_id, {"center": 0.0, "half": 45.0})
+    half = cfg["half"]
+    period = max(1.0, 2.0 * half / SWEEP_DEG_S)
+    stamp = time.monotonic() if now is None else now
+    phase = stamp % (2.0 * period)
+    offset = -half + SWEEP_DEG_S * phase if phase < period else half - SWEEP_DEG_S * (phase - period)
+    return (cfg["center"] + offset) % 360.0
 
 
 def cue_ll(world: WorldModel) -> tuple[float, float] | None:
@@ -121,6 +143,71 @@ def reserve_orbit_wp(me: VehicleState, center: tuple[float, float]) -> tuple[flo
     cn, ce = ll_to_ne(*center)
     angle = math.atan2(e - ce, n - cn) + math.pi / 3.0
     return bounded_wp(cn + 160.0 * math.cos(angle), ce + 160.0 * math.sin(angle))
+
+
+def _river_frame() -> tuple[tuple[float, float], tuple[float, float]]:
+    """Unit vectors along and across the channel, in arena north/east metres."""
+    return heading_to_ne(RIVER_BEARING_DEG), heading_to_ne(RIVER_BEARING_DEG + 90.0)
+
+
+def river_ne(along_m: float, across_m: float) -> tuple[float, float]:
+    """Channel coordinates to arena north/east metres."""
+    (an, ae), (cn, ce) = _river_frame()
+    centre_n, centre_e = RIVER_CENTRE_NE
+    return centre_n + an * along_m + cn * across_m, centre_e + ae * along_m + ce * across_m
+
+
+def river_coords(lat: float, lon: float) -> tuple[float, float]:
+    """Position as (along-channel, across-channel) metres from the channel centre."""
+    (an, ae), (cn, ce) = _river_frame()
+    north, east = ll_to_ne(lat, lon)
+    dn, de = north - RIVER_CENTRE_NE[0], east - RIVER_CENTRE_NE[1]
+    return dn * an + de * ae, dn * cn + de * ce
+
+
+def _river_ring() -> list[tuple[float, float]]:
+    """Racetrack in channel coordinates: two straights joined by 180 deg turns."""
+    leg, lane = RIVER_LEG_HALF_M, RIVER_LANE_OFFSET_M
+    turn = (math.pi / 4.0, math.pi / 2.0, 3.0 * math.pi / 4.0)
+    ring = [(-leg + i * leg / 2.0, lane) for i in range(5)]
+    ring += [(leg + lane * math.sin(a), lane * math.cos(a)) for a in turn]
+    ring += [(leg - i * leg / 2.0, -lane) for i in range(5)]
+    ring += [(-leg - lane * math.sin(a), -lane * math.cos(a)) for a in turn]
+    return ring
+
+
+def _next_on_circuit(
+    lat: float, lon: float, circuit: list[tuple[float, float]]
+) -> tuple[float, float]:
+    """Nearest leg of a closed channel circuit, then the waypoint after it."""
+    along, across = river_coords(lat, lon)
+    nearest = min(
+        ((along - s) ** 2 + (across - w) ** 2, i) for i, (s, w) in enumerate(circuit)
+    )[1]
+    return bounded_wp(*river_ne(*circuit[(nearest + 1) % len(circuit)]))
+
+
+def river_racetrack_wp(v: VehicleState) -> tuple[float, float]:
+    """Long-range oval along the channel; the plane's standing search pattern."""
+    return _next_on_circuit(v.lat, v.lon, _river_ring())
+
+
+def river_box_wp(
+    v: VehicleState,
+    avoid: VehicleState | None = None,
+    bias: tuple[float, float] | None = None,
+) -> tuple[float, float]:
+    """Compact box on the channel centreline; the quad's targeted search."""
+    if bias is not None:
+        centre = river_coords(*bias)[0]
+    elif avoid is not None:
+        # Hold a standoff down-channel of the plane so the two do not share cells.
+        centre = -math.copysign(RIVER_QUAD_STANDOFF_M, river_coords(avoid.lat, avoid.lon)[0] or 1.0)
+    else:
+        centre = 0.0
+    box = RIVER_BOX_HALF_M
+    corners = [(centre + box, box), (centre + box, -box), (centre - box, -box), (centre - box, box)]
+    return _next_on_circuit(v.lat, v.lon, corners)
 
 
 def _search_half() -> float:

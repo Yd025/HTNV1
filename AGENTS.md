@@ -4,7 +4,7 @@ Read this before editing. This file is the project scope for coding agents (Curs
 
 ## Current user-authorized mission (September 19, 2026)
 
-The current task supersedes the historical plane-always-search and pre-cue drone-search doctrine below. Optimize and freeze two tower sites first; require repeated fresh tower evidence to dispatch the quadcopter and fixed-wing; confirm handoff only from fresh accepted aircraft detections; continue aircraft tracking outside tower view; coast/reacquire with bounded uncertainty and expire lost contacts. Grounded aircraft must not receive an arming/takeoff-triggering command before a confirmed cue. No truth coordinates enter decision logic. The optional image-model path must remain separate from the fast control loop and fail visibly if configured weights/dependencies are missing. The offline graph sensor model is explicitly synthetic; physical sensor calibration and actual image training require data.
+The current task supersedes the historical tower-first reserve doctrine below. Use the frozen Fort Ross tower pair from the training report. Plane and quad arm and patrol immediately. Any camera — tower, quad, or plane — can open the shared mission after two distinct fresh visual observations; the other aircraft then prosecute the same fused track. Continue tracking outside tower view; coast/reacquire with bounded uncertainty and expire lost contacts. Publish the fused estimate to `POST /api/tracks` on sim port 8010. No truth coordinates enter decision logic. The optional image-model path must remain separate from the fast control loop and fail visibly if configured weights/dependencies are missing. The offline graph sensor model is explicitly synthetic; physical sensor calibration and actual image training require data.
 
 ## Current four-person team assignment
 
@@ -175,7 +175,7 @@ Python imports assume **cwd = `backend/`** (Docker `WORKDIR /app`). Do not use `
 
 **HUD / Astra** — prettier ice, lights, craft meshes in `TacticalScene.tsx` only. Do not invent a second telemetry path.
 
-**Saturday** — `ADAPTER=whiteout` against arctic-sim `udpout`. Freeze BT gains unless their metric definition differs. The baseline camera detector/projection lives in `sim/detector.py` and still needs accuracy/timing validation. Verify the competition's actual track-submission interface before implementing it; no upload endpoint is established here. Swap HUD terrain only after validating the supplied mesh and coordinate convention.
+**Saturday** — `ADAPTER=whiteout` against arctic-sim `udpout`. Freeze BT gains unless their metric definition differs. The baseline camera detector/projection lives in `sim/detector.py` and still needs accuracy/timing validation. The fused track is posted to `POST /api/tracks` on simulator port 8010. Swap HUD terrain only after validating the supplied mesh and coordinate convention.
 
 **SITL** — unique TCP per vehicle via env `MAVLINK_PLANE/COPTER/ROVER`. Image `radarku/ardupilot-sitl` may ignore `VEHICLE`; kinematic fallback is expected.
 

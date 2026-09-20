@@ -1,8 +1,8 @@
-"""Close vessel tracking only after C2 confirms a tower cue."""
+"""Targeted channel box down-channel of the plane, then camera-follow after a cue."""
 
 from __future__ import annotations
 
-from behaviors.trees import CRUISE_ALT, camera_follow_wp, cue_ll, reacquire_wp
+from behaviors.trees import CRUISE_ALT, camera_follow_wp, cue_ll, reacquire_wp, river_box_wp
 from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
@@ -11,13 +11,7 @@ from agents.base import AgentDecision, PlatformAgent
 
 
 class CopterAgent(PlatformAgent):
-    def __init__(self, vehicle_id: str, vehicle_class: str) -> None:
-        super().__init__(vehicle_id, vehicle_class)
-        self._reserve_point: tuple[float, float] | None = None
-
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        if self._reserve_point is None:
-            self._reserve_point = (me.lat, me.lon)
         aim = cue_ll(world)
         if aim:
             follow = camera_follow_wp(world.track, me)
@@ -39,8 +33,8 @@ class CopterAgent(PlatformAgent):
                                                   "custody_confirmed": world.custody_source == me.vehicle_id})
             return AgentDecision(command=self.hold_setpoint(cmd, min_m=12.0), calls=self.calls_of(call), intent=self.intent)
 
-        self.intent = "reserve_ground" if me.alt < 5.0 else "reserve_hold"
-        if me.alt < 5.0:
-            return AgentDecision(command=None, intent=self.intent)
-        cmd = Command(me.vehicle_id, "hold", *self._reserve_point, CRUISE_ALT["copter"])
+        self.intent = "patrol"
+        plane = next((v for v in world.vehicles.values() if v.vehicle_class == "plane"), None)
+        lat, lon = river_box_wp(me, avoid=plane)
+        cmd = Command(me.vehicle_id, "goto", lat, lon, CRUISE_ALT["copter"])
         return AgentDecision(command=self.hold_setpoint(cmd, min_m=30.0), intent=self.intent)

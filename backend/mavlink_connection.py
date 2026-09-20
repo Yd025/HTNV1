@@ -26,6 +26,9 @@ logger = logging.getLogger("overwatch.mavlink")
 MAVLINK_CONNECTION = os.getenv("MAVLINK_CONNECTION", "tcp:sitl:5760")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "copter-1")
 CONNECT_RETRY_SEC = float(os.getenv("MAVLINK_RETRY_SEC", "3"))
+# A udpout socket to a host port Docker failed to publish never errors: sends
+# vanish and nothing arrives. Heartbeat age is the only evidence the link died.
+LINK_STALE_SEC = float(os.getenv("MAVLINK_STALE_SEC", "8"))
 
 # Ignore velocity/accel/yaw; send only lat/lon/alt (see MAVLink type_mask).
 GOTO_TYPE_MASK = 0b110111111000  # 3576: ignore velocity, acceleration, yaw and yaw rate.
@@ -62,9 +65,23 @@ class MavlinkBridge:
         self._io_lock = asyncio.Lock()
         self._last_gcs_hb = 0.0
         self._pump_task: asyncio.Task[None] | None = None
+        self._stale_logged = False
 
     def is_connected(self) -> bool:
-        return self.connected and self.conn is not None
+        if not self.connected or self.conn is None:
+            return False
+        last = self.last_heartbeat_at
+        if last is not None and time.monotonic() - last > LINK_STALE_SEC:
+            if not self._stale_logged:
+                self._stale_logged = True
+                logger.warning(
+                    "MAVLink %s silent for %.0fs on %s — treating link as down",
+                    self.vehicle_id,
+                    time.monotonic() - last,
+                    self.conn_str,
+                )
+            return False
+        return True
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._state)
@@ -82,6 +99,7 @@ class MavlinkBridge:
                 await asyncio.to_thread(conn.close)
         self.last_heartbeat_at = None
         self._last_gcs_hb = 0.0
+        self._stale_logged = False
 
     async def connect(self, timeout: float = 30.0) -> None:
         """Retry until SITL accepts the TCP GCS connection."""
@@ -103,6 +121,9 @@ class MavlinkBridge:
                         await asyncio.to_thread(conn.close)
                     raise
                 self.connected = True
+                # Start the silence clock now; _connect_blocking already saw a heartbeat.
+                self.last_heartbeat_at = time.monotonic()
+                self._stale_logged = False
                 if int(getattr(self.conn, "target_component", 0) or 0) == 0:
                     self.conn.target_component = 1
                 if self._pump_task is None or self._pump_task.done():
@@ -232,6 +253,7 @@ class MavlinkBridge:
     def _ingest_message(self, msg_type: str, msg: Any) -> None:
         if msg_type == "HEARTBEAT":
             self.last_heartbeat_at = time.monotonic()
+            self._stale_logged = False
             self._state["sysid"] = getattr(self.conn, "target_system", None)
             self._state["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
             self._state["mode"] = self._decode_mode(self.conn, msg) if self.conn else str(msg.custom_mode)

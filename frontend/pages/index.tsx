@@ -317,18 +317,33 @@ export default function CommandCenter() {
                   />
                   <Score
                     label="Tracking accuracy"
-                    value={
-                      state.scores?.track_error_m == null
-                        ? undefined
-                        : state.scores.tracking
-                    }
+                    value={state.scores?.tracking}
                     detail={
-                      state.scores?.track_error_m != null
+                      state.scores?.tracking_basis === "truth"
                         ? `${fmt(state.scores.track_error_m, 1)} m error against truth`
-                        : "Evaluation truth unavailable"
+                        : state.track
+                          ? `${fmt(state.scores?.track_error_m, 1)} m residual · no official truth`
+                          : "Waiting for a confirmed visual track"
                     }
                     icon="target"
                   />
+                </section>
+                <section className="judge-track-strip" aria-label="Judge track channel">
+                  <div>
+                    <strong>Judge track</strong>
+                    <span>
+                      {state.judge_track?.enabled
+                        ? state.judge_track.state === "error"
+                          ? `POST failed · ${state.judge_track.error || "unreachable"}`
+                          : state.judge_track.lat != null
+                            ? `${state.judge_track.name || "Sierra One"} ${state.judge_track.state || "idle"} · ${fmt(state.judge_track.lat, 5)}, ${fmt(state.judge_track.lon, 5)}`
+                            : `${state.judge_track.name || "Sierra One"} · ${state.judge_track.state || "waiting"}`
+                        : "Disabled on this adapter · enable ADAPTER=whiteout to POST :8010"}
+                    </span>
+                  </div>
+                  {state.judge_track?.uuid && (
+                    <span className="judge-track-id">{state.judge_track.uuid}</span>
+                  )}
                 </section>
                 <div className="operations-workbench">
                   <section

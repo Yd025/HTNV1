@@ -4,7 +4,7 @@ Official repo: `https://github.com/Dominion-Dynamics/arctic-sim` (local clone: `
 
 **Mission:** detect and track a 33.6 m shadow vessel (no AIS, random start, ~3 m/s, water only). Submit hits:
 
-`POST http://<SIM-IP>:8010/api/tracks` `{"name":"Sierra One","lat":…,"lon":…}` — confirm host with DD. Local control is `:8090` (reset only).
+`POST http://<SIM-IP>:8010/api/tracks` `{"name":"Sierra One","lat":…,"lon":…}` — confirm host with DD. Overwatch posts the fused track here after a visual confirm (`TRACKS_URL`, `TRACK_NAME`). Local control is `:8090` (reset only).
 
 **Site:** Fort Ross / Bellot Strait `71.991960, -94.822428`, 6.5 km ArcticDEM. World +Y is **−49.8°** from true north. GUIDED commands stay WGS84 lat/lon.
 

@@ -146,9 +146,9 @@ class SearchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(commands.call_count, 1)
             self.assertEqual(brain.search_planner.belief, belief)
             self.assertEqual(tower_dispatches(), dispatched)
-            # Legacy search policies may steer towers; aircraft stay in reserve
-            # and an already airborne plane may update its reserve orbit.
-            self.assertTrue(all(v.role == "reserve" for v in brain.world.vehicles.values()
+            # Legacy search policies may steer towers; aircraft patrol until a
+            # visual confirm, they do not sit in reserve.
+            self.assertTrue(all(v.role == "search" for v in brain.world.vehicles.values()
                                 if v.vehicle_class in {"plane", "copter"}))
             self.clock += .1
             await brain.tick()

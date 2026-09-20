@@ -1,11 +1,8 @@
-"""Fixed OP. No transit. Slews stare and cues C2 when the contact is in FOV."""
+"""Fixed OP. No transit. Slews a continuous water sweep and cues C2 when a contact is in FOV."""
 
 from __future__ import annotations
 
-import time
-
 from behaviors.trees import water_stare
-from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
 
@@ -14,8 +11,7 @@ from agents.base import AgentDecision, PlatformAgent
 
 class TowerAgent(PlatformAgent):
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        accepted = world.accepted_detections if world.accepted_detections is not None else world.detections
-        own = [d for d in accepted if d.source_id == me.vehicle_id]
+        own = self.own_detections(world)
         if own:
             det = own[0]
             self.intent = "cue"
@@ -33,25 +29,20 @@ class TowerAgent(PlatformAgent):
             return AgentDecision(command=cmd, calls=self.calls_of(call), intent=self.intent)
 
         track = world.track
-        if track and track.age_s <= 2.0 and track.confidence >= 0.25:
+        if world.mission_active and track and track.confidence >= 0.25:
             self.intent = "stare"
             return AgentDecision(command=_slew(me, track.lat, track.lon), calls=[], intent=self.intent)
 
         self.intent = "scan"
-        now = world.observation_now if world.observation_now is not None else time.time()
-        sector = (int(now / 22.0) + (0 if "1" in me.vehicle_id else 3)) % 6
-        lat, lon = water_stare(sector, me)
-        call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1), "sector": sector})
+        stamp = world.observation_now if world.observation_now is not None else None
+        lat, lon = water_stare(0, me, now=stamp)
+        call = self.radio("overwatch", "c2", {"heading": round(me.heading, 1)})
         return AgentDecision(
-            command=Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=0.0, sector=sector),
+            command=Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=0.0),
             calls=self.calls_of(call),
             intent=self.intent,
         )
 
 
-def _slew(me: VehicleState, lat: float, lon: float) -> Command | None:
-    want = bearing_deg(me.lat, me.lon, lat, lon)
-    delta = abs(((want - me.heading + 180.0) % 360.0) - 180.0)
-    if delta <= 8.0:
-        return None
+def _slew(me: VehicleState, lat: float, lon: float) -> Command:
     return Command(vehicle_id=me.vehicle_id, type="look_at", lat=lat, lon=lon, alt=0.0)

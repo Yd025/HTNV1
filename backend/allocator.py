@@ -1,4 +1,4 @@
-"""Tower-first roles. MissionCommand alone authorizes an air response."""
+"""Roles after a visual confirm. Any camera can open the mission."""
 
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ def assign_roles(
     *,
     mission_active: bool = False,
 ) -> dict[str, Role]:
-    """A track or advisor suggestion cannot bypass tower confirmation.
+    """Plane always searches. Copter searches until a cue, then tracks.
 
-    The quad provides close visual custody. The fixed wing covers the predicted
-    forward corridor for reacquisition. Ground assets remain in reserve: no
-    navigable shoreline route has been established for the moving boat.
+    A track or advisor suggestion cannot invent a target. MissionCommand still
+    has to confirm two fresh visual observations first.
     """
     return {
         v.vehicle_id: (
             "cue" if v.vehicle_class == "tower" else
             "track" if mission_active and v.vehicle_class == "copter" else
-            "search" if mission_active and v.vehicle_class == "plane" else
+            "search" if v.vehicle_class == "plane" else
+            "search" if v.vehicle_class == "copter" else
             "reserve"
         )
         for v in vehicles

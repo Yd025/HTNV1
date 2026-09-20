@@ -70,8 +70,8 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_truth_means_no_measured_accuracy(self):
         state = await self.brain.tick()
-        self.assertIsNone(state["scores"]["tracking"])
-        self.assertIsNone(state["scores"]["track_error_m"])
+        self.assertEqual(state["scores"]["tracking_basis"], "residual")
+        self.assertIsNotNone(state["scores"]["tracking"])
         self.assertFalse(state["run"]["evaluation_truth_available"])
         self.assertIsNotNone(state["track"]["sigma_m"])
 
