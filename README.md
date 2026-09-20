@@ -256,6 +256,22 @@ Live metrics: **coverage, collaboration, efficiency, tracking accuracy**, plus *
 
 ## Saturday / local arctic-sim
 
+### Launch the local dashboard and game bundle
+
+With the existing Fort Ross ArcticSim stack running, use PowerShell 7 from this checkout:
+
+```powershell
+./start-whiteout.ps1 -Python ../HTNV1-backend/.venv/Scripts/python.exe
+```
+
+`-Python` can point to any environment with `backend/requirements.txt` installed; it defaults to this checkout's `.venv/Scripts/python.exe`. Install dashboard dependencies in `frontend` and game dependencies in the sibling `cant-catch-me` directory first (`npm ci` in each). Use `-GamePath` if that sibling is elsewhere. Add `-Check` to validate the setup without starting services.
+
+The launcher connects the existing WHITEOUT backend to the local simulator, serves the dashboard at **http://127.0.0.1:3003**, and links the game at **http://127.0.0.1:3100** through the dashboard's **Game** tab. Open **http://127.0.0.1:3003/backend** for the native world and cameras. Existing compatible services are reused. A running local-demo backend must be stopped before launching; the script refuses to replace it or run another controller. The script reports process IDs for services it starts and writes their logs under `.qa/whiteout/`; failed startup rolls back only those new processes. Services continue running after the script returns.
+
+Native launch loads this checkout's `.env` for optional backend integrations, overrides the simulator addresses to this computer, and excludes synthetic search policies. It skips Postgres unless database settings are supplied in the invoking environment. It leaves saved configuration and game learning history untouched. Docker uses the separate internal addresses documented in `.env.example`; generic Compose startup still defaults to local demo mode.
+
+WHITEOUT supplies vehicle telemetry and camera observations to the existing mission tracker and WebSocket. The game retains its own physics and learning records; game replays do not become real camera detections or move the simulator's target vessel. Aircraft launch remains gated by confirmed tower observations. Each connection checks the configured MAVLink identity (quad 1, plane 2, tower 1 = 4, tower 2 = 5), rejecting other vehicles' messages before they can change pose or command routing. See `.env.example` for explicit identity overrides if the simulator roster changes. Fleet links expire after five seconds without a vehicle heartbeat, suppress stale commands/observations, and reconnect in the background. A running controller alone does not prove every asset is connected or that camera tracking has acquired the vessel.
+
 ### Connected terrain and camera preview
 
 The 2D operational map uses CARTO Dark Matter when `NEXT_PUBLIC_CARTO_BASEMAP_API_KEY` is configured, and OpenStreetMap otherwise. Set the key in ignored `frontend/.env.local` for a native frontend or root `.env` for Compose, then restart the frontend (rebuild a production frontend). This is a browser-visible basemap credential; keep the actual value out of Git. CARTO now requires the [`key` tile URL parameter](https://carto.com/basemaps/apikey/). Both providers retain their required attribution.

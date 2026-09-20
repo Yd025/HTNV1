@@ -1,6 +1,7 @@
 """Verified MAVLink wire forms and fixed-camera following; fake transports only."""
 
 import math
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -21,6 +22,8 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_copter_position_mask_and_optional_yaw_radians(self):
         bridge = MavlinkBridge()
         bridge.conn = Mock(target_system=4, target_component=1)
+        bridge.connected = True
+        bridge.last_heartbeat_at = time.monotonic()
         await bridge.send_goto(71.99, -94.82, 40)
         args = bridge.conn.mav.set_position_target_global_int_send.call_args.args
         self.assertEqual(args[3], 6)
@@ -35,6 +38,8 @@ class WireCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_plane_uses_supported_guided_waypoint_with_correct_lat_lon_order(self):
         bridge = MavlinkBridge()
         bridge.conn = Mock(target_system=7, target_component=1)
+        bridge.connected = True
+        bridge.last_heartbeat_at = time.monotonic()
         await bridge.send_plane_goto(71.99, -94.82, 90)
         args = bridge.conn.mav.mission_item_int_send.call_args.args
         self.assertEqual(args[:7], (7, 1, 0, 6, 16, 2, 0))

@@ -1,6 +1,7 @@
 """Receive-worker regressions; fake transports only, no simulator commands."""
 
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -16,6 +17,7 @@ class NonblockingMavlinkTests(unittest.IsolatedAsyncioTestCase):
         position = SimpleNamespace(
             get_type=lambda: "GLOBAL_POSITION_INT",
             to_dict=lambda: {},
+            get_srcSystem=lambda: 1, get_srcComponent=lambda: 1,
             lat=719959000, lon=-948391000, relative_alt=42000, hdg=12500,
         )
         pending = [position]
@@ -33,6 +35,7 @@ class NonblockingMavlinkTests(unittest.IsolatedAsyncioTestCase):
         bridge = MavlinkBridge(vehicle_id="quadcopter")
         bridge.conn = connection
         bridge.connected = True
+        bridge.last_heartbeat_at = time.monotonic()
         bridge._pump_task = asyncio.create_task(bridge._pump())
         try:
             await asyncio.wait_for(idle.wait(), timeout=1.0)
@@ -52,6 +55,7 @@ class NonblockingMavlinkTests(unittest.IsolatedAsyncioTestCase):
             bridge = MavlinkBridge(vehicle_id=spec["vehicle_id"])
             bridge.conn = Mock()
             bridge.connected = True
+            bridge.last_heartbeat_at = time.monotonic()
             bridge._state.update(lat=71.99, lon=-94.83, alt=25.0)
             await bridge._io_lock.acquire()
             bridges.append(bridge)
@@ -75,6 +79,7 @@ class NonblockingMavlinkTests(unittest.IsolatedAsyncioTestCase):
         bridge = MavlinkBridge(vehicle_id="quadcopter")
         bridge.conn = Mock()
         bridge.connected = True
+        bridge.last_heartbeat_at = time.monotonic()
         bridge._state.update(mode="GUIDED", armed=True, alt=20.0)
         await bridge._io_lock.acquire()
         try:

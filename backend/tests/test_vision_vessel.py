@@ -157,6 +157,7 @@ class CameraFreshnessTests(unittest.IsolatedAsyncioTestCase):
         adapter = WhiteoutAdapter()
         adapter._poses["tower-1"] = VehicleState("tower-1", 1, "tower", 72., -94., 119.5)
         adapter._last_ok["tower-1"] = True
+        adapter._bridges["tower-1"] = Mock(is_connected=Mock(return_value=True), close=AsyncMock())
         adapter._look["tower-1"] = (0., -8.)
         frame = jpeg(Image.new("RGB", (640, 480)))
         adapter._taps._receive("tower-1", frame)
@@ -175,6 +176,7 @@ class CameraFreshnessTests(unittest.IsolatedAsyncioTestCase):
         adapter = WhiteoutAdapter()
         adapter._poses["quadcopter"] = VehicleState("quadcopter", 1, "copter", 72., -94., 40)
         adapter._last_ok["quadcopter"] = True
+        adapter._bridges["quadcopter"] = Mock(is_connected=Mock(return_value=True), close=AsyncMock())
         adapter._taps._receive("quadcopter", jpeg(Image.new("RGB", (640, 480))))
         with patch.object(adapter._detector, "detect_jpeg") as infer, patch("sim.whiteout.grab_jpeg", new=AsyncMock(return_value=None)):
             await adapter._scan_cameras(Mock())

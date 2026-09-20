@@ -133,13 +133,19 @@ services:
     container_name: overwatch-frontend
     restart: unless-stopped
     environment:
+      # Browser URLs use host-published ports, never Docker service names.
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/ws/telemetry}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       NEXT_PUBLIC_CARTO_BASEMAP_API_KEY: ${NEXT_PUBLIC_CARTO_BASEMAP_API_KEY:-}
+      NEXT_PUBLIC_SIM_VIEWER_URL: ${NEXT_PUBLIC_SIM_VIEWER_URL:-http://127.0.0.1:8080}
+      NEXT_PUBLIC_SIM_CONTROL_URL: ${NEXT_PUBLIC_SIM_CONTROL_URL:-http://127.0.0.1:8090}
+      NEXT_PUBLIC_GAME_URL: ${NEXT_PUBLIC_GAME_URL:-http://localhost:3100}
+      # Next.js server requests use Docker/host routing independently of the browser.
       BACKEND_INTERNAL_URL: http://backend:8000
       SIM_VIEWER_URL: ${NEXT_PUBLIC_SIM_VIEWER_URL:-http://127.0.0.1:8080}
       SIM_VIEWER_INTERNAL_URL: ${SIM_VIEWER_INTERNAL_URL:-http://host.docker.internal:8080}
-      NEXT_PUBLIC_SIM_CONTROL_URL: ${NEXT_PUBLIC_SIM_CONTROL_URL:-http://127.0.0.1:8090}
+      SIM_CONTROL_URL: ${SIM_CONTROL_URL:-http://host.docker.internal:8090}
+      GAME_SERVICE_URL: ${GAME_SERVICE_URL:-http://host.docker.internal:3100}
       NEXT_PUBLIC_SENTRY_ORG: ${NEXT_PUBLIC_SENTRY_ORG:-${SENTRY_ORG:-}}
       NEXT_PUBLIC_SENTRY_PROJECT: ${NEXT_PUBLIC_SENTRY_PROJECT:-${SENTRY_PROJECT:-}}
       NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
@@ -152,6 +158,8 @@ services:
       CHOKIDAR_USEPOLLING: "true"
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./frontend:/app
       - frontend-node-modules:/app/node_modules

@@ -29,6 +29,7 @@ dist/
 *.onnx
 
 # Local training sessions and document inspection renders.
+.qa/
 /frontend/.graph-jobs/
 /tmp/pdfs/
 /frontend/public/experiments/graph-progress.json

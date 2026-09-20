@@ -78,6 +78,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
         {
             "vehicle_id": "quadcopter",
             "vehicle_class": "copter",
+            "sysid": int(os.getenv("ARCTIC_QUAD_SYSID", "1")),
             "conn": os.getenv("ARCTIC_QUAD", f"udpout:{h}:14550"),
             "fallback": f"udpout:{h}:14551",
             "home": (71.995807, -94.839300),
@@ -85,6 +86,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
         {
             "vehicle_id": "fixed-wing",
             "vehicle_class": "plane",
+            "sysid": int(os.getenv("ARCTIC_PLANE_SYSID", "2")),
             "conn": os.getenv("ARCTIC_PLANE", f"udpout:{h}:14560"),
             "fallback": f"udpout:{h}:14561",
             "home": (71.998195, -94.841967),
@@ -94,6 +96,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
         {
             "vehicle_id": "tower-1",
             "vehicle_class": "tower",
+            "sysid": int(os.getenv("ARCTIC_TOWER1_SYSID", "4")),
             "conn": os.getenv("ARCTIC_TOWER1", f"udpout:{h}:14580"),
             "fallback": f"udpout:{h}:14581",
             "home": (71.980671, -94.853711),
@@ -101,6 +104,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
         {
             "vehicle_id": "tower-2",
             "vehicle_class": "tower",
+            "sysid": int(os.getenv("ARCTIC_TOWER2_SYSID", "5")),
             "conn": os.getenv("ARCTIC_TOWER2", f"udpout:{h}:14590"),
             "fallback": f"udpout:{h}:14591",
             "home": (72.011778, -94.804721),
@@ -112,6 +116,7 @@ def _fleet_spec() -> list[dict[str, Any]]:
             {
                 "vehicle_id": "rover",
                 "vehicle_class": "rover",
+                "sysid": int(os.getenv("ARCTIC_ROVER_SYSID", "6")),
                 "conn": rover,
                 "fallback": f"udpout:{h}:14600",
                 "home": (71.991960, -94.822428),
@@ -224,6 +229,8 @@ class WhiteoutAdapter:
             home_lat, home_lon = self._homes[vid]
             snap: dict[str, Any] = {}
             mav_ok = bool(bridge and bridge.is_connected())
+            if not mav_ok:
+                self._clear_vehicle_cache(vid)
             if not self._closed and not mav_ok and vid not in self._reconnecting:
                 self._reconnecting.add(vid)
                 self._reconnect_tasks[vid] = asyncio.create_task(self._reconnect(spec))
@@ -261,8 +268,8 @@ class WhiteoutAdapter:
                     alt_msl=float(snap["alt_msl"]) if snap.get("alt_msl") is not None else None,
                 )
             )
-            self._poses[vid] = out[-1]
-            if mav_ok:
+            if mav_ok and snap.get("lat") is not None and snap.get("lon") is not None:
+                self._poses[vid] = out[-1]
                 if snap.get("alt_msl") is not None:
                     self._alt_msl[vid] = float(snap["alt_msl"])
                 self._attitude[vid] = (
@@ -320,7 +327,7 @@ class WhiteoutAdapter:
         for conn_str in (spec["conn"], spec.get("fallback")):
             if not conn_str:
                 continue
-            bridge = MavlinkBridge(conn_str=conn_str, vehicle_id=vid)
+            bridge = MavlinkBridge(conn_str=conn_str, vehicle_id=vid, expected_system=spec["sysid"])
             try:
                 await bridge.connect(timeout=8.0)
                 self._bridges[vid] = bridge
@@ -342,8 +349,22 @@ class WhiteoutAdapter:
                 raise
         logger.error("MAVLink %s unreachable — asset will idle", vid)
 
+    def _clear_vehicle_cache(self, vid: str) -> None:
+        self._last_ok[vid] = False
+        self._poses.pop(vid, None)
+        self._attitude.pop(vid, None)
+        self._alt_msl.pop(vid, None)
+        self._frame_ids.pop(vid, None)
+        self._look.pop(vid, None)
+        self._tower_manual.discard(vid)
+        self._tower_cmd_at.pop(vid, None)
+        self._air[vid] = _Air()
+        self._dets = [det for det in self._dets if det.source_id != vid]
+        self._camera_status[vid] = {"state": "pose_unavailable"}
+
     async def _reconnect(self, spec: dict[str, Any]) -> None:
         try:
+            self._clear_vehicle_cache(spec["vehicle_id"])
             previous = self._bridges.pop(spec["vehicle_id"], None)
             if previous is not None:
                 await previous.close()
@@ -426,7 +447,8 @@ class WhiteoutAdapter:
                 continue
             self._frame_ids[spec.vehicle_id] = frame_id
             pose = self._poses.get(spec.vehicle_id)
-            if pose is None or not self._last_ok.get(spec.vehicle_id, False):
+            bridge = self._bridges.get(spec.vehicle_id)
+            if pose is None or bridge is None or not bridge.is_connected():
                 self._camera_status[spec.vehicle_id] = {"state": "pose_unavailable"}
                 continue
             # Freeze own-sensor telemetry before inference yields to the loop.
@@ -450,6 +472,9 @@ class WhiteoutAdapter:
             # Inference may finish after the observation freshness budget.
             if time.time() - received_at > 4.0:
                 self._camera_status[spec.vehicle_id] = {"state": "inference_too_slow"}
+                continue
+            if self._bridges.get(spec.vehicle_id) is not bridge or not bridge.is_connected():
+                self._camera_status[spec.vehicle_id] = {"state": "pose_unavailable"}
                 continue
             projected = 0
             for index, hit in enumerate(hits):
