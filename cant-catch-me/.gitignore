@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.next-surveillance-build/
+.test-build/
+*.tsbuildinfo
+*.log
+.qa/
+.npm-cache/
+.game-learning/
+
+.env*.local
