@@ -40,10 +40,12 @@ HEADING_OFFSET_DEG = -49.8
 CRUISE_ALT = {"plane": 90.0, "copter": 40.0, "rover": 0.0, "tower": 0.0}
 AIRBORNE_ALT = {"plane": 15.0, "copter": 8.0, "rover": 0.0, "tower": 0.0}
 # Verified Fort Ross collision heightmap: maximum 252.109 m MSL. Keep a
-# 50 m terrain margin plus climb/altitude settling allowance. This envelope
+# 50 m terrain margin, settling allowance and 20 m for the 11–14 m EKF height
+# overestimate observed against own raw GPS and Gazebo during local validation.
+# This is an observed-error allowance, not general altitude calibration. This envelope
 # belongs to this adapter/site, not the portable trained flight parameters.
-FORT_ROSS_CRUISE_MSL = 310.0
-FORT_ROSS_RELEASE_MSL = 303.0
+FORT_ROSS_CRUISE_MSL = 330.0
+FORT_ROSS_RELEASE_MSL = 323.0
 # World (-350, 1250): the complete 200 m disk samples sea-level terrain;
 # ArduPlane's configured WP_LOITER_RAD is 120 m. The strip points here.
 FORT_ROSS_CLIMB_LOITER = (71.99681544635214, -94.8567993157745)
