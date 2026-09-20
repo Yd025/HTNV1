@@ -28,6 +28,20 @@
 .missionEvents li { padding: 7px 0; border-top: 1px solid var(--line); }
 .workbench { display: grid; grid-template-columns: minmax(0, 1fr) 290px; }
 .stage { background: var(--canvas); min-width: 0; }
+.allViews { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); align-items: stretch; border-top: 1px solid var(--line); }
+.viewMonitor { min-width: 0; background: var(--surface-muted); }
+.viewMonitor:fullscreen { overflow: auto; color: var(--text); padding: 12px; }
+.viewMonitor:fullscreen .allViews { min-height: calc(100vh - 155px); }
+.allViews > .stage { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.allViews .map { flex: 1; min-height: 290px; max-height: 570px; }
+.allViews .mapTitle { padding-bottom: 12px; }
+.allViews .mapNote { font-size: 10px; }
+.placementSettings { border-top: 1px solid var(--line); }
+.placementSettings > summary { padding: 15px 22px; cursor: pointer; font-size: 12px; color: var(--text); }
+.placementSettings .controls { border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; gap: 24px; }
+.placementSettings .currentResult, .placementSettings .sensorFacts { padding-top: 0; border-top: 0; }
+@media(max-width:1100px) { .allViews { grid-template-columns: 1fr; } .allViews > .stage { border-right: 0; border-bottom: 1px solid var(--line); } .allViews .map { max-height: 420px; } .placementSettings .controls { grid-template-columns: 1fr 1fr; } }
+@media(max-width:560px) { .placementSettings .controls { grid-template-columns: 1fr; } }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
 .toolbar label { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 11px; color: var(--text-muted); }
 .toolbar select { max-width: 160px; min-height: 37px; }

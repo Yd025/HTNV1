@@ -3,6 +3,7 @@ import { assetLabel, cameraFootprint, drawFrame, gridPoint, isQuad, isTowerFirst
 import LiveMissionInsights from "./LiveMissionInsights";
 import TrainingRunMonitor from "./TrainingRunMonitor";
 import MissionSequence from "./MissionSequence";
+import TrainingMissionViews from "./TrainingMissionViews";
 import styles from "./GraphTrainingDemo.module.css";
 
 const INITIAL_SEED = 190926;
@@ -54,7 +55,7 @@ function MetricTable({ report }: { report: GraphReport }) {
   return <div className={styles.tableWrap}><table><caption>The same {report.protocol.testEpisodes} unseen missions · {report.protocol.horizonS} seconds each</caption><thead><tr><th scope="col">Measure</th><th scope="col">Sweep baseline</th><th scope="col">Unoptimized towers</th><th scope="col">Selected placement</th></tr></thead><tbody>{rows.map(row => <tr key={row.label}><th scope="row" title={row.title}>{row.label}</th><td>{row.value(report.metrics.baseline)}</td><td>{row.value(report.metrics.untrained)}</td><td>{row.value(report.metrics.trained)}</td></tr>)}</tbody></table></div>;
 }
 
-export default function GraphTrainingDemo() {
+export default function GraphTrainingDemo({ surface = "overview" }: { surface?: "overview" | "cameras" | "lab" | null }) {
   const unique = useId().replace(/:/g, "");
   const [profile, setProfile] = useState<ArcticProfile | null>(null);
   const [report, setReport] = useState<GraphReport | null>(null);
@@ -83,6 +84,8 @@ export default function GraphTrainingDemo() {
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [inspectedTrainingIndex, setInspectedTrainingIndex] = useState<number | null>(null);
   const trainingMonitorRef = useRef<HTMLDivElement>(null);
+  const allViewsRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
   const mapRef = useRef<SVGSVGElement>(null);
   const busy = starting || job?.status === "running";
   const training = job?.kind === "train" && job.status === "running";
@@ -131,6 +134,12 @@ export default function GraphTrainingDemo() {
     const update = () => setReducedMotion(preference.matches);
     update(); preference.addEventListener("change", update);
     return () => preference.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    const update = () => setExpanded(document.fullscreenElement === allViewsRef.current);
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
   }, []);
 
   useEffect(() => {
@@ -227,8 +236,18 @@ export default function GraphTrainingDemo() {
     setTowers(candidate.towers); setSelectedCandidate(candidate.index); setCustom(true); setRunning(false); setAutoSequence(false); setPlayhead(0); setReplayIndex(null); setBoatStart(null);
     setNotice(`Placement ${candidate.index + 1}: ${pct(candidate.train.detectionRate)} training detection. Run this placement to test it with the selected model.`);
   }
+  async function expandViews() {
+    try {
+      if (document.fullscreenElement === allViewsRef.current) await document.exitFullscreen();
+      else if (allViewsRef.current?.requestFullscreen) await allViewsRef.current.requestFullscreen();
+      else setNotice("Expand the browser window to see all views at a larger size.");
+    } catch { setNotice("Fullscreen is unavailable in this browser. All views continue playing together here."); }
+  }
 
   const graphEdges = useMemo(() => profile?.grid.waterEdges ?? [], [profile]);
+  // This controller stays mounted while dashboard sections change. Every view
+  // consumes its one selected replay and clock, including custom placements.
+  if (surface === null) return null;
   if (!report || !profile || !frame) return <section className={styles.demo} aria-label="Arctic search learning"><div className={styles.heading}><h2>Place. Detect. Follow.</h2><p role={error ? "alert" : "status"}>{error ?? (busy ? "Optimizing tower placement and evaluating handoffs…" : notice || "Loading the terrain, trained model, and test missions…")}</p></div>{profile && <button className={styles.reload} disabled={busy} onClick={() => startJob("train")}>Optimize tower placement</button>}{error && <button className={styles.reload} onClick={() => window.location.reload()}>Reload experiment</button>}</section>;
   const boat = project(boatStart ?? visualFrame!.boat);
   const guideEnd = link && frame.phase && frame.estimate ? project(frame.estimate) : boat;
@@ -242,20 +261,32 @@ export default function GraphTrainingDemo() {
   const progressCompleted = progress?.phase === "validation" ? progress.validationCompleted : progress?.testCompleted ?? progress?.completed;
   const togglePlayback = () => { if (frameIndex >= replay!.frames.length - 1) setPlayhead(0); setAutoSequence(false); setRunning(!running); };
   const seek = (seconds: number) => { setRunning(false); setAutoSequence(false); setPlayhead(seconds); };
+  const displayFrame = custom ? { ...visualFrame!, boat: boatStart ?? visualFrame!.boat, drones: displayDrones, towerHeadings: towers.map(tower => tower.heading), towerPitches: undefined, sources: [], acceptedSources: [], observations: [], estimate: null } : visualFrame!;
+  const missionToolbar = <div className={styles.toolbar}>
+    <button disabled={busy} onClick={() => startJob("replay", true)}>Spawn random boat</button>
+    <button disabled={busy || handoffExample < 0} onClick={() => { chooseReplay(handoffExample); setRunning(true); }}>Watch handoff example</button>
+    <button disabled={busy} onClick={() => chooseReplay(((replayIndex ?? -1) + 1) % report.replays.length)}>Next saved test</button>
+    <button disabled={busy} aria-pressed={autoSequence} onClick={() => { if (autoSequence) { setAutoSequence(false); setRunning(false); } else { chooseReplay(0); setSpeed(32); setRunning(true); setAutoSequence(true); } }}>{autoSequence ? "Stop sequence" : "Watch all tests"}</button>
+    {surface === "overview" && <button onClick={() => void expandViews()} aria-pressed={expanded}>{expanded ? "Exit expanded view" : "Expand all views"}</button>}
+    <label>Mission <select aria-label="Saved test mission" disabled={busy} value={replayIndex ?? "custom"} onChange={e => chooseReplay(Number(e.target.value))}>{replayIndex === null && <option value="custom">Custom test</option>}{report.replays.map((trial, i) => <option key={trial.seed} value={i}>Test {i + 1} · seed {trial.seed}</option>)}</select></label>
+  </div>;
+  const transport = <div className={styles.transport}><button disabled={busy || custom} className={styles.primary} onClick={togglePlayback}>{running ? "Pause replay" : "Play mission"}</button><label className={styles.timeline}>All views · {Math.floor(playhead)} / {replay!.frames[replay!.frames.length - 1].t} s<input aria-label="Mission time" type="range" min="0" max={replay!.frames[replay!.frames.length - 1].t} step={report.protocol.stepS} value={playhead} disabled={custom || busy} onChange={event => seek(Number(event.target.value))} /></label><label>Speed<select aria-label="Replay speed" value={speed} onChange={event => setSpeed(Number(event.target.value))}>{[1, 4, 8, 16, 32].map(value => <option key={value} value={value}>{value}×</option>)}</select></label></div>;
+
+  if (surface !== "overview" && !training) return <section className={styles.demo} aria-label="Synchronized training mission">
+    <header className={styles.heading}><div><h2>{surface === "cameras" ? "Mission cameras" : "Simulation lab"}</h2><p>The same mission and timeline as Overview. Switch views at any time.</p></div><span className={styles.modelTag}>Modeled replay imagery</span></header>
+    <MissionSequence frame={frame} pending={custom || busy} />
+    {missionToolbar}{transport}
+    <TrainingMissionViews surface={surface} profile={profile} frame={displayFrame} towers={towers} elapsedS={playhead} pending={custom || busy} calculating={busy} />
+    {notice && <p className={styles.notice} role="status">{notice}</p>}
+    {error && <p className={styles.error} role="alert">{error}</p>}
+  </section>;
 
   return <section className={styles.demo} aria-labelledby={`${unique}-title`}>
-    <header className={styles.heading}><div><h2 id={`${unique}-title`}>Place. Detect. Follow.</h2><p>Fixed towers find the boat. Two aircraft acquire and maintain its track.</p></div><span className={styles.modelTag}>Offline mission training · modeled camera observations</span></header>
+    <header className={styles.heading}><div><h2 id={`${unique}-title`}>Place. Detect. Follow.</h2><p>One mission across the 2D map, 3D lab and four cameras. All views play together.</p></div><span className={styles.modelTag}>Offline mission training · modeled camera observations</span></header>
     {!training && <MissionSequence frame={frame} pending={custom || busy} />}
-    {!training && <div className={styles.workbench}>
+    {!training && <><div ref={allViewsRef} className={styles.viewMonitor}>{missionToolbar}{transport}<div className={styles.allViews}>
       <div className={styles.stage}>
-        <div className={styles.toolbar}>
-          <button disabled={busy} onClick={() => startJob("replay", true)}>Spawn random boat</button>
-          <button disabled={busy || handoffExample < 0} onClick={() => { chooseReplay(handoffExample); setRunning(true); }}>Watch handoff example</button>
-          <button disabled={busy} onClick={() => chooseReplay(((replayIndex ?? -1) + 1) % report.replays.length)}>Next saved test</button>
-          <button disabled={busy} aria-pressed={autoSequence} onClick={() => { if (autoSequence) { setAutoSequence(false); setRunning(false); } else { chooseReplay(0); setSpeed(32); setRunning(true); setAutoSequence(true); } }}>{autoSequence ? "Stop sequence" : "Watch all tests"}</button>
-          <label>Mission <select aria-label="Saved test mission" disabled={busy} value={replayIndex ?? "custom"} onChange={e => chooseReplay(Number(e.target.value))}>{replayIndex === null && <option value="custom">Custom test</option>}{report.replays.map((trial, i) => <option key={trial.seed} value={i}>Test {i + 1} · seed {trial.seed}</option>)}</select></label>
-        </div>
-        <div className={styles.mapTitle}><span>FORT ROSS · 6.5 × 6.5 km</span><span>{custom ? "Placement edited · ready to test" : `${Math.floor(playhead)} s / ${report.protocol.horizonS} s`}</span></div>
+        <div className={styles.mapTitle}><strong>2D overview</strong><span>Fort Ross · 6.5 × 6.5 km</span></div>
         <svg ref={mapRef} className={styles.map} viewBox="0 0 770 605" role="img" aria-label="Fort Ross terrain map with two towers, a quadcopter, a fixed-wing drone, and a boat. Use placement controls to edit positions." onPointerDown={mapClick}>
           <defs><clipPath id={`${unique}-map`}><rect x={MAP.x} y={MAP.y} width={MAP.span} height={MAP.span} /></clipPath>
             {[...towers, ...displayDrones].map(source => <radialGradient key={source.id} id={`${unique}-sweep-${source.id}`}><stop offset="0%" stopColor={color(source.id)} stopOpacity=".03" /><stop offset="60%" stopColor={color(source.id)} stopOpacity=".22" /><stop offset="100%" stopColor={color(source.id)} stopOpacity=".03" /></radialGradient>)}
@@ -294,8 +325,11 @@ export default function GraphTrainingDemo() {
         </svg>
         <div className={styles.mapLegend}><span><i className={styles.solidLegend} />Accepted contact report · {frame.t} s sample</span><span><i className={styles.dashLegend} />Distance guide when unseen</span><span><i className={styles.routeLegend} />Planned drone route</span></div>
         <p className={styles.mapNote}>Camera scans use terrain visibility and a modeled sensor response. Rings are distance references. Boat position and distance guides are evaluation truth; the controller only receives observations. A handoff example is one successful test, not a success-rate claim.</p>
-        <div className={styles.transport}><button disabled={busy || custom} className={styles.primary} onClick={togglePlayback}>{running ? "Pause replay" : "Play mission"}</button><label className={styles.timeline}>Mission time · {Math.floor(playhead)} s<input aria-label="Mission time" type="range" min="0" max={report.protocol.horizonS} step={report.protocol.stepS} value={playhead} disabled={custom || busy} onChange={event => seek(Number(event.target.value))} /></label><label>Speed<select aria-label="Replay speed" value={speed} onChange={event => setSpeed(Number(event.target.value))}>{[1, 4, 8, 16, 32].map(value => <option key={value} value={value}>{value}×</option>)}</select></label></div>
       </div>
+      <TrainingMissionViews surface="overview" profile={profile} frame={displayFrame} towers={towers} elapsedS={playhead} pending={custom || busy} calculating={busy} />
+    </div></div>
+    <details className={styles.placementSettings}>
+      <summary>Placement controls and camera guides</summary>
       <aside className={styles.controls} aria-label="Experiment controls">
         <div><h3>Test a placement</h3><p>Choose tower sites on land before starting. Confirmed tower sightings dispatch the aircraft; drone observations maintain the track.</p><div className={styles.tools}>{([['inspect', 'Inspect'], ['boat', 'Place boat'], ['tower0', 'Move tower 1'], ['tower1', 'Move tower 2']] as const).map(([value, label]) => <button key={value} disabled={busy} aria-pressed={mode === value} onClick={() => setMode(value)}>{label}</button>)}</div>
           {mode !== "inspect" && currentPoint && <div className={styles.coordinates}>{(["x", "y"] as const).map(axis => <label key={axis}>Grid {axis.toUpperCase()} (m)<input aria-label={`${mode === "boat" ? "Boat" : mode === "tower0" ? "Tower 1" : "Tower 2"} grid ${axis.toUpperCase()}`} type="number" min={-3250} max={3250} step={profile.grid.cellM} value={Math.round(currentPoint[axis])} disabled={busy} onChange={event => { if (event.target.value !== "" && Number.isFinite(event.target.valueAsNumber)) changePoint({ ...currentPoint, [axis]: event.target.valueAsNumber }); }} /></label>)}</div>}
@@ -305,7 +339,7 @@ export default function GraphTrainingDemo() {
         <div className={styles.viewOptions}><label><input type="checkbox" checked={showCones} onChange={e => setShowCones(e.target.checked)} />Camera scan guides</label><label><input type="checkbox" checked={showFootprints} onChange={e => setShowFootprints(e.target.checked)} />Exact camera footprints</label><label><input type="checkbox" checked={showGraph} onChange={e => setShowGraph(e.target.checked)} />Navigable water graph</label></div>
         <div className={styles.sensorFacts}><h3>Verified configuration</h3><p>Towers 60° · quad 114.6° · plane 69° horizontal views.</p><p>Boat 3 m/s · quad 10 m/s · plane 15 m/s.</p><p>Camera performance depends on distance, target size, view, terrain and conditions. The sensor model is not field-calibrated.</p></div>
       </aside>
-    </div>}
+    </details></>}
     <div className={styles.notice} role="status" aria-live="polite">{notice || "Choose a saved unseen mission, spawn a new boat, or move the towers and rerun the test."}</div>
     {error && <p className={styles.error} role="alert">{error}</p>}
     {training ? <div ref={trainingMonitorRef} style={{ scrollMarginTop: 80 }}><TrainingRunMonitor profile={profile} progress={job.progress} inspectedCandidate={inspectedCandidate} onFollow={() => setInspectedTrainingIndex(null)} stepS={report.protocol.stepS} freshnessS={report.protocol.freshnessS} /></div> : <LiveMissionInsights replay={replay!} elapsedS={playhead} horizonS={report.protocol.horizonS} stepS={report.protocol.stepS} freshnessS={report.protocol.freshnessS} running={running} pending={custom || busy} onToggle={togglePlayback} onSeek={seek} />}

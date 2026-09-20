@@ -28,7 +28,7 @@ const FleetModelPreview = dynamic(
 );
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const SentryPanel = dynamic(() => import("../components/SentryPanel"), { ssr: false });
-type Section = "overview" | "fleet" | "cameras" | "activity" | "system" | "game" | "sentry";
+type Section = "overview" | "fleet" | "cameras" | "lab" | "activity" | "system" | "game" | "sentry";
 const sections: {
   value: Section;
   label: string;
@@ -39,7 +39,7 @@ const sections: {
     value: "overview",
     label: "Overview",
     icon: "arena",
-    description: "Optimize tower sites, test detection and drone handoff, then follow the live mission below.",
+    description: "Watch the map, 3D simulation and sensor cameras together on one mission timeline.",
   },
   {
     value: "fleet",
@@ -51,7 +51,13 @@ const sections: {
     value: "cameras",
     label: "Cameras",
     icon: "camera",
-    description: "Sensor imagery from the simulator’s camera catalog.",
+    description: "See the selected overview mission through its tower and aircraft cameras.",
+  },
+  {
+    value: "lab",
+    label: "Simulation lab",
+    icon: "arena",
+    description: "Explore the overview mission in 3D, with the same boat, tower placement, aircraft and playback time.",
   },
   {
     value: "activity",
@@ -96,6 +102,7 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
   const [query, setQuery] = useState("");
   const [vehicleClass, setVehicleClass] = useState("all");
   const [compactNavigation, setCompactNavigation] = useState(false);
+  const [showLiveOverview, setShowLiveOverview] = useState(false);
   const fleet = state.fleet ?? EMPTY_FLEET;
   const vehicles = useMemo(() => Object.values(fleet), [fleet]);
   const focused = vehicles.find((v) => v.vehicle_id === selected);
@@ -282,7 +289,7 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
                 </h1>
                 <p>{activeSection.description}</p>
               </div>
-              {section !== "game" && <div className="mission-badges">
+              {section === "overview" || section === "cameras" || section === "lab" ? <span className="phase-badge">Synchronized training replay</span> : section !== "game" && <div className="mission-badges">
                 <span className="phase-badge">
                   {state.c2?.phase
                     ? `Phase: ${state.c2.phase.replaceAll("_", " ")}`
@@ -294,13 +301,13 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
                 </span>
               </div>}
             </section>
-            {section !== "game" && backendNotice && (
+            {section !== "game" && section !== "overview" && section !== "cameras" && section !== "lab" && backendNotice && (
               <div className="connection-notice" role="status">
                 <Icon name="pulse" />
                 <div><strong>{backendNotice.title}</strong> {backendNotice.description}</div>
               </div>
             )}
-            {section !== "game" && stale && (
+            {section !== "game" && section !== "overview" && section !== "cameras" && section !== "lab" && stale && (
               <div className="connection-notice" role="status">
                 <Icon name="signal" />
                 <div>
@@ -313,9 +320,11 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
                 </div>
               </div>
             )}
+            <GraphTrainingDemo surface={section === "overview" || section === "cameras" || section === "lab" ? section : null} />
             {section === "overview" && (
-              <>
-                <GraphTrainingDemo />
+              <details className="panel" onToggle={event => setShowLiveOverview(event.currentTarget.open)}>
+                <summary className="panel-heading">Live adapter mission · {source}</summary>
+                {showLiveOverview && <>
                 <section className="score-strip" aria-label="Mission scores">
                   <Score
                     label="Coverage"
@@ -529,7 +538,8 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
                     <ActivityFeed state={state} limit={4} />
                   </section>
                 </div>
-              </>
+                </>}
+              </details>
             )}
             {section === "fleet" && (
               <>
@@ -667,9 +677,10 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
               </>
             )}
             {section === "cameras" && (
-              <section className="panel cameras-page">
+              <details className="panel cameras-page">
+                <summary className="panel-heading">Live adapter cameras · separate from the training replay</summary>
                 <div className="panel-heading">
-                  <h2>Sensor feeds</h2>
+                  <h2>Live sensor feeds</h2>
                   <span className="count-badge">{source}</span>
                 </div>
                 <div className="section-note">
@@ -685,7 +696,7 @@ export default function CommandCenter({ initialSection = "overview" }: { initial
                   <h2>Reported detections</h2>
                   <DetectionList state={state} />
                 </section>
-              </section>
+              </details>
             )}
             {section === "activity" && (
               <div className="activity-layout">

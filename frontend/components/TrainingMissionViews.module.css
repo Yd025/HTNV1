@@ -1,0 +1,61 @@
+.views { min-width: 0; color: var(--text); background: var(--surface-muted); }
+.overviewHeading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 7px 12px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+.overviewHeading h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.overviewHeading span { color: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.overviewScene { height: 280px; min-width: 0; background: var(--canvas); }
+.overviewHelp { margin: 0; padding: 8px 15px; color: var(--text-muted); background: var(--canvas); border-bottom: 1px solid var(--line); font-size: 10px; line-height: 1.7; }
+.overviewNote { margin: 0; padding: 10px 15px; color: var(--text-muted); font-size: 10px; line-height: 1.7; }
+.compactSensor .sensorHeading { align-items: baseline; flex-wrap: wrap; gap: 4px 8px; padding: 8px 10px; }
+.compactSensor .sensorHeading h3 { font-size: 11px; }
+.compactSensor .reportStatus { font-size: 10px; }
+.intro { display: flex; justify-content: space-between; align-items: flex-start; gap: 28px; padding: 23px 25px; border-bottom: 1px solid var(--line); }
+.intro h3 { margin: 0; font-size: 18px; font-weight: 500; }
+.intro p { max-width: 74ch; margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.75; }
+.replayTime { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; text-align: right; font-variant-numeric: tabular-nums; }
+.replayTime strong { font-size: 16px; font-weight: 500; }
+.replayTime span { color: var(--text-muted); font-size: 11px; }
+.cameraGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+.sensor { min-width: 0; margin: 0; background: var(--surface-muted); }
+.sensorHeading { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 18px; background: var(--surface-raised); }
+.sensorHeading h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.reportStatus { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.reportStatus[data-accepted=true] { color: var(--status); }
+.sensorImage { width: 100%; overflow: hidden; background: var(--canvas); }
+.sensorViewport { width: 100%; margin: 0 auto; }
+.sensorReadout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px 18px; margin: 0; padding: 17px 18px 20px; font-variant-numeric: tabular-nums; }
+.sensorReadout dt { color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.sensorReadout dd { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.lab { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 360px); border-bottom: 1px solid var(--line); }
+.labWorld { min-width: 0; background: var(--canvas); }
+.labScene { height: 540px; min-height: 420px; }
+.sceneHelp { margin: 0; padding: 13px 20px 16px; color: var(--text-muted); font-size: 11px; line-height: 1.75; border-top: 1px solid var(--line); }
+.labObserver { min-width: 0; border-left: 1px solid var(--line); }
+.sensorSelector { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 14px; border-bottom: 1px solid var(--line); }
+.sensorSelector button { min-height: 38px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--text); background: var(--surface-raised); font: inherit; font-size: 11px; cursor: pointer; }
+.sensorSelector button:hover { border-color: var(--text-muted); }
+.sensorSelector button[aria-pressed=true] { border-color: var(--status); background: var(--surface); }
+.views :is(button, [tabindex]):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.labObserver .sensorReadout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.modelNote { margin: 0; padding: 14px 25px; color: var(--text-muted); font-size: 11px; line-height: 1.75; border-bottom: 1px solid var(--line); }
+.observations { padding: 22px 25px 24px; }
+.observationHeading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.observationHeading h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.observationHeading span { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.observationNote { max-width: 75ch; margin: 9px 0 18px; color: var(--text-muted); font-size: 11px; line-height: 1.75; }
+.tableWrap { max-width: 100%; overflow-x: auto; scrollbar-color: var(--text-subtle) var(--surface-muted); scrollbar-width: thin; }
+.tableWrap table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tableWrap caption { padding: 0 0 13px; text-align: left; color: var(--text-muted); font-size: 11px; }
+.tableWrap th, .tableWrap td { padding: 12px 16px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.tableWrap th { color: var(--text-muted); font-weight: 400; }
+.tableWrap tbody th { color: var(--text); }
+.tableWrap th:first-child, .tableWrap td:first-child { padding-left: 0; }
+.emptyReports { margin: 0; padding: 17px 0 4px; color: var(--text-muted); font-size: 12px; line-height: 1.75; }
+.pending { min-height: 290px; padding: 70px 25px; background: var(--canvas); }
+.pending h3 { margin: 0; font-size: 17px; font-weight: 500; }
+.pending p { max-width: 70ch; margin: 12px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.8; }
+.loading { display: grid; place-items: center; min-height: 240px; margin: 0; padding: 30px; background: var(--canvas); color: var(--text-muted); font-size: 12px; line-height: 1.75; }
+@media (min-width: 1650px) { .lab { grid-template-columns: minmax(0, 1fr) 420px; } .labScene { height: 640px; } }
+@media (max-width: 1050px) { .lab { grid-template-columns: minmax(0, 1fr); } .labObserver { border-left: 0; border-top: 1px solid var(--line); } .labObserver .sensor { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(190px, 1fr); } .labObserver .sensorHeading { grid-column: 1 / -1; } .labObserver .sensorReadout { align-content: start; } .sensorSelector { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .cameraGrid { grid-template-columns: minmax(0, 1fr); } .intro { padding: 20px 17px; gap: 16px; } .intro p { font-size: 11px; } .modelNote { padding: 14px 17px; } .observations { padding: 21px 17px; } .labScene { height: 440px; } }
+@media (max-width: 700px) and (min-width: 421px) { .overview .cameraGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .intro { flex-wrap: wrap; } .replayTime { flex-direction: row; align-items: baseline; gap: 10px; text-align: left; } .sensorHeading { padding: 13px 15px; } .sensorReadout { gap: 15px 10px; padding: 16px 15px; } .sensorReadout dd { font-size: 11px; } .sensorSelector { grid-template-columns: repeat(2, minmax(0, 1fr)); } .labObserver .sensor { display: block; } .labObserver .sensorReadout { grid-template-columns: repeat(3, minmax(0, 1fr)); } .labScene { height: 420px; } .pending { padding: 48px 17px; } .tableWrap th, .tableWrap td { padding: 11px 12px; font-size: 11px; } }

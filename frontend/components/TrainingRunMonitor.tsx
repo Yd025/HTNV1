@@ -5,6 +5,7 @@ import {
   type GraphReplay, type GraphTower, type GraphTrainingPreview, type XY,
 } from "../lib/graphExperiment";
 import LiveMissionInsights from "./LiveMissionInsights";
+import TrainingMissionViews from "./TrainingMissionViews";
 import mapStyles from "./GraphTrainingDemo.module.css";
 import styles from "./TrainingRunMonitor.module.css";
 
@@ -19,8 +20,8 @@ function sweepPath(radius: number, fov: number) {
   return `M0,0 L${-x},${y} A${radius},${radius} 0 ${fov > 180 ? 1 : 0} 1 ${x},${y} Z`;
 }
 
-function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = false }: {
-  profile: ArcticProfile; towers: GraphTower[]; replay?: GraphReplay; elapsedS?: number; reducedMotion?: boolean;
+function TrainingMap({ profile, towers, replay, frame, elapsedS = 0 }: {
+  profile: ArcticProfile; towers: GraphTower[]; replay?: GraphReplay; frame?: GraphFrame; elapsedS?: number;
 }) {
   const unique = useId().replace(/:/g, "");
   const halfM = profile.grid.halfM, widthM = halfM * 2;
@@ -28,7 +29,6 @@ function TrainingMap({ profile, towers, replay, elapsedS = 0, reducedMotion = fa
   const points = (route: XY[]) => route.map(point => { const p = project(point); return `${p.x},${p.y}`; }).join(" ");
   const observedFrames = useMemo(() => replay?.frames.filter(frame => frame.t <= elapsedS) ?? [], [replay, elapsedS]);
   const recordedFrame = observedFrames.at(-1);
-  const frame: GraphFrame | undefined = replay?.frames.length ? reducedMotion ? recordedFrame : drawFrame(replay, elapsedS) : undefined;
   const drones = frame?.drones ?? [];
   const sources = [...towers, ...drones];
   const reported = frame ? nearestSource(frame, towers, true) : null;
@@ -111,10 +111,17 @@ function RecordedExample({ profile, preview, freshnessS, stepS }: {
   useEffect(() => { if (elapsedS >= horizonS) setRunning(false); }, [elapsedS, horizonS]);
   const onToggle = () => { if (elapsedS >= horizonS) setElapsedS(0); setRunning(value => !value); };
   const onSeek = (seconds: number) => { setRunning(false); setElapsedS(seconds); };
+  const frame = useMemo(() => reducedMotion
+    ? replay.frames.filter(sample => sample.t <= elapsedS).at(-1) ?? replay.frames[0]
+    : drawFrame(replay, elapsedS), [replay, elapsedS, reducedMotion]);
+  const towers = replay.towers ?? [];
   return <>
-    <TrainingMap profile={profile} towers={replay.towers ?? []} replay={replay} elapsedS={elapsedS} reducedMotion={reducedMotion} />
+    <div className={styles.recordedViews}>
+      <TrainingMap profile={profile} towers={towers} replay={replay} frame={frame} elapsedS={elapsedS} />
+      <TrainingMissionViews surface="overview" profile={profile} frame={frame} towers={towers} elapsedS={elapsedS} pending={false} />
+    </div>
     <div className={styles.exampleStats}>
-      <div className={styles.exampleLabel}><strong>Recorded example · training continues</strong><span>Mission {preview.episodeIndex + 1} of {preview.episodeTotal} · seed {replay.seed} · playback at 32×</span><p>This is the first computed mission for this placement and phase. Its charts follow playback; the aggregate above includes every completed mission.</p></div>
+      <div className={styles.exampleLabel}><strong>Recorded example · training continues</strong><span>Mission {preview.episodeIndex + 1} of {preview.episodeTotal} · seed {replay.seed} · playback at 32×</span><p>The map, 3D lab, cameras and charts share this recorded mission and playback time. Placement results include every completed mission.</p></div>
       <LiveMissionInsights replay={replay} elapsedS={elapsedS} horizonS={horizonS} stepS={stepS} freshnessS={freshnessS} running={running} pending={false} onToggle={onToggle} onSeek={onSeek} />
     </div>
   </>;
@@ -139,8 +146,8 @@ export default function TrainingRunMonitor({ profile, progress, inspectedCandida
   const bestMetrics = selectionFinished ? best?.validation : best?.train;
   const currentTitle = testing ? policyLabel(progress?.evaluatingPolicy) : candidateIndex == null ? "Preparing the next placement" : `${inspectedCandidate ? "Inspecting" : "Trying"} placement ${candidateIndex + 1}`;
   const phaseLabel = inspectedCandidate ? "Completed training candidate" : testing ? "Untouched test missions" : phase === "validation" ? "Validation missions" : "Training missions";
-  return <section className={styles.monitor} aria-label="Training placement monitor">
-    <header className={styles.header}><div><h3>Watch the model learn</h3><p>{inspectedCandidate ? "Inspect a finished candidate while the next placement continues training." : "Tower positions appear as each candidate starts. A measured example follows its first completed mission."}</p></div>{inspectedCandidate && <button onClick={onFollow}>Follow current training</button>}</header>
+  return <section className={`${styles.monitor} ${validPreview ? styles.monitorWithReplay : ""}`} aria-label="Training placement monitor">
+    <header className={styles.header}><div><h3>{currentTitle}</h3><p>{phaseLabel} · {inspectedCandidate ? "Inspect a finished candidate while the next placement continues training." : "Tower positions appear as each candidate starts. A measured example follows its first completed mission."}</p></div>{inspectedCandidate && <button onClick={onFollow}>Follow current training</button>}</header>
     <div className={styles.output}>
       <div className={styles.resultHeading}><h4>{currentTitle}</h4><p role="status">{phaseLabel}{completed !== undefined ? ` · ${completed}${total ? ` / ${total}` : ""} completed` : " · awaiting results"}</p></div>
       <dl className={styles.measurements}><div><dt>Boats detected</dt><dd>{percent(metrics?.detectionRate)}</dd></div><div><dt>Mean capped delay</dt><dd>{number(metrics?.meanCappedS, " s")}</dd></div><div><dt>Water observed</dt><dd>{percent(metrics?.coveragePct)}</dd></div><div><dt>Tracking custody</dt><dd>{percent(metrics?.custodyPct)}</dd></div></dl>
