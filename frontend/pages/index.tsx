@@ -69,7 +69,7 @@ const sections: {
     value: "game",
     label: "Game",
     icon: "target",
-    description: "Learn tower placements from Cant Catch Me players and follow the opening stretch live.",
+    description: "Learn tower positions and coordinated aircraft routes from Cant Catch Me players.",
   },
   {
     value: "sentry",

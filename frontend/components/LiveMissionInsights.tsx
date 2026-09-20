@@ -39,6 +39,7 @@ export default function LiveMissionInsights({ replay, elapsedS, horizonS, stepS,
   const series = useMemo(() => liveSeries(replay, observedTime, freshnessS), [replay, observedTime, freshnessS]);
   const count = Object.values(metrics.bySource).reduce((sum, value) => sum + value, 0);
   const errorScale = Math.max(40, Math.ceil(Math.max(0, ...series.map(point => point.rmseM ?? 0)) / 20) * 20);
+  const coordinated = replay.algorithm === "coordinated-surveillance-v1";
   const rows = [
     { label: "First detection", value: metrics.detectedAt === null ? elapsedS >= horizonS ? "Not detected" : "Searching…" : `${metrics.detectedAt} s` },
     { label: "Water observed", value: percent(metrics.coveragePct) },
@@ -49,9 +50,9 @@ export default function LiveMissionInsights({ replay, elapsedS, horizonS, stepS,
     { label: mission.frame?.phase ? "Confirmed drone handoffs" : "Reporting-source changes", value: String(metrics.handoffs) },
     { label: "Raw sensor reports", value: String(count) },
     ...(mission.frame?.phase ? [
-      { label: "Tower confirmation", value: mission.towerConfirmed ? "Confirmed" : "Waiting for evidence" },
-      { label: "Drone handoff", value: mission.handoffConfirmed ? "Confirmed by aircraft" : "Pending aircraft sighting" },
-      { label: "Boat match (evaluation only)", value: mission.frame.targetHandoffConfirmed ? "Aircraft track verified" : mission.frame.targetConfirmed ? "Tower acquisition verified" : "Not verified" },
+      { label: coordinated ? "Sensor confirmation" : "Tower confirmation", value: mission.towerConfirmed ? "Confirmed" : "Waiting for evidence" },
+      { label: coordinated ? "Aircraft custody" : "Drone handoff", value: mission.handoffConfirmed ? "Confirmed by aircraft" : "Pending aircraft sighting" },
+      { label: "Boat match (evaluation only)", value: mission.frame.targetHandoffConfirmed ? "Aircraft track verified" : mission.frame.targetConfirmed ? "Acquisition verified" : "Not verified" },
       { label: "Tower view (evaluation only)", value: mission.frame.towerVisible == null ? "Unavailable" : mission.frame.towerVisible ? "Within tower view" : "Outside both tower views" },
       { label: "Current observer", value: mission.frame.custodian ? assetLabel(mission.frame.custodian) : "None" },
       { label: "Custody outside tower view", value: metrics.postTowerCustodyPct === null ? "No qualifying samples" : percent(metrics.postTowerCustodyPct) },

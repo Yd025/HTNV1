@@ -13,7 +13,7 @@ const MAP = { x: 24, y: 24, span: 552 };
 const percent = (value: number | undefined) => value === undefined ? "Awaiting results" : `${value.toFixed(1)}%`;
 const number = (value: number | null | undefined, suffix = "") => value == null ? "—" : `${value.toFixed(1)}${suffix}`;
 const color = (id: string) => id.includes("tower") ? "var(--status)" : isQuad(id) ? "var(--warning)" : "var(--text)";
-const policyLabel = (policy: string | undefined) => policy === "baseline" ? "Sweep baseline" : policy === "untrained" ? "Unoptimized towers" : "Selected placement";
+const policyLabel = (policy: string | undefined) => policy === "baseline" ? "Reference strategy" : policy === "untrained" ? "Default strategy" : "Selected strategy";
 
 function sweepPath(radius: number, fov: number) {
   const angle = fov * Math.PI / 360, x = Math.sin(angle) * radius, y = -Math.cos(angle) * radius;
@@ -136,6 +136,7 @@ export default function TrainingRunMonitor({ profile, progress, inspectedCandida
   const validPreview = preview?.replay.frames.length ? preview : undefined;
   const candidateIndex = inspectedCandidate?.index ?? progress?.activeCandidate?.index ?? validPreview?.candidateIndex;
   const towers = inspectedCandidate?.towers ?? validPreview?.replay.towers ?? progress?.activeCandidate?.towers ?? [];
+  const flightPolicy = inspectedCandidate?.flightPolicy ?? validPreview?.replay.flightPolicy ?? progress?.activeCandidate?.flightPolicy;
   const phase = progress?.phase;
   const testing = !inspectedCandidate && phase === "test";
   const metrics = inspectedCandidate?.train ?? (testing ? progress?.partialMetrics?.[progress?.evaluatingPolicy as "baseline" | "untrained" | "trained"] : progress?.candidateMetrics);
@@ -151,6 +152,7 @@ export default function TrainingRunMonitor({ profile, progress, inspectedCandida
     <div className={styles.output}>
       <div className={styles.resultHeading}><h4>{currentTitle}</h4><p role="status">{phaseLabel}{completed !== undefined ? ` · ${completed}${total ? ` / ${total}` : ""} completed` : " · awaiting results"}</p></div>
       <dl className={styles.measurements}><div><dt>Boats detected</dt><dd>{percent(metrics?.detectionRate)}</dd></div><div><dt>Mean capped delay</dt><dd>{number(metrics?.meanCappedS, " s")}</dd></div><div><dt>Water observed</dt><dd>{percent(metrics?.coveragePct)}</dd></div><div><dt>Tracking custody</dt><dd>{percent(metrics?.custodyPct)}</dd></div></dl>
+      {flightPolicy && <><h4>Candidate flight policy</h4><dl className={styles.measurements}><div><dt>Sweep spacing</dt><dd>{number(flightPolicy.laneSpacingM, " m")}</dd></div><div><dt>Patrol offset</dt><dd>{number(flightPolicy.routePhase * 100, "%")}</dd></div><div><dt>Quad search radius</dt><dd>{number(flightPolicy.quadSearchRadiusM, " m")}</dd></div><div><dt>Tracking lead</dt><dd>{number(flightPolicy.lookaheadS, " s")}</dd></div><div><dt>Support distance</dt><dd>{number(flightPolicy.supportOffsetM, " m")}</dd></div><div><dt>Reacquisition width</dt><dd>{number(flightPolicy.reacquireWidthM, " m")}</dd></div><div><dt>Longest contact gap</dt><dd>{number(metrics?.longestGapS, " s")}</dd></div><div><dt>Aircraft travel</dt><dd>{number(metrics?.distanceM, " m")}</dd></div></dl></>}
       <div className={styles.positions}><table aria-label="Candidate tower positions"><caption>Proposed tower coordinates · projected world metres</caption><thead><tr><th scope="col">Tower</th><th scope="col">X</th><th scope="col">Y</th><th scope="col">Camera height</th></tr></thead><tbody>{towers.length ? towers.map(tower => <tr key={tower.id}><th scope="row">{assetLabel(tower.id)}</th><td>{Math.round(tower.x).toLocaleString()}</td><td>{Math.round(tower.y).toLocaleString()}</td><td>{number(tower.z, " m")}</td></tr>) : <tr><td colSpan={4}>The next candidate will appear here when its positions are proposed.</td></tr>}</tbody></table><p>Camera height is world Z, including terrain elevation.</p></div>
       <p className={styles.best}>{best ? <>{selectionFinished ? "Validation-selected placement:" : "Best completed training candidate:"} <strong>placement {best.index + 1}</strong>{bestMetrics && <> · {percent(bestMetrics.detectionRate)} found · {number(bestMetrics.meanCappedS, " s")} capped delay on {selectionFinished ? "validation" : "training"} missions.</>}{!selectionFinished && " Validation chooses the final model."}</> : "Best-so-far comparison starts after the first candidate finishes its training missions."}</p>
       <p className={styles.metricNote}>Aggregate results use only completed missions; misses count at the mission deadline. Each placement is tested with random boat routes.</p>

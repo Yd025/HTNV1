@@ -1,4 +1,4 @@
-"""Observation-driven tower confirmation, air dispatch and custody lifecycle."""
+"""Observation-driven confirmation, coordinated search and custody lifecycle."""
 
 from __future__ import annotations
 
@@ -7,12 +7,15 @@ from collections import OrderedDict
 from typing import Any
 
 from allocator import assign_roles
+from flight_policy import COORDINATED_ALGORITHM, LEGACY_ALGORITHM
 from geo import haversine_m
 from sim.types import Detection, Role, VehicleState
 from tracker import Track
 from world import WorldModel
 
 PHASE_INTENT = {
+    "surveillance_search": "Plane sweeps gaps, quad searches a complementary local patch, towers scan.",
+    "sensor_confirm": "Camera contact is tentative; await a second fresh accepted observation.",
     "tower_scan": "Placed towers scan; aircraft remain in reserve.",
     "tower_confirm": "Tower contact is tentative; await a second fresh observation.",
     "dispatch": "Confirmed tower cue: quad closes for tracking; plane covers the forward corridor.",
@@ -32,8 +35,10 @@ class MissionCommand:
     lost_s = 25.0
     min_confidence = 0.35
 
-    def __init__(self) -> None:
-        self.phase = "tower_scan"
+    def __init__(self, algorithm: str = LEGACY_ALGORITHM) -> None:
+        self.algorithm = algorithm
+        self.coordinated = algorithm == COORDINATED_ALGORITHM
+        self.phase = "surveillance_search" if self.coordinated else "tower_scan"
         self.active = False
         self.custody: str | None = None
         self.handoff: dict[str, Any] = {
@@ -41,9 +46,10 @@ class MissionCommand:
             "evidence": None, "cue_at": None, "acquired_at": None,
             "lat": None, "lon": None,
         }
-        self.metrics = {"confirmed_tower_cues": 0, "successful_handoffs": 0,
+        self.metrics = {"confirmed_tower_cues": 0, "confirmed_sensor_cues": 0, "successful_handoffs": 0,
                         "reacquisitions": 0, "custody_breaks": 0}
         self._tower_hits: list[Detection] = []
+        self._candidate_hits: list[Detection] = []
         self._air_hits: dict[str, list[Detection]] = {}
         self._seen: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._source_times: dict[str, float] = {}
@@ -67,27 +73,32 @@ class MissionCommand:
             observations = world.detections
         fresh = self._fresh(observations, classes, world, now)
         self._tower_hits = [d for d in self._tower_hits if now - d.timestamp <= self.confirmation_window_s]
+        self._candidate_hits = [d for d in self._candidate_hits if now - d.timestamp <= self.confirmation_window_s]
         for source in list(self._air_hits):
             self._air_hits[source] = [d for d in self._air_hits[source]
                                       if now - d.timestamp <= self.confirmation_window_s]
         was_active = self.active
         for det in fresh:
             kind = classes[det.source_id]
+            if not self.active and (kind == "tower" or (self.coordinated and kind in {"plane", "copter"})):
+                if self._candidate_hits:
+                    previous = self._candidate_hits[-1]
+                    distance = haversine_m(previous.lat, previous.lon, det.lat, det.lon)
+                    gate = 120.0 + 20.0 * max(0.0, det.timestamp - previous.timestamp)
+                    if distance > gate:
+                        self._candidate_hits.clear()
+                        self._tower_hits.clear()
+                self._candidate_hits.append(det)
+                self._candidate_hits = self._candidate_hits[-32:]
+                if kind == "tower":
+                    self._tower_hits.append(det)
+                    self._tower_hits = self._tower_hits[-32:]
+                if self._confirmed(self._candidate_hits):
+                    self._authorize(det, world)
             if kind == "tower":
                 if self._last_tower_at is None or det.timestamp > self._last_tower_at:
                     self._last_tower_at = det.timestamp
                     self._last_tower_source = det.source_id
-                if not self.active:
-                    if self._tower_hits:
-                        previous = self._tower_hits[-1]
-                        distance = haversine_m(previous.lat, previous.lon, det.lat, det.lon)
-                        gate = 120.0 + 20.0 * max(0.0, det.timestamp - previous.timestamp)
-                        if distance > gate:
-                            self._tower_hits.clear()
-                    self._tower_hits.append(det)
-                    self._tower_hits = self._tower_hits[-32:]
-                    if self._confirmed(self._tower_hits):
-                        self._authorize(det, world)
                 if self.active:
                     self._last_observed_at = max(self._last_observed_at if self._last_observed_at is not None else det.timestamp, det.timestamp)
                     world.last_cue = (det.lat, det.lon)
@@ -117,6 +128,7 @@ class MissionCommand:
             self.phase = "lost"
             self.handoff.update(state="lost", receiver=None, evidence=None)
             self._tower_hits.clear()
+            self._candidate_hits.clear()
             self._air_hits.clear()
             self._last_air_at.clear()
             world.last_cue = None
@@ -124,21 +136,27 @@ class MissionCommand:
             receiver = qualified_air[0]
             self.custody = receiver
             self.phase = "air_track"
-            if self.handoff["state"] != "acquired":
+            same_air_observer = self.coordinated and receiver == self.handoff["cue_source"] and not self._ever_acquired
+            if same_air_observer:
+                # Finding and retaining the contact is custody, not a handoff
+                # to yourself. A different receiver must provide its own hits.
+                self.handoff.update(state="pending", receiver=None, evidence=None)
+            elif self.handoff["state"] != "acquired":
                 key = "reacquisitions" if self._ever_acquired else "successful_handoffs"
                 self.metrics[key] += 1
                 self._ever_acquired = True
                 self.handoff["acquired_at"] = self._last_air_at[receiver]
                 world.post("c2", "all", "acquired", {"receiver": receiver, "evidence": "receiver_observation"})
-            self.handoff.update(state="acquired", receiver=receiver, evidence="receiver_observation")
+            if not same_air_observer:
+                self.handoff.update(state="acquired", receiver=receiver, evidence="receiver_observation")
         elif self.active:
             self.custody = self._last_tower_source if tower_fresh else None
-            self.phase = "dispatch" if tower_fresh else "coasting" if age < self.reacquire_s else "reacquire"
+            self.phase = "dispatch" if tower_fresh or (self.coordinated and age <= self.fresh_s) else "coasting" if age < self.reacquire_s else "reacquire"
             self.handoff.update(state="pending" if tower_fresh else "reacquiring", receiver=None, evidence=None)
-        elif self._tower_hits:
-            self.phase = "tower_confirm"
+        elif self._candidate_hits:
+            self.phase = "sensor_confirm" if self.coordinated else "tower_confirm"
         elif self.phase != "lost":
-            self.phase = "tower_scan"
+            self.phase = "surveillance_search" if self.coordinated else "tower_scan"
 
         if previous_custody and classes.get(previous_custody) in {"plane", "copter"} and not qualified_air:
             self.metrics["custody_breaks"] += 1
@@ -146,17 +164,17 @@ class MissionCommand:
         world.custody_source = self.custody
         if world.phase != self.phase:
             world.post("c2", "all", "handoff", {"from": world.phase, "to": self.phase,
-                                                 "intent": PHASE_INTENT[self.phase]})
+                                                 "intent": self._intent()})
         world.phase = self.phase
         if was_active and not self.active:
             world.accepted_detections = []
-        return assign_roles(vehicles, track, advisor, mission_active=self.active)
+        return assign_roles(vehicles, track, advisor, mission_active=self.active, algorithm=self.algorithm)
 
     def expire_if_stale(self, now: float, world: WorldModel) -> bool:
         """Expire BEFORE accepting a late aircraft frame as a new target.
 
-        The brain calls this before fusion too, so a frame after the complete
-        loss horizon cannot silently create a new drone-initiated mission.
+        The brain calls this before fusion too: a late frame cannot bridge an
+        expired mission. Coordinated mode must confirm a new candidate again.
         """
         if not self.active or self._last_observed_at is None or now - self._last_observed_at < self.lost_s:
             return False
@@ -167,6 +185,7 @@ class MissionCommand:
         self.phase = "lost"
         self.handoff.update(state="lost", receiver=None, evidence=None)
         self._tower_hits.clear()
+        self._candidate_hits.clear()
         self._air_hits.clear()
         self._last_air_at.clear()
         world.last_cue = None
@@ -179,11 +198,27 @@ class MissionCommand:
         self._ever_acquired = False
         self._air_hits.clear()
         self._last_air_at.clear()
-        self.metrics["confirmed_tower_cues"] += 1
+        self.metrics["confirmed_sensor_cues"] += 1
+        source = world.vehicles.get(det.source_id)
+        if source and source.vehicle_class == "tower":
+            self.metrics["confirmed_tower_cues"] += 1
+        self._last_observed_at = det.timestamp
+        world.last_cue = (det.lat, det.lon)
+        if self.coordinated and source and source.vehicle_class in {"plane", "copter"}:
+            hits = [hit for hit in self._candidate_hits if hit.source_id == det.source_id]
+            self._air_hits[det.source_id] = hits
+            self._last_air_at[det.source_id] = det.timestamp
         self.handoff.update(state="pending", cue_source=det.source_id, cue_at=det.timestamp,
                             receiver=None, evidence=None, acquired_at=None, lat=det.lat, lon=det.lon)
         world.post("c2", "aircraft", "cue", {"from": det.source_id, "lat": det.lat, "lon": det.lon,
-                                              "confirmation_hits": len(self._tower_hits)})
+                                              "confirmation_hits": len(self._candidate_hits)})
+
+    def _intent(self) -> str:
+        if self.coordinated and self.phase == "dispatch":
+            return "Confirmed camera cue: quad follows the estimate; plane supports observation passes."
+        if self.coordinated and self.phase == "lost":
+            return "Contact expired; aircraft resume complementary search and any sensor may confirm a new cue."
+        return PHASE_INTENT[self.phase]
 
     def _confirmed(self, hits: list[Detection]) -> bool:
         return len(hits) >= self.confirmation_hits and hits[-1].timestamp > hits[0].timestamp
@@ -210,11 +245,13 @@ class MissionCommand:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "phase": self.phase, "intent": PHASE_INTENT[self.phase],
+            "phase": self.phase, "intent": self._intent(), "algorithm": self.algorithm,
             "mission_active": self.active, "custody": self.custody,
             "handoff": dict(self.handoff),
             "tower_confirmation": {"hits": len(self._tower_hits), "required_hits": self.confirmation_hits,
                                    "window_s": self.confirmation_window_s},
+            "cue_confirmation": {"hits": len(self._candidate_hits), "required_hits": self.confirmation_hits,
+                                 "eligible_sources": "any camera" if self.coordinated else "towers only"},
             "observation_age_s": None if self._last_observed_at is None else round(max(0.0, self._now - self._last_observed_at), 2),
             "tower_observation_age_s": None if self._last_tower_at is None else round(max(0.0, self._now - self._last_tower_at), 2),
             "air_observation_age_s": {source: round(max(0.0, self._now - stamp), 2)

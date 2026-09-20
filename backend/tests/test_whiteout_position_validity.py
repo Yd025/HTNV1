@@ -72,6 +72,12 @@ class WhiteoutPositionTests(unittest.IsolatedAsyncioTestCase):
             self.bridge._state.update(lat=latitude, lon=longitude)
             self.assertTrue((await self.adapter.list_vehicles())[0].connected)
 
+    async def test_zero_battery_survives_telemetry_and_unknown_retains_default(self):
+        self.bridge._state.update(lat=71.9958, lon=-94.8393, alt=40., battery_remaining=0.)
+        self.assertEqual((await self.adapter.list_vehicles())[0].battery_remaining, 0.)
+        self.bridge._state["battery_remaining"] = None
+        self.assertEqual((await self.adapter.list_vehicles())[0].battery_remaining, 100.)
+
 
 if __name__ == "__main__":
     unittest.main()

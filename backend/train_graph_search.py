@@ -15,6 +15,8 @@ import numpy as np
 
 from graph_search import (DEFAULT_WEIGHTS, MISSION_VERSION, SENSOR_MODEL, Terrain, objective, profile_hash, run_episode,
                           scenario, summarize, towers_for, train_motion)
+from flight_policy import (COORDINATED_ALGORITHM, LEGACY_ALGORITHM, DEFAULT_FLIGHT_POLICY,
+                           FLIGHT_POLICY_BOUNDS, normalize_flight_policy)
 
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_DIR=ROOT/"frontend/public/experiments"
@@ -40,7 +42,23 @@ def save(path,value):
 def source_hashes():
     # Git may change CRLF/LF across hosts without changing executable semantics.
     return {name:hashlib.sha256((Path(__file__).parent/name).read_bytes().replace(b"\r\n",b"\n")).hexdigest()
-            for name in ("graph_search.py","train_graph_search.py")}
+            for name in ("graph_search.py","train_graph_search.py","flight_policy.py")}
+
+
+def propose_flight_policy(rng, incumbent=None, explore=False):
+    """Bounded random search over flight behavior, fitted on training only."""
+    incumbent = normalize_flight_policy(incumbent)
+    values = {}
+    for key, (low, high) in FLIGHT_POLICY_BOUNDS.items():
+        values[key] = float(rng.uniform(low, high) if explore else
+                            np.clip(incumbent[key]+rng.normal(0, (high-low)*.22), low, high))
+    return normalize_flight_policy(values)
+
+
+def policy_fields(config):
+    algorithm = config.get("algorithm", LEGACY_ALGORITHM)
+    return {"algorithm":algorithm, "flightPolicy":normalize_flight_policy(config.get("flightPolicy"))
+            if algorithm == COORDINATED_ALGORITHM else None}
 
 
 def snap_towers(terrain,values):
@@ -146,19 +164,27 @@ def train(args):
     sources_at_start=source_hashes()
     profile=json.loads(Path(args.profile).read_text(encoding="utf-8"))
     terrain=Terrain(profile)
+    algorithm = getattr(args, "algorithm", COORDINATED_ALGORITHM) or COORDINATED_ALGORITHM
+    if algorithm not in (LEGACY_ALGORITHM, COORDINATED_ALGORITHM):
+        raise ValueError("Unknown surveillance algorithm")
+    coordinated = algorithm == COORDINATED_ALGORITHM
+    selection_objective = lambda score: objective(score, algorithm)
     protocol={"motionTrajectories":32 if args.quick else 256,"trainEpisodes":8 if args.quick else 24,
               "validationEpisodes":8 if args.quick else 24,"testEpisodes":12 if args.quick else 200,
               "candidates":4 if args.quick else 12,"horizonS":300,"stepS":5,"freshnessS":10,
-              "missionVersion":MISSION_VERSION,"placementFrozenBeforeMission":True,"confirmationHits":2,
+              "missionVersion":algorithm,"algorithm":algorithm,"placementFrozenBeforeMission":True,"flightPolicyFrozenBeforeTest":True,"confirmationHits":2,
               "receiverConfirmationHits":2,"confirmationWindowS":15,"lostAfterS":45,
               "evaluationToleranceM":SENSOR_MODEL["evaluationToleranceM"],"conditions":list(SENSOR_MODEL["conditions"])}
+    if coordinated:
+        protocol["flightPolicyBounds"] = FLIGHT_POLICY_BOUNDS
+        protocol["selectionObjective"] = "2*(100-detectionRate)+1.2*(100-anySensorCustodyPct)+.8*(100-custodyPct)+.2*longestGapS+.15*meanCappedS+.002*distanceM+100*falseConfirmations"
     seed=int(args.seed)
     if seed<0 or seed>2**31-1: raise ValueError("Seed must be between0 and2147483647")
     protocol["seedRanges"]={label:[seed+offset,seed+offset+protocol[count]-1]
                             for label,offset,count in (("motion",100000,"motionTrajectories"),("train",200000,"trainEpisodes"),
                                                        ("validation",300000,"validationEpisodes"),("test",400000,"testEpisodes"))}
     h,dt=protocol["horizonS"],protocol["stepS"]
-    progress=lambda value:save(args.progress,value) if args.progress else None
+    progress=lambda value:save(args.progress,{"algorithm":algorithm, **value}) if args.progress else None
     progress({"phase":"motion","seed":seed,"completed":0,"total":protocol["candidates"],"history":[]})
     # Four disjoint whole-episode seed blocks; test is generated after selection.
     motion_episodes=[scenario(terrain,seed+100000+i,h,dt) for i in range(protocol["motionTrajectories"])]
@@ -166,9 +192,13 @@ def train(args):
     train_episodes=[scenario(terrain,seed+200000+i,h,dt) for i in range(protocol["trainEpisodes"])]
     validation=[scenario(terrain,seed+300000+i,h,dt) for i in range(protocol["validationEpisodes"])]
     baseline_towers=snap_towers(terrain,profile["towerDefaults"])
-    baseline={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS,"baseline":True}
-    untrained={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS}
-    initial={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS}
+    baseline={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS,"algorithm":LEGACY_ALGORITHM}
+    if not coordinated:
+        baseline["baseline"] = True
+    untrained={"towers":baseline_towers,"weights":DEFAULT_WEIGHTS,"algorithm":algorithm}
+    if coordinated:
+        untrained["flightPolicy"] = dict(DEFAULT_FLIGHT_POLICY)
+    initial=dict(untrained)
     rng=np.random.default_rng(seed)
     history=[]
     best_config=initial
@@ -179,8 +209,7 @@ def train(args):
         elif index==1:
             config={"towers":propose_tower_pair(terrain,motion,rng),"weights":DEFAULT_WEIGHTS}
         else:
-            # Fit tower positions before deployment. Tracking logic is fixed;
-            # legacy score weights remain serialized only for compatibility.
+            # Fit placement and bounded flight policy before deployment.
             # Every fourth proposal explores globally; the rest refine incumbent.
             values=[]
             for tower in best_config["towers"]:
@@ -191,7 +220,10 @@ def train(args):
                     point=np.asarray([tower["x"],tower["y"]])+rng.normal(0,500 if index<6 else 220,2)
                 values.append({"x":float(point[0]),"y":float(point[1]),"heading":float(tower["heading"]+rng.normal(0,35))})
             config={"towers":snap_towers(terrain,values),"weights":DEFAULT_WEIGHTS}
-        active_candidate={"index":index,"towers":config["towers"],"weights":config["weights"]}
+        config["algorithm"] = algorithm
+        if coordinated and index:
+            config["flightPolicy"] = propose_flight_policy(rng, best_config.get("flightPolicy"), explore=index%4==1)
+        active_candidate={"index":index,"towers":config["towers"],"weights":config["weights"],**policy_fields(config)}
         progress({"phase":"training","seed":seed,"completed":index,"total":protocol["candidates"],"history":history,
                   "activeCandidate":active_candidate,"candidateCompleted":0,"candidateEpisodes":len(train_episodes),
                   "candidateMetrics":None,"bestCandidate":best_index,"preview":None})
@@ -202,20 +234,20 @@ def train(args):
                       "preview":training_preview("training",index,example,total)})
         score,training_rows=evaluate(terrain,config,train_episodes,motion,h,dt,capture_preview=True,on_progress=training_progress)
         preview=training_preview("training",index,training_rows[0],len(train_episodes))
-        accepted=best_score is None or objective(score)<objective(best_score)
+        accepted=best_score is None or selection_objective(score)<selection_objective(best_score)
         if accepted: best_config,best_score,best_index=config,score,index
-        history.append({"index":index,"towers":config["towers"],"weights":config["weights"],"train":score,"accepted":accepted,"preview":preview})
+        history.append({"index":index,"towers":config["towers"],"weights":config["weights"],**policy_fields(config),"train":score,"accepted":accepted,"preview":preview})
         progress({"phase":"training","seed":seed,"completed":index+1,"total":protocol["candidates"],"history":history,
                   "activeCandidate":active_candidate,"candidateCompleted":len(train_episodes),"candidateEpisodes":len(train_episodes),
                   "candidateMetrics":score,"bestCandidate":best_index,"preview":preview})
         print(f"Candidate{index+1}/{protocol['candidates']}: {score['detectionRate']:.1f}% detected; cappedmean{score['meanCappedS']:.1f}s",flush=True)
     # Initial plus three training finalists; validation decides, never the test.
-    finalists={0,*[c["index"] for c in sorted(history,key=lambda c:(objective(c["train"]),c["index"]))[:3]]}
+    finalists={0,*[c["index"] for c in sorted(history,key=lambda c:(selection_objective(c["train"]),c["index"]))[:3]]}
     progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],
               "history":history,"validationCompleted":0,"validationTotal":len(finalists),"bestCandidate":best_index,"preview":None})
     for validation_index,i in enumerate(sorted(finalists)):
-        config={"towers":history[i]["towers"],"weights":history[i]["weights"]}
-        active_candidate={"index":i,"towers":config["towers"],"weights":config["weights"]}
+        config={"towers":history[i]["towers"],"weights":history[i]["weights"],**policy_fields(history[i])}
+        active_candidate={"index":i,**config}
         progress({"phase":"validation","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
                   "validationCompleted":validation_index,"validationTotal":len(finalists),"activeCandidate":active_candidate,
                   "candidateCompleted":0,"candidateEpisodes":len(validation),"candidateMetrics":None,"bestCandidate":best_index,"preview":None})
@@ -230,9 +262,9 @@ def train(args):
                   "activeCandidate":active_candidate,"candidateCompleted":len(validation),"candidateEpisodes":len(validation),
                   "candidateMetrics":history[i]["validation"],"bestCandidate":best_index,
                   "preview":training_preview("validation",i,validation_rows[0],len(validation))})
-    winner=min((history[i] for i in finalists),key=lambda c:(objective(c["validation"]),c["index"]))
-    selected={"towers":winner["towers"],"weights":winner["weights"]}
-    model={"schemaVersion":1,"mode":"synthetic-terrain-graph","missionVersion":MISSION_VERSION,
+    winner=min((history[i] for i in finalists),key=lambda c:(selection_objective(c["validation"]),c["index"]))
+    selected={"towers":winner["towers"],"weights":winner["weights"],**policy_fields(winner)}
+    model={"schemaVersion":1,"mode":"synthetic-terrain-graph","missionVersion":algorithm,"algorithm":algorithm,
            "sensorModel":SENSOR_MODEL,"placementFrozen":True,"seed":seed,"profileHash":profile_hash(profile),
            "sourceSha256":sources_at_start,"protocol":protocol,"motion":motion,"trained":selected,"selectedIndex":winner["index"]}
     if source_hashes()!=sources_at_start:
@@ -247,7 +279,7 @@ def train(args):
     for label,config,learned_motion in (("baseline",baseline,None),("untrained",untrained,None),("trained",selected,motion)):
         rows=[]
         candidate_index=winner["index"] if label=="trained" else None
-        active_candidate={"index":candidate_index,"towers":config["towers"],"weights":config["weights"]}
+        active_candidate={"index":candidate_index,"towers":config["towers"],"weights":config["weights"],**policy_fields(config)}
         progress({"phase":"test","seed":seed,"completed":protocol["candidates"],"total":protocol["candidates"],"history":history,
                   "testCompleted":count,"testTotal":len(tests)*3,"activeCandidate":active_candidate,
                   "candidateCompleted":0,"candidateEpisodes":len(tests),"candidateMetrics":None,"bestCandidate":winner["index"],"preview":None,
@@ -268,10 +300,10 @@ def train(args):
                                 for label,rows in result_rows.items()}} for t in range(0,h+1,dt)]
     delta=np.array([a["metrics"]["meanCappedS"]-b["metrics"]["meanCappedS"] for a,b in zip(result_rows["baseline"],result_rows["trained"])])
     bootstrap=np.random.default_rng(seed+500000).choice(delta,(1000,len(delta)),replace=True).mean(axis=1)
-    report={"schemaVersion":1,"mode":"synthetic-terrain-graph","missionVersion":MISSION_VERSION,
+    report={"schemaVersion":1,"mode":"synthetic-terrain-graph","missionVersion":algorithm,"algorithm":algorithm,
             "sensorModel":SENSOR_MODEL,"placementFrozen":True,"seed":seed,"profileHash":profile_hash(profile),
             "sourceSha256":sources_at_start,"protocol":protocol,"trained":selected,"selectedIndex":winner["index"],
-            "baseline":{"towers":baseline_towers},"history":history,"metrics":metrics,"detectionCurve":detection_curve,
+            "baseline":{"towers":baseline_towers,**policy_fields(baseline)},"history":history,"metrics":metrics,"detectionCurve":detection_curve,
             "comparison":{"meanSecondsSaved":float(delta.mean()),"pairedBootstrap95S":np.quantile(bootstrap,[.025,.975]).tolist(),
                           "detectionRateGain":metrics["trained"]["detectionRate"]-metrics["baseline"]["detectionRate"],
                           "testUsedForSelection":False},
@@ -297,6 +329,27 @@ def train(args):
               "Coverage counts visible sampled water-node centers. Two consistent tower frames confirm a cue. Two distinct-time accepted frames from the same aircraft within 15 s confirm handoff (offline cadence 5 s). Prediction coasts with growing uncertainty and becomes lost after 45 s. Evaluation uses a declared 150 m spatial tolerance to distinguish true target outcomes from clutter; these evaluator-only labels never enter the controller and are not a measured detector accuracy specification.",
               "The learned model uses training trajectories only. Training selects candidates, validation selects the winner, and untouched test results are reported even if they regress."],
             "sources":profile.get("source"),"wallSeconds":time.perf_counter()-started}
+    report["metricDefinitions"].update({
+        "longestGapS":"Longest interval with stale or incorrect fused contact after first true confirmation; 300 s for a never-detected mission. Mean across all missions.",
+        "anySensorCustodyPct":"Percentage of all mission samples with a confirmed fused estimate within 150 m of evaluator truth and accepted sensor evidence no older than 10 s.",
+        "flightDistanceByAssetM":"Mean cumulative horizontal flight distance in meters per aircraft over the whole mission, including search and supporting passes.",
+    })
+    if coordinated:
+        report["modelSummary"].update(type="Joint tower placement and bounded aircraft flight-policy search; any-sensor confirmation and observation-only pursuit",
+                                      algorithm=algorithm, flightPolicy=selected["flightPolicy"], trainedParameters=list(FLIGHT_POLICY_BOUNDS))
+        report["policyLabels"] = {"baseline":"Default towers + tower-first aircraft dispatch (legacy)",
+                                  "untrained":"Default towers + default coordinated surveillance",
+                                  "trained":"Selected towers + trained coordinated surveillance"}
+        report["metricDefinitions"]["detectionRate"] = "Percentage of all missions with two consistent distinct-time sensor observations confirming an estimate within 150 m of evaluator truth; any tower or aircraft may acquire first."
+        report["metricDefinitions"]["handoffRate"] = "Percentage of missions with two accepted fresh observations from the same aircraft and a correct estimate; an aircraft may also be the first acquiring sensor. This measures aircraft custody acquisition, not necessarily transfer from a tower."
+        report["metricDefinitions"]["falseConfirmations"] = "Mean confirmed contacts per mission farther than 150 m from evaluator truth; labels are scoring-only."
+        report["limitations"] = report["limitations"][:3]+[
+            "Aircraft start airborne. Both search before a cue, using complementary water lanes; a quad searches within a fitted launch radius, then faces the estimated contact from a camera-depression standoff. Plane flies continuous supporting passes with a bounded 15 deg/s body turn; quad yaw is bounded to 45 deg/s. Terrain-following altitude is kinematic; acceleration, climb, bank, wind, endurance and battery reserve require live validation.",
+            "The aircraft patrol uses actual sampled camera footprints for negative evidence and imperfect observations for confirmation/prediction. Missed frames only weakly reduce belief. Fixed camera geometry and terrain LOS are simulated; there is no independent aircraft gimbal or hidden target input to the controller.",
+            "Tower positions and six bounded flight parameters are trained jointly by random candidate search: lane spacing, route phase, quad search radius, lookahead, support offset and reacquisition width. This is policy-parameter optimization, not neural flight control or image-model training. Tower placement stays fixed throughout a mission. Search is not guaranteed globally optimal.",
+            "All candidates share training episodes; training finalists are checked on separate validation episodes. The policy is frozen before disjoint test episodes are created. Baseline, untrained and trained policies share test routes/conditions, and regressions remain in the report.",
+            "Confirmation requires distinct timestamps. Aircraft custody requires repeated same-aircraft evidence; prediction expires after 45 s without accepted observations. Synthetic evaluation tolerance is 150 m and all truth labels are evaluator-only. No hardware flight safety, detector accuracy or real-world superiority is established by these runs.",
+        ]
     if source_hashes()!=sources_at_start:
         raise ValueError("Experiment source changed during evaluation; rerun with stable code")
     save(args.output,report)
@@ -310,14 +363,21 @@ def train(args):
 def replay(args):
     profile=json.loads(Path(args.profile).read_text(encoding="utf-8"))
     model=json.loads(Path(args.model).read_text(encoding="utf-8"))
-    if model.get("missionVersion")!=MISSION_VERSION: raise ValueError("Frozen model predates tower-first missions; retrain before replay")
+    if model.get("missionVersion") not in (LEGACY_ALGORITHM, COORDINATED_ALGORITHM): raise ValueError("Frozen model predates tower-first missions; retrain before replay")
     if model["profileHash"]!=profile_hash(profile): raise ValueError("Frozen model does not match the terrain profile")
-    if model.get("sourceSha256")!=source_hashes(): raise ValueError("Frozen model does not match the experiment source; retrain before replay")
+    source_changed = model.get("sourceSha256")!=source_hashes()
+    if source_changed and model.get("missionVersion") != LEGACY_ALGORITHM:
+        raise ValueError("Frozen model does not match the experiment source; retrain before replay")
     request=json.loads(Path(args.replay).read_text(encoding="utf-8"))
     seed=int(request.get("seed",model["seed"]+900000))
     if seed<0 or seed>2**31-1: raise ValueError("Seed outside accepted bounds")
     terrain=Terrain(profile)
-    config={"towers":snap_towers(terrain,request.get("towers",model["trained"]["towers"])),"weights":model["trained"]["weights"]}
+    algorithm = request.get("algorithm") or getattr(args,"algorithm",None) or model["trained"].get("algorithm",model["missionVersion"])
+    if algorithm not in (LEGACY_ALGORITHM, COORDINATED_ALGORITHM):
+        raise ValueError("Unknown surveillance algorithm")
+    config={"towers":snap_towers(terrain,request.get("towers",model["trained"]["towers"])),"weights":model["trained"]["weights"],"algorithm":algorithm}
+    if algorithm == COORDINATED_ALGORITHM:
+        config["flightPolicy"] = normalize_flight_policy(request.get("flightPolicy", model["trained"].get("flightPolicy")))
     start=request.get("boatStart")
     if start is not None:
         point=np.array([float(start["x"]),float(start["y"])])
@@ -327,8 +387,10 @@ def replay(args):
     p=model["protocol"]
     episode=scenario(terrain,seed,p["horizonS"],p["stepS"],start)
     result=run_episode(terrain,config,episode,model["motion"],p["horizonS"],p["stepS"],True)
-    result.update(schemaVersion=1,mode="synthetic-terrain-graph",missionVersion=MISSION_VERSION,placementFrozen=True,
+    result.update(schemaVersion=1,mode="synthetic-terrain-graph",missionVersion=algorithm,placementFrozen=True,
                   profileHash=model["profileHash"],boatStart={"x":float(episode.positions[0,0]),"y":float(episode.positions[0,1])})
+    if source_changed:
+        result["compatibilityWarning"] = "Historical tower-first model replayed using the current legacy-compatible controller; historical source hashes differ. Original saved replay frames remain unchanged."
     save(args.output,result)
     return result
 
@@ -341,6 +403,8 @@ def main():
     parser.add_argument("--progress")
     parser.add_argument("--seed",type=int,default=190926)
     parser.add_argument("--quick",action="store_true")
+    parser.add_argument("--algorithm",choices=(LEGACY_ALGORITHM,COORDINATED_ALGORITHM),
+                        help="Training defaults to coordinated-surveillance-v1; replay defaults to its saved algorithm")
     parser.add_argument("--replay")
     parser.add_argument("--model",default=str(DEFAULT_DIR/"graph-model.json"))
     args=parser.parse_args()

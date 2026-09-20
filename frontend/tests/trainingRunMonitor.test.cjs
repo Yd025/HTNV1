@@ -68,7 +68,7 @@ test("inspecting a finished placement holds its own positions and measured examp
 
 test("test phase labels and aggregates follow the policy being evaluated, including its different tower coordinates", () => {
   const output = render({ phase: "test", evaluatingPolicy: "baseline", activeCandidate: { index: null, towers: towerPair(-543), weights: [] }, candidateMetrics: metric(100), partialMetrics: { baseline: metric(50), trained: metric(99) }, preview: { ...preview, id: "baseline-test", phase: "test", policy: "baseline", candidateIndex: null, episodeTotal: 200 } });
-  assert.match(output, /Sweep baseline/);
+  assert.match(output, /Reference strategy/);
   assert.match(output, /Untouched test missions/);
   assert.match(output, /50\.0%/);
   assert.match(output, /-987/);

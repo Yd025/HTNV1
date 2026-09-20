@@ -270,7 +270,7 @@ class WhiteoutAdapter:
                     alt=alt,
                     heading=heading,
                     groundspeed=float(snap.get("groundspeed") or 0.0),
-                    battery_remaining=float(snap.get("battery_remaining") or 100.0),
+                    battery_remaining=float(snap["battery_remaining"] if snap.get("battery_remaining") is not None else 100.0),
                     armed=bool(snap.get("armed")),
                     mode=str(snap.get("mode") or "—"),
                     connected=pose_ok,

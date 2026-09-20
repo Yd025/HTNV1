@@ -41,7 +41,7 @@ export default function Preview({ data, now, connectionStale }: { data: GameDash
         const modelStatus = isEarlierRun(attempt, data.rulesVersion) ? "Earlier rules · kept for replay" : attempt.sentry?.state === "imported" && (!attempt.verified || attempt.outcome === "abandoned") ? "Saved · not used for learning" : attempt.sentry ? ingestionName[attempt.sentry.state] : "Waiting to save";
         return <tr key={attempt.id} data-selected={selection === attempt.id}><th>{attempt.number}<small>Layout {attempt.layoutVersion}</small></th><td>{outcomeName[attempt.outcome]}</td><td>{seconds(attempt.seconds)}</td><td>{modelStatus}</td><td>{attempt.replayAvailable ? <button onClick={() => watch(attempt.id)} aria-label={`Watch run ${attempt.number}`} aria-pressed={selection === attempt.id}>{selection === attempt.id ? "Selected" : "Watch run"}</button> : <span className={styles.recordingUnavailable}>Unavailable</span>}</td></tr>;
       })}</tbody></table></div> : <p className={styles.recordingEmpty}>Completed runs will appear here. Open the game to record the first one.</p>}
-      <p className={styles.note}>The 2D replay recreates each run from the player’s saved controls and original tower positions. The model learns from attempt data received from Sentry.</p>
+      <p className={styles.note}>The 2D replay recreates each run from the player’s saved controls and original tower positions and flight policy. The model learns from attempt data received from Sentry.</p>
     </section>
   </>;
 }
@@ -126,7 +126,7 @@ function ReplayPlayer({ replay, runNumber, data }: { replay: AttemptReplay; runN
   };
   const replayData = { ...data, layout: replay.layout };
   return <>
-    {earlierRules && <div className={styles.notice} role="note"><p>This run used earlier rules: aircraft could spot from a distance. New games use overhead-only aircraft spotting. This replay preserves what happened.</p></div>}
+    {earlierRules && <div className={styles.notice} role="note"><p>This run keeps its original aircraft routes and spotting rules. New games use coordinated surveillance with overhead-only aircraft spotting.</p></div>}
     <div className={styles.playbackControls}>
       <div className={styles.playbackActions}>
         <button className={styles.primaryPlayback} onClick={toggle} disabled={duration <= 0} aria-label={playing ? "Pause replay" : "Play replay"}>{playing ? "Pause" : atEnd ? "Play again" : "Play"}</button>
@@ -138,7 +138,7 @@ function ReplayPlayer({ replay, runNumber, data }: { replay: AttemptReplay; runN
       <div className={styles.playbackTimeline}><label htmlFor="game-replay-timeline" className={styles.srOnly}>Replay position</label><input id="game-replay-timeline" type="range" min={0} max={duration || 1} step="any" value={time} disabled={duration <= 0} aria-valuetext={`${seconds(time)} of ${seconds(duration)}`} onChange={event => seek(Number(event.target.value))} /><output htmlFor="game-replay-timeline" aria-live="off">{seconds(time)} / {seconds(duration)}</output></div>
     </div>
     <div className={styles.previewLayout}><GameMap data={replayData} frame={frame} path={path} /><aside className={styles.previewInfo}>
-      <h4>{runNumber == null ? "Saved opening run" : `Run ${runNumber}`} · {outcomeName[replay.attempt.outcome]}</h4><p>Replay of the player’s saved controls with the tower positions used in this run.</p>
+      <h4>{runNumber == null ? "Saved opening run" : `Run ${runNumber}`} · {outcomeName[replay.attempt.outcome]}</h4><p>Replay of the player’s saved controls with the towers and flight policy used in this run.</p>
       <dl><div><dt>At this moment</dt><dd>{atEnd ? outcomeName[replay.attempt.outcome] : "Ship moving through the opening"}</dd></div><div><dt>Seen by</dt><dd>{observers.length ? observers.join(", ") : "No current sighting"}</dd></div><div><dt>Capture progress</dt><dd>{percent(frame.tagProgress)}</dd></div><div><dt>Tower layout</dt><dd>{replay.layout.version}</dd></div><div><dt>First detected</dt><dd>{replay.attempt.firstDetectionSeconds == null ? "Not detected" : seconds(replay.attempt.firstDetectionSeconds)}</dd></div><div><dt>Aircraft spotting</dt><dd>{(replay.attempt.rulesVersion ?? LEGACY_RULES_VERSION) === LEGACY_RULES_VERSION ? "Forward camera · earlier rules" : "Overhead only · within 65 m"}</dd></div></dl>
       <p className={styles.note}>Drag the timeline to inspect any moment. Time is measured on the game clock. Repeat plays this run again automatically.</p>
     </aside></div>
@@ -154,14 +154,14 @@ function LivePreview({ data, now, connectionStale }: { data: GameDashboard; now:
   const label = !live ? "Waiting for a player" : ended ? "Run finished" : stale ? "Updates paused" : frame?.status === "paused" ? "Player paused" : "Live";
   return <div className={styles.previewLayout}><GameMap data={data} frame={frame} path={live?.path ?? []} /><aside className={styles.previewInfo}>
     <h4>{label}</h4><p>{!live ? "Start a game to see the player move through the opening." : ended ? "Choose a saved run above to replay it from the beginning." : stale ? "Showing the last received position while updates reconnect." : "Following the current player’s ship, towers, drones, and plane."}</p>
-    {live && (live.rulesVersion ?? LEGACY_RULES_VERSION) !== data.rulesVersion && <p>This run started under earlier rules, when aircraft could spot from a distance.</p>}
+    {live && (live.rulesVersion ?? LEGACY_RULES_VERSION) !== data.rulesVersion && <p>This run keeps the flight and spotting rules it started with.</p>}
     <dl><div><dt>Game time</dt><dd>{frame ? seconds(frame.time) : "—"}</dd></div><div><dt>Radar contact</dt><dd>{frame ? frame.detected ? "Detected" : "Clear" : "Awaiting play"}</dd></div><div><dt>Capture progress</dt><dd>{frame ? percent(frame.tagProgress) : "—"}</dd></div><div><dt>Last update</dt><dd>{age == null ? "—" : `${age} s ago`}</dd></div></dl>
     <p className={styles.note}>New completed runs appear in the run picker. Saved playback stays on the run you choose.</p>
   </aside></div>;
 }
 
 function MapLegend() {
-  return <div className={styles.mapLegend}><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2L16 16 10 13 4 16Z" fill="#edc68a" /></svg>Ship &amp; route</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="none" stroke="#b6d4b2" strokeWidth="2" /></svg>Tower &amp; radar</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="#cad7ee" strokeWidth="2" /></svg>Drone</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1v17M2 10h16M6 17h8" stroke="#cad7ee" strokeWidth="2" /></svg>Plane</span><span>Dashed circle: protected start</span></div>;
+  return <div className={styles.mapLegend}><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2L16 16 10 13 4 16Z" fill="#edc68a" /></svg>Ship &amp; route</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="none" stroke="#b6d4b2" strokeWidth="2" /></svg>Tower &amp; radar</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="#cad7ee" strokeWidth="2" /></svg>Drone</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1v17M2 10h16M6 17h8" stroke="#cad7ee" strokeWidth="2" /></svg>Plane</span><span>Dashed circle: protected start</span><span>Dashed lines: aircraft next waypoints</span></div>;
 }
 
 function GameMap({ data, frame, path }: { data: GameDashboard; frame?: LiveFrame; path: PathSample[] }) {
@@ -192,6 +192,7 @@ function GameMap({ data, frame, path }: { data: GameDashboard; frame?: LiveFrame
         <circle cx={point(world.spawn.x)} cy={point(world.spawn.z)} r={data.policy.spawnProtectionMetres * unit} fill="none" stroke="#edc68a" strokeDasharray="6 6" strokeOpacity=".8" />
         {frame?.towers.map(tower => <path key={`sector-${tower.id}`} d={sector(point(tower.x), point(tower.z), tower.heading, tower.range * unit)} fill={tower.detecting ? "#edc68a" : "#b6d4b2"} fillOpacity={tower.detecting ? ".24" : ".12"} stroke={tower.detecting ? "#edc68a" : "#b6d4b2"} strokeOpacity=".6" />)}
         <polyline points={route} fill="none" stroke="#edc68a" strokeWidth="2.5" strokeOpacity=".8" />
+        {frame && [...frame.drones, { ...frame.plane, id: "plane" }].map(aircraft => aircraft.target && <g key={`intent-${aircraft.id}`}><title>{`${aircraft.id}: ${aircraft.role?.replaceAll("-", " ") ?? "patrol"}; intended waypoint`}</title><line x1={point(aircraft.x)} y1={point(aircraft.z)} x2={point(aircraft.target.x)} y2={point(aircraft.target.z)} stroke="#cad7ee" strokeOpacity=".65" strokeWidth="1.5" strokeDasharray="5 5" /><circle cx={point(aircraft.target.x)} cy={point(aircraft.target.z)} r="4" stroke="#cad7ee" fill="none" /></g>)}
         {towers.map((tower, i) => <g key={tower.id} transform={`translate(${point(tower.x)} ${point(tower.z)})`}><title>{`Tower ${i + 1}: X ${Math.round(tower.x)}, Z ${Math.round(tower.z)} m`}</title><rect x="-7" y="-7" width="14" height="14" fill="#182232" stroke="#b6d4b2" strokeWidth="2.5" /><path d="M-4 4L0-4 4 4M-3 1h6" fill="none" stroke="#b6d4b2" strokeWidth="1.5" /><text className={styles.mapText} x="13" y="5">T{i + 1}</text></g>)}
         {frame?.drones.map((drone, i) => <g key={drone.id} transform={`translate(${point(drone.x)} ${point(drone.z)}) rotate(${-drone.heading * 180 / Math.PI})`}><title>{`Drone ${i + 1}${drone.detecting ? ", ship detected" : ""}`}</title><path d="M-6-6L6 6M6-6L-6 6M0 0v10" fill="none" stroke={drone.detecting ? "#edc68a" : "#cad7ee"} strokeWidth="2.5" />{[[-6,-6],[6,-6],[-6,6],[6,6]].map(([x,z]) => <circle key={`${x}-${z}`} cx={x} cy={z} r="3" fill="#182232" stroke="#cad7ee" strokeWidth="1.5" />)}</g>)}
         {frame && <g transform={`translate(${point(frame.plane.x)} ${point(frame.plane.z)}) rotate(${-frame.plane.heading * 180 / Math.PI})`}><title>Search plane</title><path d="M0 11L-3 1 -13-4 -13-6 -2-3 -1-10 -6-12 -6-14 0-12 6-14 6-12 1-10 2-3 13-6 13-4 3 1Z" fill="#cad7ee" stroke="#182232" strokeWidth="1" /></g>}

@@ -143,7 +143,7 @@ class GraphSearchTests(unittest.TestCase):
             self.assertGreater(float(drone["z"]),float(terrain.elevation(drone["x"],drone["y"])))
 
     def test_source_fingerprints_are_portable_across_git_line_endings(self):
-        contents={"graph_search.py":b"graph\nsource\n","train_graph_search.py":b"training\nsource\n"}
+        contents={"graph_search.py":b"graph\nsource\n","train_graph_search.py":b"training\nsource\n","flight_policy.py":b"flight\npolicy\n"}
         with patch.object(Path,"read_bytes",autospec=True,side_effect=lambda path:contents[path.name]):
             lf=source_hashes()
         with patch.object(Path,"read_bytes",autospec=True,side_effect=lambda path:contents[path.name].replace(b"\n",b"\r\n")):

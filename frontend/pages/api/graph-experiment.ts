@@ -64,15 +64,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const body = req.body;
     if (!body || !["train", "replay"].includes(body.kind) || !Number.isInteger(body.seed) || body.seed < 0 || body.seed > 2147483647) return res.status(400).json({ error: "Choose a valid experiment and seed between 0 and 2147483647." });
     const kind = body.kind as Job["kind"];
+    const algorithm = body.algorithm ?? (kind === "train" ? "coordinated-surveillance-v1" : "tower-first-v2");
+    if (!["tower-first-v2", "coordinated-surveillance-v1"].includes(algorithm)) return res.status(400).json({ error: "Choose a supported surveillance algorithm." });
+    const flightBounds: Record<string, [number, number]> = { laneSpacingM: [200, 1600], routePhase: [0, 1], quadSearchRadiusM: [250, 2200], lookaheadS: [0, 40], supportOffsetM: [100, 1000], reacquireWidthM: [50, 700] };
+    if (body.flightPolicy !== undefined && (!body.flightPolicy || typeof body.flightPolicy !== "object" || Array.isArray(body.flightPolicy)
+      || Object.keys(body.flightPolicy).some(key => !(key in flightBounds))
+      || Object.entries(flightBounds).some(([key, [low, high]]) => typeof body.flightPolicy[key] !== "number" || !Number.isFinite(body.flightPolicy[key]) || body.flightPolicy[key] < low || body.flightPolicy[key] > high))) {
+      return res.status(400).json({ error: "The flight policy is incomplete or outside its supported limits. Select a trained candidate again." });
+    }
     const id = randomUUID();
     const directory = path.join(project, "frontend", ".graph-jobs", id);
-    let model = path.join(publicRoot, "graph-model.json");
+    let model = path.join(publicRoot, algorithm === "coordinated-surveillance-v1" ? "surveillance-model.json" : "graph-model.json");
     if (body.modelJob) {
       const previous = jobs.get(String(body.modelJob));
       if (!previous || previous.kind !== "train" || previous.status !== "complete") return res.status(400).json({ error: "The selected trained model is unavailable. Reload the saved model." });
       model = path.join(previous.directory, "model.json");
     }
-    const replay: Record<string, unknown> = { seed: body.seed };
+    const replay: Record<string, unknown> = { seed: body.seed, algorithm, ...(body.flightPolicy ? { flightPolicy: body.flightPolicy } : {}) };
     const validPoint = (p: unknown): p is { x: number; y: number } => !!p && typeof p === "object" && ["x", "y"].every(key => typeof (p as Record<string, unknown>)[key] === "number" && Number.isFinite((p as Record<string, number>)[key]) && Math.abs((p as Record<string, number>)[key]) <= 3250);
     if (body.boatStart !== undefined) {
       if (!validPoint(body.boatStart)) return res.status(400).json({ error: "Place the boat inside the Fort Ross map." });
@@ -89,7 +97,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     reserved = job;
     await mkdir(directory, { recursive: true });
     const args = ["-B", script, "--output", path.join(directory, "result.json")];
-    if (kind === "train") args.push("--seed", String(body.seed), "--model-output", path.join(directory, "model.json"), "--progress", path.join(directory, "progress.json"));
+    if (kind === "train") args.push("--seed", String(body.seed), "--algorithm", algorithm, "--model-output", path.join(directory, "model.json"), "--progress", path.join(directory, "progress.json"));
     else {
       await writeFile(path.join(directory, "request.json"), JSON.stringify(replay));
       args.push("--replay", path.join(directory, "request.json"), "--model", model);

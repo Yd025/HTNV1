@@ -23,6 +23,8 @@ except ImportError:  # local eval without Docker deps
             return None
 
 from agents import MissionCommand, Squad
+from agents.surveillance import load_runtime_policy
+from flight_policy import COORDINATED_ALGORITHM
 from evidence import ObservationGate
 from metrics import MetricsEngine, Scorecard
 from observability import MissionObserver, TickTiming
@@ -39,11 +41,13 @@ ADVISOR_EVERY_S = float(os.getenv("STRATEGY_INTERVAL_SEC", "15"))
 
 class SwarmBrain:
     def __init__(self, adapter: SimAdapter | None = None) -> None:
+        self.surveillance_policy = load_runtime_policy()
         self.adapter = adapter or build_adapter()
-        self.world = WorldModel()
+        self.world = WorldModel(algorithm=self.surveillance_policy["algorithm"],
+                                flight_policy=dict(self.surveillance_policy["flightPolicy"]))
         self.tracker = TargetTracker()
         self.squad = Squad()
-        self.c2 = MissionCommand()
+        self.c2 = MissionCommand(algorithm=self.world.algorithm)
         self.metrics: MetricsEngine | None = None
         self.score = Scorecard()
         self.connected = False
@@ -83,6 +87,7 @@ class SwarmBrain:
         if search_policy and (self.adapter.name != "local" or self.mode != "synthetic"):
             raise ValueError("Search policies are supported only by the local synthetic adapter")
         await self.adapter.connect()
+        self.world.arena = self.adapter.arena()
         if search_policy:
             from search_policy import SearchPlanner
             self.search_planner = SearchPlanner(self.adapter.arena(), algorithm=search_policy["algorithm"], **search_policy["planner"])
@@ -112,6 +117,7 @@ class SwarmBrain:
                 "python_version": platform.python_version(),
                 "scenario": os.getenv("RUN_SCENARIO", "unspecified"),
                 "search_policy": search_policy,
+                "surveillance_policy": self.surveillance_policy,
                 "settings": {"brain_hz": TICK_HZ, "observation_max_age_s": self._gate.max_age_s,
                              "command_refresh_s": 1.0, "tracker_gate_m": self.tracker.gate_m},
             }
@@ -178,12 +184,15 @@ class SwarmBrain:
             if expired or (tentative_stamp is not None and receipt_time - tentative_stamp > self.c2.confirmation_window_s):
                 self.tracker.reset()
                 self.world.track = None
-            # Before the first confirmed tower cue, airborne observations
-            # cannot initialize the mission or poison its target association.
+            # Legacy acquisition is tower-only. Coordinated acquisition also
+            # accepts aircraft evidence; both still pass the same freshness,
+            # association and repeated-observation confirmation gates.
             mission_detections = [d for d in detections
                                   if d.source_id in self.world.vehicles
                                   and comms.get(d.source_id, False)
-                                  and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower")]
+                                  and (self.c2.active or self.world.vehicles[d.source_id].vehicle_class == "tower"
+                                       or (self.world.algorithm == COORDINATED_ALGORITHM
+                                           and self.world.vehicles[d.source_id].vehicle_class in {"plane", "copter"}))]
             self.world.track = self.tracker.update(mission_detections, now=self._started + elapsed_s,
                                                    observation_now=receipt_time)
             self.world.accepted_detections = list(self.tracker.accepted_detections)
@@ -306,6 +315,7 @@ class SwarmBrain:
                                   "mode": "synthetic" if self.search_planner else None,
                                   "algorithm": getattr(self.adapter, "search_policy", {}).get("algorithm") if getattr(self.adapter, "search_policy", None) else None},
             "observations": self.observation_status,
+            "mission_algorithm": dict(self.surveillance_policy),
             "command_outcomes": self.command_outcomes,
             "recording": self.recorder.status if self.recorder else {"enabled": False},
             "diagnostics": self._diagnostics,

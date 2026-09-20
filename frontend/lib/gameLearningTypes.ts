@@ -1,6 +1,8 @@
 /** Version the dataset whenever terrain or game mechanics change. */
+import type { FlightPolicy } from './graphExperiment';
 export const LEGACY_RULES_VERSION = 'opening-physics-loop-pace2-v1';
-export const RULES_VERSION = 'opening-overhead-spotting-v2';
+export const OVERHEAD_RULES_VERSION = 'opening-overhead-spotting-v2';
+export const RULES_VERSION = 'opening-coordinated-surveillance-v3';
 export const WORLD_VERSION = 'fort-ross-257-v1';
 export const LEARNING_POLICY = {
   minimumAttempts: 8,
@@ -12,15 +14,16 @@ export const LEARNING_POLICY = {
 } as const;
 
 export type TowerPosition = { id: string; x: number; z: number };
-export type Layout = { version: number; towers: TowerPosition[]; createdAt: string; reason: string };
+export type Layout = { version: number; towers: TowerPosition[]; createdAt: string; reason: string; algorithm?: 'coordinated-surveillance-v1'; flightPolicy?: FlightPolicy };
 export type ControlSample = { tick: number; throttle: number; steer: number };
 export type PathSample = { t: number; x: number; z: number; detected: boolean; tagProgress: number };
 export type LiveFrame = {
+  algorithm?: 'coordinated-surveillance-v1';
   time: number; status: 'playing' | 'paused' | 'caught' | 'escaped' | 'abandoned';
   boat: { x: number; z: number; heading: number };
   towers: { id: string; x: number; z: number; heading: number; range: number; detecting: boolean }[];
-  drones: { id: string; x: number; z: number; heading: number; detecting: boolean; tagProgress: number }[];
-  plane: { x: number; z: number; heading: number; detecting: boolean };
+  drones: { id: string; x: number; z: number; heading: number; detecting: boolean; tagProgress: number; role?: string; target?: { x: number; z: number } }[];
+  plane: { x: number; z: number; heading: number; detecting: boolean; role?: string; target?: { x: number; z: number } };
   detected: boolean; tagProgress: number;
 };
 export type StartRequest = { seed: number; rulesVersion: string; worldVersion: string };
@@ -43,8 +46,11 @@ export type AttemptReplay = { attempt: AttemptSummary; layout: Layout; frames: L
 export type ReplayScore = {
   attempts: number; captures: number; escapes: number; censored: number;
   captureRate: number; meanCaptureSeconds: number | null; cappedMeanSeconds: number;
+  surveillance?: { detectionRate: number; meanFirstDetectionSeconds: number | null; visualContactFraction: number; longestContactGapSeconds: number; meanAircraftDistanceM: number };
 };
 export type LearningRound = {
+  algorithm?: 'coordinated-surveillance-v1';
+  flightPolicy?: FlightPolicy;
   rulesVersion?: string;
   id: number; at: string; attempts: number; candidateCount: number; promoted: boolean;
   previousVersion: number; selectedVersion: number; reason: string;

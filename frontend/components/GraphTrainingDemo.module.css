@@ -109,7 +109,14 @@
 .learning { padding: 27px 25px 22px; border-top: 1px solid var(--line); }
 .learningHeader { display: flex; align-items: center; justify-content: space-between; gap: 25px; }
 .learningHeader p { max-width: 65ch; color: var(--text-muted); font-size: 12px; line-height: 1.7; margin-top: 7px; }
-.trainActions { display: flex; align-items: flex-end; gap: 10px; flex-shrink: 0; }
+.trainActions { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; justify-content: flex-end; max-width: 560px; }
+.trainActions select { max-width: 290px; width: 100%; min-height: 41px; }
+.flightSettings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 24px; margin: 18px 0; }
+.flightSettings > div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding: 12px 0; font-size: 12px; }
+.flightSettings dt { color: var(--text-muted); }
+.flightSettings dd { margin: 0; color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media(max-width:760px) { .flightSettings { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media(max-width:560px) { .flightSettings { grid-template-columns: 1fr; } .trainActions label:first-child { flex-basis: 100%; } .trainActions select { max-width: none; font-size: 16px; } }
 .trainActions label { display: flex; flex-direction: column; gap: 5px; font-size: 10px; color: var(--text-muted); }
 .trainActions input { width: 105px; height: 41px; }
 .protocol { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 20px; color: var(--text-muted); font-size: 11px; }

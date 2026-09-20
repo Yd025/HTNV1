@@ -53,16 +53,17 @@ export default function GameLearning() {
   return (
     <div className={styles.game}>
       <div className={styles.heading}>
-        <div><h2>Learn from every escape</h2><p>Opening stretch · Fort Ross · Optimize time to actual drone capture.</p></div>
+        <div><h2>Learn from every escape</h2><p>Coordinated surveillance · learn tower sites and aircraft routes from player runs.</p></div>
         <a className={styles.play} href={GAME_URL} target="_blank" rel="noopener noreferrer">Open Cant Catch Me <span aria-hidden="true">↗</span><span className={styles.srOnly}> in a new tab</span></a>
       </div>
       {error && <div className={styles.notice} role="alert"><p>{error}{data && " Showing the last received data."}</p><button onClick={() => setRetry(value => value + 1)}>Retry connection</button></div>}
-      {!data ? <div className={styles.empty} role="status"><h3>{error ? "Waiting for the game service" : "Connecting to the game…"}</h3><p>Player attempts, learned tower positions, and the live opening stretch will appear here when the game connects.</p></div> : <>
-        <section className={styles.learning} aria-label="Tower learning status">
-          <div className={styles.learningTitle}><h3>Layout {data.layout.version}</h3><span className={styles.status} data-stale={stale}>{stale ? "Connection stale" : data.learning.status === "collecting" ? "Collecting player attempts" : data.learning.status === "training" ? "Evaluating placements" : data.learning.status === "error" ? "Evaluation needs attention" : "Ready for the next player"}</span></div>
+      {!data ? <div className={styles.empty} role="status"><h3>{error ? "Waiting for the game service" : "Connecting to the game…"}</h3><p>Player attempts, learned towers and flight policies, and the live opening stretch will appear here when the game connects.</p></div> : <>
+        <section className={styles.learning} aria-label="Surveillance algorithm learning status">
+          <div className={styles.learningTitle}><h3>Strategy {data.layout.version} · {data.layout.algorithm ? "Coordinated surveillance" : "Tower placement"}</h3><span className={styles.status} data-stale={stale}>{stale ? "Connection stale" : data.learning.status === "collecting" ? "Collecting player attempts" : data.learning.status === "training" ? "Evaluating towers and flights" : data.learning.status === "error" ? "Evaluation needs attention" : "Ready for the next player"}</span></div>
           <p>{data.learning.message}</p>
           {data.rulesVersion !== LEGACY_RULES_VERSION && <p>New games use overhead-only aircraft spotting: within 65 m with a clear view. Tower sightings can still send them to investigate. Earlier recordings and runs already in progress keep their original rules; the model learns only from runs using the new rules.</p>}
-          {data.learning.status === "training" ? <label className={styles.progress}>Evaluating candidate layouts · {data.learning.completed} / {data.learning.total}<progress max={Math.max(1, data.learning.total)} value={data.learning.completed} /></label> : completed < data.policy.minimumAttempts ? <label className={styles.progress}>{completed} / {data.policy.minimumAttempts} completed runs imported from Sentry before evaluation<progress max={data.policy.minimumAttempts} value={completed} /></label> : null}
+          {data.layout.algorithm && <p>The plane searches wider water, drones check separate nearby gaps, and fresh sightings coordinate tracking and forward support. The optimizer learns flight settings alongside tower locations; aircraft still obey the game’s existing spotting and capture rules.</p>}
+          {data.learning.status === "training" ? <label className={styles.progress}>Evaluating candidate strategies · {data.learning.completed} / {data.learning.total}<progress max={Math.max(1, data.learning.total)} value={data.learning.completed} /></label> : completed < data.policy.minimumAttempts ? <label className={styles.progress}>{completed} / {data.policy.minimumAttempts} completed runs imported from Sentry before evaluation<progress max={data.policy.minimumAttempts} value={completed} /></label> : null}
           <dl className={styles.summary}>
             <div><dt>Player attempts</dt><dd>{data.totals.attempts}</dd></div>
             <div><dt>Captured</dt><dd>{data.totals.captured}</dd></div>
@@ -71,18 +72,26 @@ export default function GameLearning() {
             <div><dt>Observed capture rate</dt><dd>{percent(data.totals.captureRate)}</dd></div>
             <div><dt>Mean capture time</dt><dd>{seconds(data.totals.meanCaptureSeconds)}</dd></div>
           </dl>
-          <p className={styles.note}>Results include all saved runs, including earlier spotting rules. Each player keeps the layout they started with. Capture rate excludes abandoned runs; mean capture time includes captures only. The model changes only tower positions.</p>
+          <p className={styles.note}>Results include earlier rules. Each player keeps the towers and flight policy they started with. Capture rate excludes abandoned runs; mean capture time includes captures only. New strategies apply to future runs after validation.</p>
+          {data.layout.flightPolicy && <details className={styles.data}><summary>View next-run flight policy</summary><div className={styles.tableWrap}><table><caption>Strategy {data.layout.version} · saved with each player’s run</caption><thead><tr><th>Flight decision</th><th>Value</th></tr></thead><tbody>{([
+            ["Plane sweep spacing", `${data.layout.flightPolicy.laneSpacingM.toFixed(0)} m`],
+            ["Patrol offset", `${(data.layout.flightPolicy.routePhase * 100).toFixed(0)}%`],
+            ["Drone search radius", `${data.layout.flightPolicy.quadSearchRadiusM.toFixed(0)} m`],
+            ["Tracking lead", `${data.layout.flightPolicy.lookaheadS.toFixed(1)} s`],
+            ["Support distance", `${data.layout.flightPolicy.supportOffsetM.toFixed(0)} m`],
+            ["Reacquisition width", `${data.layout.flightPolicy.reacquireWidthM.toFixed(0)} m`],
+          ]).map(([label, value]) => <tr key={label}><th>{label}</th><td>{value}</td></tr>)}</tbody></table></div></details>}
           <details className={styles.data}><summary>View next-run tower positions</summary><div className={styles.tableWrap}><table><caption>Layout {data.layout.version} · game coordinates in metres</caption><thead><tr><th>Tower</th><th>X</th><th>Z</th></tr></thead><tbody>{data.layout.towers.map((tower, i) => <tr key={tower.id}><th>T{i + 1}</th><td>{tower.x.toFixed(1)}</td><td>{tower.z.toFixed(1)}</td></tr>)}</tbody></table></div></details>
         </section>
         <div className={styles.charts}>
           <section className={styles.chartSection}><h3>Player outcomes over attempts</h3><p>Actual time spent in the opening stretch.</p><AttemptChart attempts={data.attempts} total={data.totals.attempts} /></section>
           <section className={styles.chartSection}><h3>Observed captures by layout</h3><p>Player results, with sample size shown for each layout.</p><LayoutChart attempts={data.attempts} /></section>
         </div>
-        <section className={styles.replay}><div><h3>Replay validation</h3><p>Estimated capture time when recorded controls are replayed through candidate tower layouts under the current game rules. These estimates are separate from live player outcomes.</p></div><ReplayChart rounds={data.rounds.filter(round => (round.rulesVersion ?? LEGACY_RULES_VERSION) === data.rulesVersion)} maxSeconds={data.policy.maxSeconds} /></section>
+        <section className={styles.replay}><div><h3>Replay validation</h3><p>Estimated capture time when recorded controls are replayed with candidate tower sites and aircraft flight policies. These estimates are separate from live player outcomes.</p></div><ReplayChart rounds={data.rounds.filter(round => (round.rulesVersion ?? LEGACY_RULES_VERSION) === data.rulesVersion)} maxSeconds={data.policy.maxSeconds} /></section>
         <section className={styles.preview} aria-labelledby="game-preview-heading">
           <Preview data={data} now={now} connectionStale={stale} />
         </section>
-        <details className={styles.method}><summary>How learning stays playable</summary><p>The first evaluation needs {data.policy.minimumAttempts} completed opening runs imported from Sentry. The optimizer compares tower positions by time to actual drone capture. Radar range, drone speed, and other game rules stay fixed.</p><p>Tower sites stay on land, at least {data.policy.spawnProtectionMetres} m from the start and {data.policy.minimumTowerSeparation} m apart. Replay validation rejects new or earlier captures under {data.policy.minimumCaptureSeconds} s and applies a capture-rate ceiling of {percent(data.policy.maximumValidationCaptureRate)}. Existing early captures can remain unchanged. This preserves an escape guard in recorded play; it cannot guarantee an escape route or the same difficulty for every future player.</p><p>Abandoned runs are recorded separately and do not count toward the first evaluation. Layout {data.layout.version}: {data.layout.reason}</p><p className={styles.version}>Game rules: {data.rulesVersion} · World: {data.worldVersion}</p></details>
+        <details className={styles.method}><summary>How learning stays playable</summary><p>The first evaluation needs {data.policy.minimumAttempts} completed opening runs imported from Sentry. The optimizer compares tower positions and aircraft flight policies by time to actual drone capture, and reports detection, visual contact and flight distance. Radar range, drone speed, and other game rules stay fixed.</p><p>Tower sites stay on land, at least {data.policy.spawnProtectionMetres} m from the start and {data.policy.minimumTowerSeparation} m apart. Replay validation rejects new or earlier captures under {data.policy.minimumCaptureSeconds} s and applies a capture-rate ceiling of {percent(data.policy.maximumValidationCaptureRate)}. Existing early captures can remain unchanged. This preserves an escape guard in recorded play; it cannot guarantee an escape route or the same difficulty for every future player.</p><p>Abandoned runs are recorded separately and do not count toward the first evaluation. Layout {data.layout.version}: {data.layout.reason}</p><p className={styles.version}>Game rules: {data.rulesVersion} · World: {data.worldVersion}</p></details>
       </>}
     </div>
   );
@@ -131,7 +140,7 @@ function LayoutChart({ attempts }: { attempts: AttemptSummary[] }) {
 
 function ReplayChart({ rounds, maxSeconds }: { rounds: LearningRound[]; maxSeconds: number }) {
   const shown = [...rounds].sort((a, b) => a.id - b.id).slice(-20);
-  if (!shown.length) return <EmptyChart>No placement evaluation yet. After enough completed runs, this chart will compare the current and proposed layouts on held-out replays.</EmptyChart>;
+  if (!shown.length) return <EmptyChart>No strategy evaluation yet. After enough completed runs, this chart will compare the current and proposed strategies on held-out replays.</EmptyChart>;
   const max = Math.max(30, Math.ceil(Math.max(...shown.flatMap(round => [round.baseline.cappedMeanSeconds, round.candidate.cappedMeanSeconds])) / 30) * 30);
   const x = (i: number) => shown.length === 1 ? 260 : 55 + i / (shown.length - 1) * 410;
   const y = (value: number) => 195 - value / max * 155;
@@ -143,7 +152,14 @@ function ReplayChart({ rounds, maxSeconds }: { rounds: LearningRound[]; maxSecon
       <text x={x(0)} y="215" textAnchor="middle">{shown[0].id}</text>{shown.length > 1 && <text x="465" y="215" textAnchor="middle">{shown[shown.length - 1].id}</text>}<text x="260" y="240" textAnchor="middle">Evaluation round</text>
     </svg>
     <div className={styles.legend}><span><i className={styles.baselineLine} />Existing layout</span><span><i className={styles.candidateLine} />Candidate layout</span></div><figcaption>Replay estimate · lower is faster. Non-captures receive the {maxSeconds} s cap, so this includes escapes and censored replays.</figcaption>
-    <details className={styles.data}><summary>View evaluation data and decisions</summary><div className={styles.tableWrap}><table><caption>Held-out replay validation; not actual player results</caption><thead><tr><th>Round</th><th>Replays</th><th>Existing</th><th>Candidate</th><th>Capture rate</th><th>Decision</th></tr></thead><tbody>{shown.map(round => <tr key={round.id}><th>{round.id}</th><td>{round.candidate.attempts}</td><td>{seconds(round.baseline.cappedMeanSeconds)}</td><td>{seconds(round.candidate.cappedMeanSeconds)}</td><td>{percent(round.candidate.captureRate)}</td><td>{round.promoted ? `Promoted v${round.selectedVersion}` : "Kept layout"}<small>{round.reason}</small></td></tr>)}</tbody></table></div></details>
+    <details className={styles.data}><summary>View evaluation data and decisions</summary><div className={styles.tableWrap}><table><caption>Held-out replay validation; not actual player results</caption><thead><tr><th>Round</th><th>Replays</th><th>Existing</th><th>Candidate</th><th>Capture rate</th><th>Decision</th></tr></thead><tbody>{shown.map(round => <tr key={round.id}><th>{round.id}</th><td>{round.candidate.attempts}</td><td>{seconds(round.baseline.cappedMeanSeconds)}</td><td>{seconds(round.candidate.cappedMeanSeconds)}</td><td>{percent(round.candidate.captureRate)}</td><td>{round.promoted ? `Promoted v${round.selectedVersion}` : "Kept strategy"}<small>{round.reason}</small></td></tr>)}</tbody></table></div></details>
+    {shown.at(-1)?.candidate.surveillance && <details className={styles.data}><summary>Latest flight-policy measurements</summary><div className={styles.tableWrap}><table><caption>Round {shown.at(-1)!.id} · held-out replays; capture fairness still controls promotion</caption><thead><tr><th>Measure</th><th>Existing strategy</th><th>Candidate strategy</th></tr></thead><tbody>{([
+      ["Runs with a sighting", (m: NonNullable<LearningRound["candidate"]["surveillance"]>) => percent(m.detectionRate)],
+      ["First sighting, detected runs", (m: NonNullable<LearningRound["candidate"]["surveillance"]>) => seconds(m.meanFirstDetectionSeconds)],
+      ["Time in visual contact", (m: NonNullable<LearningRound["candidate"]["surveillance"]>) => percent(m.visualContactFraction)],
+      ["Longest gap after first sighting", (m: NonNullable<LearningRound["candidate"]["surveillance"]>) => seconds(m.longestContactGapSeconds)],
+      ["Aircraft distance per run", (m: NonNullable<LearningRound["candidate"]["surveillance"]>) => `${(m.meanAircraftDistanceM / 1000).toFixed(2)} km`],
+    ] as const).map(([label, format]) => <tr key={label}><th>{label}</th>{(["baseline", "candidate"] as const).map(key => <td key={key}>{shown.at(-1)![key].surveillance ? format(shown.at(-1)![key].surveillance!) : "—"}</td>)}</tr>)}</tbody></table></div></details>}
   </figure>;
 }
 

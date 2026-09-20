@@ -15,6 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
+from flight_policy import (COORDINATED_ALGORITHM, LEGACY_ALGORITHM,
+                           normalize_flight_policy)
+
 DEFAULT_WEIGHTS = [4.0, 1.3, 1.0, 1.0, 0.4]
 MISSION_VERSION = "tower-first-v2"
 SENSOR_MODEL = {
@@ -390,8 +393,11 @@ class TowerMission:
     update accepts timestamped observations only. No simulator truth or sensor
     success flags are available to its association, estimate, or mission state.
     """
-    def __init__(self):
-        self.phase = "tower_watch"
+    def __init__(self, any_sensor=False):
+        self.any_sensor = any_sensor
+        self.phase = "search" if any_sensor else "tower_watch"
+        self.acquired_source = None
+        self.tower_confirmed_at = None
         self.point = None
         self.velocity = np.zeros(2)
         self.last_observed = -math.inf
@@ -449,7 +455,7 @@ class TowerMission:
             is_tower = obs.source.startswith("tower-")
             point = np.asarray(obs.point)
             if self.point is None:
-                if not is_tower:
+                if not is_tower and not self.any_sensor:
                     continue
                 prior = self.pending
                 if (prior is None or obs.timestamp-prior.timestamp > SENSOR_MODEL["confirmationWindowS"]
@@ -468,7 +474,13 @@ class TowerMission:
                 self.last_observed = obs.timestamp
                 self.phase = "dispatch"
                 self.acquired_at = now if self.acquired_at is None else self.acquired_at
-                self.events.extend([{"type":"tower_confirmed", "t":now, "source":obs.source},
+                self.acquired_source = obs.source
+                tower_confirmation = is_tower and prior.source.startswith("tower-")
+                if tower_confirmation:
+                    self.tower_confirmed_at = now
+                elif self.any_sensor and prior.source == obs.source:
+                    self.drone_pending[obs.source] = prior
+                self.events.extend([{"type":"tower_confirmed" if tower_confirmation else "sensor_confirmed", "t":now, "source":obs.source},
                                     {"type":"swarm_dispatched", "t":now, "receivers":["plane","quad"]}])
             else:
                 prediction = self.predict(obs.timestamp)
@@ -570,9 +582,157 @@ def mission_goal(terrain, drone, mission, now, launch):
     return terrain.node(*point)
 
 
+class CoordinatedPlanner(BeliefPlanner):
+    """Water patrol and camera-aware pursuit using only observations/own poses."""
+    def __init__(self, terrain, policy, launch, motion=None, weights=None):
+        super().__init__(terrain, motion, weights)
+        self.policy, self.launch = policy, launch
+        self.patrol, self.visited, self.support_cursor = {}, {"plane": set(), "quad": set()}, 0
+        self.water_index = {int(node): i for i, node in enumerate(terrain.wids)}
+        for kind in ("plane", "quad"):
+            ids = terrain.wids
+            if kind == "quad":
+                near = np.linalg.norm(terrain.xy[ids]-launch[kind], axis=1) <= policy["quadSearchRadiusM"]
+                if near.any():
+                    ids = ids[near]
+            spacing = policy["laneSpacingM"]*(.6 if kind == "quad" else 1.)
+            bands = np.floor((terrain.xy[ids, 0]-terrain.xmin)/spacing).astype(int)
+            route = []
+            for band in np.unique(bands):
+                nodes = ids[bands == band]
+                order = sorted(map(int, nodes), key=lambda node: terrain.xy[node, 1])
+                # Two separated ends of each water lane; plane and quad start
+                # from opposite ends, with an explicit overlap cost below.
+                ends = [order[0], order[-1]]
+                route.extend(ends[::-1] if (band+(kind == "quad")) % 2 else ends)
+            route = list(dict.fromkeys(route))
+            phase = int(policy["routePhase"]*max(0, len(route)-1))
+            self.patrol[kind] = route[phase:]+route[:phase]
+
+    def observe(self, masks, measurements, step):
+        # A missed synthetic optical frame is weak negative evidence. Preserve
+        # mass outside actual camera footprints; no omniscient clearing.
+        before = self.belief.copy()
+        super().observe(masks, measurements, step)
+        if not measurements:
+            self.belief = .65*before+.35*self.belief
+            self.belief /= self.belief.sum()
+
+    def patrol_goal(self, drone, other_goal=None):
+        kind = drone["id"]
+        route = self.patrol[kind]
+        current = np.array([drone["x"], drone["y"]])
+        old = self.goals.get(kind)
+        if old is not None and np.linalg.norm(self.terrain.xy[old]-current) > max(90., self.terrain.cell*.6):
+            return old
+        if old is not None:
+            self.visited[kind].add(old)
+        candidates = [node for node in route if node not in self.visited[kind]]
+        if not candidates:
+            self.visited[kind].clear()
+            candidates = route
+        def score(node):
+            i = self.water_index[node]
+            distance = np.linalg.norm(self.terrain.xy[node]-current)
+            overlap = (math.exp(-float(np.sum((self.terrain.xy[node]-self.terrain.xy[other_goal])**2))/(2*500**2))
+                       if other_goal is not None else 0.)
+            route_bias = 1-route.index(node)/max(1, len(route))
+            return self.belief[i]*len(self.belief)+.6*self.age[i]+.4*route_bias-distance/3500-2*overlap
+        goal = max(candidates, key=score)
+        self.goals[kind] = goal
+        return goal
+
+    def mission_goal(self, drone, mission, now, other_goal=None):
+        point = mission.predict(now)
+        kind = drone["id"]
+        if point is None:
+            drone["missionRole"] = "wide_search" if kind == "plane" else "gap_search"
+            return self.patrol_goal(drone, other_goal)
+        lead = min(self.policy["lookaheadS"], np.linalg.norm(point-[drone["x"], drone["y"]])/self.terrain.profile["speedsMps"][kind])
+        point = point+mission.velocity*lead
+        if mission.phase == "reacquire":
+            width = min(self.policy["reacquireWidthM"], mission.uncertainty(now) or 50.)
+            angle = math.radians(now*7+(180 if kind == "quad" else 0))
+            point = point+width*np.array([math.sin(angle), math.cos(angle)])
+            drone["missionRole"] = "reacquire"
+        else:
+            drone["missionRole"] = "support_pass" if kind == "plane" else "visual_track"
+        if kind == "quad":
+            pitch = abs(self.terrain.profile["sensors"][kind]["pitchDeg"])
+            standoff = (drone["z"]-1.5)/math.tan(math.radians(max(5., pitch)))
+            away = np.array([drone["x"], drone["y"]])-point
+            away = away/max(float(np.linalg.norm(away)), 1e-9) if np.linalg.norm(away) > 1 else np.array([0., -1.])
+            point = point+away*standoff
+        else:
+            velocity = mission.velocity
+            along = velocity/max(float(np.linalg.norm(velocity)), 1e-9) if np.linalg.norm(velocity) > .5 else np.array([0., 1.])
+            side = np.array([along[1], -along[0]])
+            width = self.policy["supportOffsetM"]
+            corners = ((-1,-1), (1,-1), (1,1), (-1,1))
+            a,b = corners[self.support_cursor % 4]
+            goal = point+a*along*max(400., width*1.8)+b*side*width
+            if np.linalg.norm(goal-[drone["x"], drone["y"]]) < max(100., self.terrain.cell*.7):
+                self.support_cursor += 1
+                a,b = corners[self.support_cursor % 4]
+                goal = point+a*along*max(400., width*1.8)+b*side*width
+            point = goal
+        self.goals[kind] = self.terrain.node(*point)
+        return self.goals[kind]
+
+
+def move_surveillance_drone(terrain, drone, goal, step, look_at=None):
+    """Bounded body turns; fixed-wing keeps its configured forward airspeed.
+
+    Terrain following remains a kinematic simplification (no climb dynamics).
+    Substeps prevent a coarse 5 s planner step from teleporting around a turn.
+    """
+    kind = drone["id"]
+    clearance = terrain.profile["assetHeightsM"][kind]
+    target = terrain.xy[goal]
+    start = np.array([drone["x"], drone["y"]])
+    drone["path"] = [{"x":float(start[0]), "y":float(start[1])}, {"x":float(target[0]), "y":float(target[1])}]
+    traveled = 0.
+    subdivisions = max(1, math.ceil(step))
+    dt = step/subdivisions
+    for _ in range(subdivisions):
+        current = np.array([drone["x"], drone["y"]])
+        delta = target-current
+        speed = terrain.profile["speedsMps"][kind]
+        facing = np.asarray(look_at)-current if kind == "quad" and look_at is not None else delta
+        # A fixed wing cannot stop at its waypoint; turn back toward the arena
+        # before the boundary using the available heading-rate turn radius.
+        margin = min(terrain.profile["halfM"]*.45, max(100., speed/math.radians(15)*2))
+        if kind == "plane" and np.max(np.abs(current)) > terrain.profile["halfM"]-margin:
+            facing = -current
+        if np.linalg.norm(facing) < 1:
+            facing = np.array([math.sin(math.radians(drone["heading"]+70)), math.cos(math.radians(drone["heading"]+70))])
+        desired = math.degrees(math.atan2(facing[0], facing[1])) % 360
+        rate = 15 if kind == "plane" else 45
+        drone["heading"] = (drone["heading"]+float(np.clip(angle_delta(desired, drone["heading"]), -rate*dt, rate*dt))) % 360
+        if kind == "plane":
+            direction = np.array([math.sin(math.radians(drone["heading"])), math.cos(math.radians(drone["heading"]))])
+            move = speed*dt
+        else:
+            direction = delta/max(float(np.linalg.norm(delta)), 1e-9)
+            move = min(speed*dt, float(np.linalg.norm(delta)))
+        point = np.clip(current+direction*move, -terrain.profile["halfM"], terrain.profile["halfM"])
+        # Check intermediate ridge height as well as the destination cell.
+        samples = current[None,:]+np.linspace(0.,1.,5)[:,None]*(point-current)[None,:]
+        altitude = float(np.max(terrain.elevation(samples[:,0], samples[:,1])))+clearance
+        traveled += float(np.linalg.norm(point-current))
+        drone.update(x=float(point[0]), y=float(point[1]), z=altitude,
+                     goal={"x":float(target[0]), "y":float(target[1])})
+    return traveled
+
+
 def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, replay=False):
+    algorithm = config.get("algorithm", LEGACY_ALGORITHM)
+    if algorithm not in (LEGACY_ALGORITHM, COORDINATED_ALGORITHM):
+        raise ValueError("Unknown surveillance algorithm")
+    coordinated = algorithm == COORDINATED_ALGORITHM
+    policy = normalize_flight_policy(config.get("flightPolicy")) if coordinated else None
     planner = BeliefPlanner(terrain, motion, config.get("weights"), config.get("baseline",False))
-    mission = TowerMission()
+    mission = TowerMission(any_sensor=coordinated)
     towers = towers_for(terrain,config["towers"])
     launch = terrain.profile.get("launchPoints") or {asset["sensor"]:asset for asset in terrain.profile.get("assets",[]) if asset["sensor"] in ("plane","quad")}
     drones, launch_xy = [], {}
@@ -581,13 +741,17 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
         x,y = float(p["x"]),float(p["y"])
         launch_xy[kind] = (x,y)
         drones.append({"id":kind,"x":x,"y":y,"z":float(terrain.elevation(x,y))+terrain.profile["assetHeightsM"][kind],"heading":0.,"path":[]})
+    if coordinated:
+        planner = CoordinatedPlanner(terrain, policy, launch_xy, motion, config.get("weights"))
     seen = np.zeros(len(terrain.wids),dtype=bool)
     distance, custody, estimate_count, error_sum = 0.,0,0,0.
+    flight_distance = {"plane": 0., "quad": 0.}
+    any_custody, longest_gap, gap_started = 0, 0., None
     post_tower_samples, post_tower_custody, false_confirmations, accepted_count = 0,0,0,0
     contributions = {p["id"]:0 for p in towers+drones}
     frames, events = [], []
     first_hit = None
-    target_confirmed_at, target_handoff_at = None, None
+    target_confirmed_at, target_handoff_at, tower_confirmed_at = None, None, None
     last_true_drone = -math.inf
     true_drone_hits = {}
     for tick,t in enumerate(range(0,horizon+1,step)):
@@ -614,11 +778,13 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
         # Scoring only: this truth comparison cannot influence mission decisions.
         estimate_is_target = bool(estimate is not None and np.linalg.norm(estimate-boat)<=SENSOR_MODEL["evaluationToleranceM"])
         for event in mission.events:
-            if event["type"] == "tower_confirmed":
+            if event["type"] in ("tower_confirmed", "sensor_confirmed"):
                 if estimate_is_target and target_confirmed_at is None:
                     target_confirmed_at=t
                 elif not estimate_is_target:
                     false_confirmations+=1
+                if event["type"] == "tower_confirmed" and estimate_is_target and tower_confirmed_at is None:
+                    tower_confirmed_at=t
         for observation in mission.accepted:
             if observation.source in ("plane","quad") and target_confirmed_at is not None:
                 if np.linalg.norm(np.asarray(observation.point)-boat)<=SENSOR_MODEL["evaluationToleranceM"]:
@@ -631,11 +797,28 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
                             target_handoff_at=t
                 else:
                     true_drone_hits.pop(observation.source,None)
+        if coordinated:
+            # Preserve first-frame evaluator evidence for an aircraft-origin
+            # acquisition. This label is never supplied to mission/planner.
+            for observation in observations:
+                if observation.source in ("plane", "quad") and np.linalg.norm(np.asarray(observation.point)-boat)<=SENSOR_MODEL["evaluationToleranceM"]:
+                    true_drone_hits[observation.source] = observation.timestamp
         if estimate is not None:
             estimate_count+=1
             error_sum+=float(np.sum((estimate-boat)**2))
         fresh_drone = bool(t-last_true_drone<=SENSOR_MODEL["freshnessS"] and estimate_is_target)
         custody += int(fresh_drone)
+        fresh_any = bool(estimate_is_target and t-mission.last_observed <= SENSOR_MODEL["freshnessS"])
+        any_custody += int(fresh_any)
+        if target_confirmed_at is not None:
+            if fresh_any:
+                if gap_started is not None:
+                    longest_gap = max(longest_gap, t-gap_started)
+                gap_started = None
+            elif gap_started is None:
+                gap_started = t-step
+            if gap_started is not None:
+                longest_gap = max(longest_gap, t-gap_started)
         tower_visible = bool(any(terrain.camera_mask(p,"tower",[boat])[0] for p in positions[:2]))
         if target_confirmed_at is not None and not tower_visible:
             post_tower_samples+=1
@@ -643,11 +826,15 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
         if replay:
             for drone,pose in zip(drones,positions[2:]):
                 drone["cameraHeading"],drone["cameraPitch"] = pose["heading"],pose.get("pitch",terrain.profile["sensors"][drone["id"]].get("pitchDeg",0))
-                drone["missionRole"] = ("wide_follow" if drone["id"]=="plane" else "close_follow") if mission.predict(t) is not None else ("standby_loiter" if drone["id"]=="plane" else "standby")
+                if not coordinated:
+                    drone["missionRole"] = ("wide_follow" if drone["id"]=="plane" else "close_follow") if mission.predict(t) is not None else ("standby_loiter" if drone["id"]=="plane" else "standby")
+                else:
+                    drone.setdefault("missionRole", "wide_search" if drone["id"] == "plane" else "gap_search")
             frames.append({"t":t,"boat":{"x":float(boat[0]),"y":float(boat[1])},"drones":[dict(d) for d in drones],
                            "sources":sources,"coveragePct":float(seen.mean()*100),"phase":mission.phase,
                            "custodian":mission.custodian,"events":list(mission.events),"uncertaintyM":mission.uncertainty(t),
-                           "towerConfirmed":mission.acquired_at is not None,"handoffConfirmed":mission.handoff_at is not None,
+                           "towerConfirmed":mission.tower_confirmed_at is not None,"handoffConfirmed":mission.handoff_at is not None,
+                           "anySensorCustody":fresh_any,
                            "targetConfirmed":target_confirmed_at is not None,"targetHandoffConfirmed":target_handoff_at is not None,
                            "targetCustody":fresh_drone,"receiverConfirmedSources":list(mission.receiver_confirmed_sources),
                            "towerVisible":tower_visible,
@@ -660,15 +847,21 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
                            "towerHeadings":[p["heading"] for p in positions[:2]],"towerPitches":[p.get("pitch",0.) for p in positions[:2]]})
         if t<horizon:
             for drone in drones:
-                if config.get("baseline"):
+                if coordinated:
+                    other = "quad" if drone["id"] == "plane" else "plane"
+                    goal = planner.mission_goal(drone, mission, t, planner.goals.get(other))
+                elif config.get("baseline"):
                     goal=planner.goals.get(drone["id"])
                     if goal is None or np.linalg.norm(terrain.xy[goal]-[drone["x"],drone["y"]])<terrain.cell*.3:
                         goal=planner.goal(drone)
                 else:
                     goal=mission_goal(terrain,drone,mission,t,launch_xy[drone["id"]])
                 if goal is not None:
-                    distance+=move_drone(terrain,drone,goal,step,
-                                         look_at=mission.predict(t+step) if not config.get("baseline") else None)
+                    move = move_surveillance_drone if coordinated else move_drone
+                    moved = move(terrain,drone,goal,step,
+                                 look_at=mission.predict(t+step) if not config.get("baseline") else None)
+                    distance += moved
+                    flight_distance[drone["id"]] += moved
                 else:
                     drone["path"]=[]
     samples=int(horizon/step)+1
@@ -677,7 +870,9 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
              "p90CappedS":found if found is not None else horizon,"coveragePct":float(seen.mean()*100),"custodyPct":custody/samples*100,
              "rmseM":math.sqrt(error_sum/estimate_count) if estimate_count else None,"estimateAvailabilityPct":estimate_count/samples*100,
              "distanceM":distance,"handoffs":int(target_handoff_at is not None),"contactHandoffs":mission.handoffs,"bySource":contributions,"estimateSamples":estimate_count,"squaredErrorSum":error_sum,
-             "towerDetectedAt":found,"towerAcquisitionRate":100. if found is not None else 0.,"firstRawHitAt":first_hit,
+             "towerDetectedAt":tower_confirmed_at,"towerAcquisitionRate":100. if tower_confirmed_at is not None else 0.,"firstRawHitAt":first_hit,
+             "longestGapS":longest_gap if found is not None else float(horizon),"anySensorCustodyPct":100*any_custody/samples,
+             "flightDistanceByAssetM":flight_distance,
              "contactConfirmedAt":mission.acquired_at,"contactConfirmationRate":100. if mission.acquired_at is not None else 0.,
              "handoffAt":target_handoff_at,"handoffRate":100. if target_handoff_at is not None else 0.,
              "handoffDelayS":None if target_handoff_at is None else target_handoff_at-found,
@@ -686,7 +881,8 @@ def run_episode(terrain, config, episode, motion=None, horizon=300, step=5, repl
              "postTowerSamples":post_tower_samples,"postTowerCustodySamples":post_tower_custody,
              "falseConfirmations":false_confirmations,"rejectedObservations":mission.rejected,"acceptedObservations":accepted_count,
              "losses":mission.losses,"reacquisitions":mission.reacquisitions,"condition":episode.condition}
-    return {"seed":episode.seed,"missionVersion":MISSION_VERSION,"policy":"systematic-sweep" if config.get("baseline") else "tower-first",
+    return {"seed":episode.seed,"missionVersion":algorithm,"algorithm":algorithm,"flightPolicy":policy,
+            "policy":COORDINATED_ALGORITHM if coordinated else ("systematic-sweep" if config.get("baseline") else "tower-first"),
             "condition":episode.condition,"towers":towers,"frames":frames,"events":events,"metrics":metrics}
 
 
@@ -699,6 +895,11 @@ def summarize(rows):
     result.update(episodes=len(metrics),p90CappedS=times[math.ceil(.9*len(times))-1],
                   rmseM=math.sqrt(sum(m["squaredErrorSum"] for m in metrics)/count) if count else None,
                   bySource={sid:sum(m["bySource"].get(sid,0) for m in metrics) for sid in metrics[0]["bySource"]})
+    for key in ("longestGapS", "anySensorCustodyPct"):
+        if all(key in m for m in metrics):
+            result[key] = float(np.mean([m[key] for m in metrics]))
+    if all("flightDistanceByAssetM" in m for m in metrics):
+        result["flightDistanceByAssetM"] = {kind:float(np.mean([m["flightDistanceByAssetM"][kind] for m in metrics])) for kind in ("plane", "quad")}
     if all("towerAcquisitionRate" in m for m in metrics):
         for key in ("towerAcquisitionRate","contactConfirmationRate","contactHandoffs","handoffRate","handoffCappedS","falseConfirmations","rejectedObservations","acceptedObservations","losses","reacquisitions"):
             if all(key in m for m in metrics):
@@ -713,7 +914,14 @@ def summarize(rows):
     return result
 
 
-def objective(score):
+def objective(score, algorithm=LEGACY_ALGORITHM):
+    if algorithm == COORDINATED_ALGORITHM:
+        # All-mission rates avoid rewarding easy-only episodes. Delays/outages
+        # use capped misses; flight cost cannot overwhelm successful custody.
+        return (2*(100-score["detectionRate"])+1.2*(100-score.get("anySensorCustodyPct",score["custodyPct"]))
+                +.8*(100-score["custodyPct"])+.2*score.get("longestGapS",300.)
+                +.15*score["meanCappedS"]+.002*score["distanceM"]+100*score.get("falseConfirmations",0.),
+                score.get("rmseM") or 0., score["distanceM"])
     # Tower acquisition is the first priority. Within that priority, prefer
     # confirmed drone handoff/custody, fewer false cues, shorter delays and error.
     acquisition=score.get("towerAcquisitionRate",score["detectionRate"])

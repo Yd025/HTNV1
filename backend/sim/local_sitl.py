@@ -218,7 +218,7 @@ class LocalSitlAdapter:
                     kin.heading = float(snap.get("heading") or kin.heading)
                     kin.groundspeed = float(snap.get("groundspeed") or 0.0)
                     st = kin.state(True)
-                    st.battery_remaining = float(snap.get("battery_remaining") or 100.0)
+                    st.battery_remaining = float(snap["battery_remaining"] if snap.get("battery_remaining") is not None else 100.0)
                     st.armed = bool(snap.get("armed"))
                     st.mode = str(snap.get("mode") or "GUIDED")
                     st.alt_msl = float(snap["alt_msl"]) if snap.get("alt_msl") is not None else None

@@ -3,12 +3,16 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from sim.types import Role, VehicleState
+from flight_policy import LEGACY_ALGORITHM, normalize_flight_policy
+from sim.types import Arena, Role, VehicleState
 from tracker import Track
 
 
 @dataclass
 class WorldModel:
+    algorithm: str = LEGACY_ALGORITHM
+    flight_policy: dict = field(default_factory=normalize_flight_policy)
+    arena: Arena | None = None
     vehicles: dict[str, VehicleState] = field(default_factory=dict)
     detections: list = field(default_factory=list)
     accepted_detections: list | None = None

@@ -89,6 +89,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://overwatch:overwatch@postgres:5432/overwatch}
       ADAPTER: ${ADAPTER:-local}
       FORCE_KINEMATIC: ${FORCE_KINEMATIC:-1}
+      MISSION_ALGORITHM: ${MISSION_ALGORITHM:-}
+      SURVEILLANCE_POLICY_FILE: ${SURVEILLANCE_POLICY_FILE:-}
       MAVLINK_PLANE: ${MAVLINK_PLANE:-tcp:sitl-plane:5760}
       MAVLINK_COPTER: ${MAVLINK_COPTER:-tcp:sitl-copter:5760}
       MAVLINK_ROVER: ${MAVLINK_ROVER:-tcp:sitl-rover:5760}
@@ -113,6 +115,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
+      - ./frontend/public/experiments:/flight-policies:ro
     depends_on:
       postgres:
         # The backend retries storage independently; it can serve while DB warms.

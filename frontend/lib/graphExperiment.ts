@@ -1,4 +1,10 @@
 export interface XY { x: number; y: number }
+export type GraphAlgorithm = "tower-first-v2" | "coordinated-surveillance-v1";
+export interface FlightPolicy {
+  laneSpacingM: number; routePhase: number; quadSearchRadiusM: number;
+  lookaheadS: number; supportOffsetM: number; reacquireWidthM: number;
+}
+export const algorithmLabel = (algorithm?: string) => algorithm === "coordinated-surveillance-v1" ? "Coordinated surveillance" : "Tower-first response";
 export interface GraphTower extends XY { id: string; z: number; heading: number }
 export interface GraphDrone extends XY { id: string; z: number; heading: number; pitch?: number; cameraHeading?: number; cameraPitch?: number; missionRole?: string; goal?: XY; path?: XY[] }
 export interface MissionEvent { type: string; t: number; source?: string; receivers?: string[] }
@@ -20,20 +26,22 @@ export interface GraphMetrics {
   bySource?: Record<string, number>;
   towerAcquisitionRate?: number; handoffRate?: number; postTowerCustodyPct?: number | null;
   falseConfirmations?: number; handoffDelayS?: number | null;
+  longestGapS?: number; anySensorCustodyPct?: number; flightDistanceByAssetM?: Record<string, number>;
 }
-export interface GraphReplay { seed: number; condition?: string; towers?: GraphTower[]; frames: GraphFrame[]; metrics: GraphMetrics; firstDetectionS?: number | null }
+export interface GraphReplay { seed: number; algorithm?: GraphAlgorithm; missionVersion?: string; flightPolicy?: FlightPolicy; condition?: string; towers?: GraphTower[]; frames: GraphFrame[]; metrics: GraphMetrics; firstDetectionS?: number | null }
 export interface GraphTrainingPreview {
   id: string; phase: "training" | "validation" | "test"; candidateIndex: number | null;
   episodeIndex: number; episodeTotal: number; policy?: "baseline" | "untrained" | "trained";
   replay: GraphReplay;
 }
-export interface GraphCandidate { index: number; towers: GraphTower[]; weights?: number[]; train: GraphMetrics; validation?: GraphMetrics; accepted?: boolean; preview?: GraphTrainingPreview }
+export interface GraphCandidate { index: number; algorithm?: GraphAlgorithm; flightPolicy?: FlightPolicy; towers: GraphTower[]; weights?: number[]; train: GraphMetrics; validation?: GraphMetrics; accepted?: boolean; preview?: GraphTrainingPreview }
 export interface GraphReport {
   schemaVersion: number; seed: number; profileHash: string;
   missionVersion?: string;
+  algorithm?: GraphAlgorithm;
   selectedIndex: number;
   protocol: { motionTrajectories: number; trainEpisodes: number; validationEpisodes: number; testEpisodes: number; candidates: number; horizonS: number; stepS: number; freshnessS: number };
-  trained: { towers: GraphTower[]; weights: number[]; candidateIndex?: number };
+  trained: { towers: GraphTower[]; weights: number[]; candidateIndex?: number; algorithm?: GraphAlgorithm; flightPolicy?: FlightPolicy };
   baseline: { towers: GraphTower[] };
   history: GraphCandidate[];
   metrics: { baseline: GraphMetrics; untrained: GraphMetrics; trained: GraphMetrics };
@@ -49,10 +57,11 @@ export interface ArcticProfile {
   frame?: Record<string, unknown>;
 }
 export interface GraphJob { id: string; kind: "train" | "replay"; status: "running" | "complete" | "failed"; error?: string; progress?: {
+  algorithm?: GraphAlgorithm;
   seed?: number; phase?: string; completed?: number; total?: number; testCompleted?: number; testTotal?: number;
   validationCompleted?: number; validationTotal?: number;
   history?: GraphCandidate[]; evaluatingPolicy?: string;
-  activeCandidate?: { index: number | null; towers: GraphTower[]; weights: number[] };
+  activeCandidate?: { index: number | null; towers: GraphTower[]; weights: number[]; algorithm?: GraphAlgorithm; flightPolicy?: FlightPolicy };
   candidateCompleted?: number; candidateEpisodes?: number; candidateMetrics?: GraphMetrics | null;
   bestCandidate?: number | null; preview?: GraphTrainingPreview | null;
   partialMetrics?: Partial<Record<"baseline" | "untrained" | "trained", GraphMetrics>>;
@@ -84,6 +93,12 @@ export function nearestSource(frame: GraphFrame, towers: GraphTower[], visibleOn
 export function isTowerFirstReport(value: GraphReport): boolean {
   return value?.missionVersion === "tower-first-v2" && Array.isArray(value.replays)
     && value.replays.length > 0 && value.replays.every(replay => replay.frames.length > 0 && typeof replay.frames[0].targetConfirmed === "boolean");
+}
+
+export function isMissionReport(value: GraphReport): boolean {
+  return ["tower-first-v2", "coordinated-surveillance-v1"].includes(value?.missionVersion ?? "")
+    && Array.isArray(value.replays) && value.replays.length > 0
+    && value.replays.every(replay => Array.isArray(replay.frames) && replay.frames.length > 0 && typeof replay.frames[0].targetConfirmed === "boolean");
 }
 
 /** Interpolate drawing poses only; detections and estimates remain at the last observed sample. */

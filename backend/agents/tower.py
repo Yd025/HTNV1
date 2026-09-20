@@ -5,11 +5,13 @@ from __future__ import annotations
 import time
 
 from behaviors.trees import water_stare
+from flight_policy import COORDINATED_ALGORITHM
 from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
 
 from agents.base import AgentDecision, PlatformAgent
+from agents.surveillance import bounded_ll, point_ne
 
 
 class TowerAgent(PlatformAgent):
@@ -34,6 +36,15 @@ class TowerAgent(PlatformAgent):
 
         track = world.track
         if track and track.age_s <= 2.0 and track.confidence >= 0.25:
+            towers = sorted(v.vehicle_id for v in world.vehicles.values() if v.vehicle_class == "tower")
+            if world.algorithm == COORDINATED_ALGORITHM and towers and me.vehicle_id != towers[0]:
+                # A second mast watches the estimated continuation while the
+                # first mast/aircraft retain current visual contact.
+                n, e = point_ne(world, track.lat, track.lon)
+                lead = world.flight_policy["lookaheadS"]
+                lat, lon = bounded_ll(world, n + track.vn * lead, e + track.ve * lead)
+                self.intent = "handoff_watch"
+                return AgentDecision(command=_slew(me, lat, lon), calls=[], intent=self.intent)
             self.intent = "stare"
             return AgentDecision(command=_slew(me, track.lat, track.lon), calls=[], intent=self.intent)
 

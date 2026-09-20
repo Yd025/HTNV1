@@ -13,7 +13,15 @@ function load(file, globals = {}) {
   vm.runInNewContext(compiled, { exports, URL, ...globals });
   return exports;
 }
-const { nearestSource, cameraFootprint, nearestCell, gridPoint, drawFrame, isTowerFirstReport } = load("lib/graphExperiment.ts");
+const { nearestSource, cameraFootprint, nearestCell, gridPoint, drawFrame, isTowerFirstReport, isMissionReport } = load("lib/graphExperiment.ts");
+
+test("mission reports preserve legacy evidence and accept versioned surveillance results", () => {
+  const report = { missionVersion: "coordinated-surveillance-v1", replays: [{ frames: [{ targetConfirmed: false }] }] };
+  assert.equal(isMissionReport(report), true);
+  assert.equal(isTowerFirstReport(report), false, "new policies cannot be mislabeled tower-first");
+  assert.equal(isMissionReport({ ...report, missionVersion: "unknown" }), false);
+  assert.equal(isMissionReport({ ...report, replays: [{ frames: [] }] }), false);
+});
 
 test("legacy reports cannot be relabeled as verified tower-first evaluation", () => {
   assert.equal(isTowerFirstReport({ replays: [{ frames: [{ t: 0 }] }] }), false);
@@ -171,11 +179,28 @@ test("training uses fixed script arguments, no shell, and allows only one runnin
   const [command, args, options] = h.spawns[0];
   assert.equal(command, "C:/Python/python.exe"); assert.equal(options.shell, false); assert.equal(options.windowsHide, true);
   assert.equal(options.env.ADAPTER, "local"); assert.ok(args.some(a => a.endsWith("train_graph_search.py")));
+  assert.equal(args[args.indexOf("--algorithm") + 1], "coordinated-surveillance-v1");
   assert.ok(!args.includes("untrusted")); assert.ok(!args.includes("outside"));
   assert.equal((await h.invoke(h.request())).status, 409);
   h.child.emit("close", 0);
   const done = await h.invoke(h.request({ method: "GET", query: { id: "fixed-job-id" } }));
   assert.equal(done.body.status, "complete"); assert.equal(done.body.result.ok, true);
+});
+
+test("algorithm and flight policy validation rejects invalid replay configurations before writing", async () => {
+  const h = harness();
+  const policy = { laneSpacingM: 700, routePhase: .2, quadSearchRadiusM: 1200, lookaheadS: 15, supportOffsetM: 350, reacquireWidthM: 250 };
+  for (const changes of [{ algorithm: "arbitrary" }, { flightPolicy: {} }, { flightPolicy: { ...policy, routePhase: 2 } }, { flightPolicy: { ...policy, lookaheadS: Infinity } }, { flightPolicy: { ...policy, command: "injected" } }]) {
+    assert.equal((await h.invoke(h.request({ body: { kind: "replay", seed: 9, algorithm: "coordinated-surveillance-v1", ...changes } }))).status, 400);
+  }
+  assert.equal(h.spawns.length, 0); assert.equal(h.writes.length, 0);
+  const result = await h.invoke(h.request({ body: { kind: "replay", seed: 9, algorithm: "coordinated-surveillance-v1", flightPolicy: policy } }));
+  assert.equal(result.status, 202);
+  const payload = JSON.parse(h.writes[0][1]);
+  assert.deepEqual(payload.flightPolicy, policy);
+  assert.equal(payload.algorithm, "coordinated-surveillance-v1");
+  assert.ok(h.spawns[0][1].some(arg => arg.endsWith("surveillance-model.json")));
+  h.child.emit("close", 0);
 });
 
 test("replay serializes coordinates as data and reports Python launch failure", async () => {
