@@ -1,0 +1,65 @@
+{
+  "sourceRevision": "f6ddaadfbe092f5434f10eb260e9b6941d276d79",
+  "sourceSha256": "2a42eeadbde6f9370938685401047bd74682cd54e035c053da69b29a79bd017c",
+  "halfM": 1500,
+  "scanPeriodS": 60,
+  "fovDeg": 40,
+  "rangeM": 600,
+  "baseline": {
+    "label": "Original placement",
+    "towers": [
+      {
+        "id": "tower-ne",
+        "label": "Tower 1",
+        "north": 900,
+        "east": 900,
+        "heading": 225,
+        "rangeM": 600,
+        "fovDeg": 40
+      },
+      {
+        "id": "tower-sw",
+        "label": "Tower 2",
+        "north": -900,
+        "east": -900,
+        "heading": 45,
+        "rangeM": 600,
+        "fovDeg": 40
+      }
+    ],
+    "meanDetectionS": 121.44896310661589,
+    "successRate": 0.4875
+  },
+  "learned": {
+    "label": "Learned placement",
+    "towers": [
+      {
+        "id": "tower-ne",
+        "label": "Tower 1",
+        "north": -233.118694,
+        "east": 461.696989,
+        "heading": 304.7521365101545,
+        "rangeM": 600,
+        "fovDeg": 40
+      },
+      {
+        "id": "tower-sw",
+        "label": "Tower 2",
+        "north": 627.988208,
+        "east": -612.183254,
+        "heading": 279.4952063721711,
+        "rangeM": 600,
+        "fovDeg": 40
+      }
+    ],
+    "meanDetectionS": 98.82226024234411,
+    "successRate": 0.625
+  },
+  "benchmark": {
+    "episodes": 160,
+    "deadlineS": 180,
+    "meanSecondsSaved": 22.626702864271778,
+    "percentFaster": 18.63062663154116,
+    "mode": "synthetic"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "label": "synthetic-towers-only",
+  "seeds": [
+    190926,
+    190927,
+    190928,
+    190929,
+    190930
+  ],
+  "baseline": {
+    "episodes": 1000,
+    "detected": 661,
+    "missed": 339,
+    "detectionRate": 0.661,
+    "meanCappedS": 101.396,
+    "p90CappedS": 180,
+    "worstCappedS": 180
+  },
+  "learned": {
+    "episodes": 1000,
+    "detected": 665,
+    "missed": 335,
+    "detectionRate": 0.665,
+    "meanCappedS": 100.783,
+    "p90CappedS": 180,
+    "worstCappedS": 180
+  },
+  "roundsWithDetectionRegression": [
+    190930
+  ]
+}

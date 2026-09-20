@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -27,7 +28,7 @@ VEHICLE_ID = os.getenv("VEHICLE_ID", "copter-1")
 CONNECT_RETRY_SEC = float(os.getenv("MAVLINK_RETRY_SEC", "3"))
 
 # Ignore velocity/accel/yaw; send only lat/lon/alt (see MAVLink type_mask).
-GOTO_TYPE_MASK = 0b0000_111_111_000
+GOTO_TYPE_MASK = 0b110111111000  # 3576: ignore velocity, acceleration, yaw and yaw rate.
 
 
 def _now() -> datetime:
@@ -49,6 +50,7 @@ class MavlinkBridge:
             "lat": None,
             "lon": None,
             "alt": None,
+            "alt_msl": None,
             "heading": None,
             "groundspeed": None,
             "roll": None,
@@ -67,13 +69,39 @@ class MavlinkBridge:
     def snapshot(self) -> dict[str, Any]:
         return dict(self._state)
 
+    async def close(self) -> None:
+        """Stop the receive worker and release its transport; safe to repeat."""
+        self.connected = False
+        task, self._pump_task = self._pump_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with self._io_lock:
+            conn, self.conn = self.conn, None
+            if conn is not None:
+                await asyncio.to_thread(conn.close)
+        self.last_heartbeat_at = None
+        self._last_gcs_hb = 0.0
+
     async def connect(self, timeout: float = 30.0) -> None:
         """Retry until SITL accepts the TCP GCS connection."""
         deadline = time.monotonic() + timeout
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                self.conn = await asyncio.to_thread(self._connect_blocking)
+                # The underlying thread cannot be cancelled. Retain its result
+                # so cancellation during startup cannot orphan a transport.
+                connecting = asyncio.create_task(asyncio.to_thread(self._connect_blocking))
+                try:
+                    self.conn = await asyncio.shield(connecting)
+                except asyncio.CancelledError:
+                    try:
+                        conn = await connecting
+                    except Exception:
+                        pass
+                    else:
+                        await asyncio.to_thread(conn.close)
+                    raise
                 self.connected = True
                 if int(getattr(self.conn, "target_component", 0) or 0) == 0:
                     self.conn.target_component = 1
@@ -145,7 +173,11 @@ class MavlinkBridge:
     async def _pump(self) -> None:
         while self.connected and self.conn is not None:
             try:
-                await self.recv_sample(timeout=0.2)
+                # Receive and send share a lock. Wait outside it when idle so
+                # telemetry cannot hold outgoing commands for a full timeout.
+                sample = await self.recv_sample(timeout=0.0)
+                if sample is None:
+                    await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -218,6 +250,8 @@ class MavlinkBridge:
             self._state["lat"] = msg.lat / 1e7
             self._state["lon"] = msg.lon / 1e7
             self._state["alt"] = msg.relative_alt / 1000.0
+            if getattr(msg, "alt", None) is not None:
+                self._state["alt_msl"] = msg.alt / 1000.0
             self._state["heading"] = (msg.hdg / 100.0) if msg.hdg != 65535 else self._state["heading"]
         elif msg_type == "VFR_HUD":
             self._state["groundspeed"] = float(msg.groundspeed)
@@ -253,7 +287,7 @@ class MavlinkBridge:
             else:
                 logger.info("Unknown actuation type=%s cmd=%s", kind, cmd)
 
-    async def send_goto(self, lat: float, lon: float, alt: float) -> None:
+    async def send_goto(self, lat: float, lon: float, alt: float, yaw_deg: float | None = None) -> None:
         if self.conn is None:
             return
 
@@ -264,18 +298,40 @@ class MavlinkBridge:
                 self.conn.target_system,
                 self.conn.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                GOTO_TYPE_MASK,
-                int(lat * 1e7),
-                int(lon * 1e7),
+                GOTO_TYPE_MASK if yaw_deg is None else GOTO_TYPE_MASK & ~1024,
+                int(round(lat * 1e7)),
+                int(round(lon * 1e7)),
                 float(alt),
                 0, 0, 0,
                 0, 0, 0,
-                0, 0,
+                0 if yaw_deg is None else math.radians(yaw_deg % 360.0), 0,
             )
 
         async with self._io_lock:
             await asyncio.to_thread(_send)
         logger.info("Actuation goto lat=%.6f lon=%.6f alt=%.1f", lat, lon, alt)
+
+    async def send_plane_goto(self, lat: float, lon: float, alt: float) -> None:
+        """ArduPlane guided location; position-target messages only change altitude.
+
+        Official Plane guided API: NAV_WAYPOINT in MISSION_ITEM_INT, current=2.
+        MAVLink integer global coordinates are x=latitude, y=longitude; altitude
+        remains relative to home, matching the existing flight command contract.
+        """
+        if self.conn is None:
+            return
+
+        def _send() -> None:
+            assert self.conn is not None
+            self.conn.mav.mission_item_int_send(
+                self.conn.target_system, self.conn.target_component, 0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 2, 0,
+                0, 0, 0, 0, int(round(lat * 1e7)), int(round(lon * 1e7)), float(alt),
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_send)
 
     async def set_mode(self, mode: str) -> None:
         if self.conn is None:
@@ -326,9 +382,9 @@ class MavlinkBridge:
 
         async with self._io_lock:
             await asyncio.to_thread(_arm)
-        logger.info("Arm=%s on %s", armed, self.vehicle_id)
+        logger.info("Arm=%s force=%s on %s", armed, force, self.vehicle_id)
 
-    async def takeoff(self, alt: float) -> None:
+    async def takeoff(self, alt: float, pitch_deg: float = 0.0) -> None:
         if self.conn is None:
             return
 
@@ -339,13 +395,71 @@ class MavlinkBridge:
                 self.conn.target_component,
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0,
-                0, 0, 0, 0, 0, 0,
+                float(pitch_deg),
+                0, 0, 0, 0, 0,
                 float(alt),
             )
 
         async with self._io_lock:
             await asyncio.to_thread(_to)
-        logger.info("Takeoff %.0fm on %s", alt, self.vehicle_id)
+        logger.info("Takeoff %.0fm pitch=%.0f on %s", alt, pitch_deg, self.vehicle_id)
+
+    async def set_servo(self, channel: int, pwm: int) -> None:
+        if self.conn is None:
+            return
+
+        def _sv() -> None:
+            assert self.conn is not None
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                0,
+                float(channel),
+                float(max(1000, min(2000, int(pwm)))),
+                0, 0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_sv)
+
+    async def rc_override(self, chan1: int = 0, chan2: int = 0, chan3: int = 0, chan4: int = 0) -> None:
+        """Hold MANUAL sticks. 0 means 'release that channel'."""
+        if self.conn is None:
+            return
+
+        def _rc() -> None:
+            assert self.conn is not None
+            self.conn.mav.rc_channels_override_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                int(chan1),
+                int(chan2),
+                int(chan3),
+                int(chan4),
+                0, 0, 0, 0,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_rc)
+
+    async def set_param(self, name: str, value: float) -> None:
+        if self.conn is None:
+            return
+
+        def _p() -> None:
+            assert self.conn is not None
+            self.conn.mav.param_set_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                name.encode("ascii"),
+                float(value),
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+
+        async with self._io_lock:
+            await asyncio.to_thread(_p)
+        logger.info("PARAM %s=%s on %s", name, value, self.vehicle_id)
 
     async def set_roi(self, lat: float, lon: float, alt: float = 0.0) -> None:
         if self.conn is None:

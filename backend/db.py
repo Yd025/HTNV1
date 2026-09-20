@@ -6,13 +6,17 @@ so the command center can chart lag-free series with ordinary SQL.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
 
-import asyncpg
+try:
+    import asyncpg
+except ImportError:  # Persistence is optional for the controller and offline demo.
+    asyncpg = None  # type: ignore[assignment]
 
 logger = logging.getLogger("overwatch.db")
 
@@ -104,19 +108,35 @@ SELECT create_hypertable('whiteout_scores', 'time', if_not_exists => TRUE, migra
 """
 
 
+def enabled() -> bool:
+    return bool(DATABASE_URL) and os.getenv("DATABASE_ENABLED", "1").lower() not in {"0", "false", "no"}
+
+
 async def init_pool() -> asyncpg.Pool:
     global _pool
+    if not enabled():
+        raise RuntimeError("database is disabled")
+    if asyncpg is None:
+        raise RuntimeError("asyncpg is not installed")
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL, min_size=1, max_size=8,
+            timeout=float(os.getenv("DB_TIMEOUT_SEC", "2")),
+            command_timeout=float(os.getenv("DB_TIMEOUT_SEC", "2")),
+        )
         logger.info("TimescaleDB pool ready")
     return _pool
 
 
 async def close_pool() -> None:
     global _pool
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
+    pool, _pool = _pool, None
+    if pool is not None:
+        try:
+            await pool.close()
+        except (asyncio.CancelledError, Exception):
+            pool.terminate()
+            raise
 
 
 async def ensure_schema() -> None:
@@ -141,13 +161,16 @@ async def ensure_schema() -> None:
 
 
 async def ping() -> bool:
+    # Health reads must not create/retry connections or race the ingest worker.
+    if _pool is None:
+        return False
     try:
-        pool = await init_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
+        async with asyncio.timeout(float(os.getenv("DB_TIMEOUT_SEC", "2"))):
+            async with _pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
         return True
     except Exception:
-        logger.exception("TimescaleDB ping failed")
+        logger.debug("TimescaleDB ping failed", exc_info=True)
         return False
 
 

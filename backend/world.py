@@ -11,12 +11,18 @@ from tracker import Track
 class WorldModel:
     vehicles: dict[str, VehicleState] = field(default_factory=dict)
     detections: list = field(default_factory=list)
+    accepted_detections: list | None = None
+    observation_now: float | None = None
+    comms: dict[str, bool] = field(default_factory=dict)
     track: Track | None = None
     roles: dict[str, Role] = field(default_factory=dict)
     blackboard: list[dict] = field(default_factory=list)
     advisor: dict | None = None
     last_command: dict | None = None
-    phase: str = "find"
+    last_cue: tuple[float, float] | None = None
+    phase: str = "tower_scan"
+    mission_active: bool = False
+    custody_source: str | None = None
     tick_hz: float = 0.0
     t: float = field(default_factory=time.monotonic)
 

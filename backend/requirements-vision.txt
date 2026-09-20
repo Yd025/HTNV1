@@ -1,0 +1,5 @@
+# Optional. Local .pt files must be trusted; ONNX needs no pickle deserialization.
+# Review Ultralytics license for your intended deployment.
+ultralytics>=8.3.0,<9
+onnxruntime>=1.20.0,<2
+PyYAML>=6.0,<7

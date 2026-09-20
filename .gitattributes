@@ -1,0 +1,2 @@
+# Replay manifests hash exact JSONL bytes, including line endings.
+backend/tests/fixtures/**/*.jsonl -text

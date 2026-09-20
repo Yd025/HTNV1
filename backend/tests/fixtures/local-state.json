@@ -1,0 +1,534 @@
+{
+  "type": "state",
+  "adapter": "local",
+  "deployed": true,
+  "heartbeat": 1789846457.8409417,
+  "tick_hz": 9.55,
+  "scores": {
+    "coverage": 0.0486,
+    "collaboration": 1.0,
+    "efficiency": 0.9797,
+    "tracking": 0.5926,
+    "time_to_detect_s": 0.09400000001187436,
+    "meters_flown": 43.3,
+    "commands_issued": 7,
+    "overlap_ratio": 0.0,
+    "unique_roles": 4,
+    "cells_seen": 28,
+    "cells_total": 576,
+    "track_error_m": 2.3
+  },
+  "run": {
+    "run_id": "local-kinematic",
+    "mode": "synthetic",
+    "source": "local",
+    "sequence": 11,
+    "clock": "Unix receipt timestamps; monotonic control intervals",
+    "evaluation_truth_available": true,
+    "source_run_id": null
+  },
+  "observations": {
+    "received": 1,
+    "forwarded": 1,
+    "rejected": [],
+    "latest_age_s": 0.0,
+    "basis": "receipt time unless capture_unix explicitly supplied"
+  },
+  "command_outcomes": [
+    {
+      "command_id": "local-kinematic:a465afb275804324b917d2d6e14e5eb1:plane-1",
+      "vehicle_id": "plane-1",
+      "status": "suppressed"
+    },
+    {
+      "command_id": "local-kinematic:86d6c131327b4983ae9ae144b34881f2:copter-1",
+      "vehicle_id": "copter-1",
+      "status": "dispatched"
+    },
+    {
+      "command_id": "local-kinematic:0c7f34ea660541f4bf63e234df739ed8:rover-1",
+      "vehicle_id": "rover-1",
+      "status": "suppressed"
+    }
+  ],
+  "recording": {
+    "enabled": true,
+    "run_id": "local-kinematic",
+    "path": "..\\runs\\fixture-final\\local-kinematic",
+    "state": "closed",
+    "accepted_records": 12,
+    "written_records": 12,
+    "dropped_records": 0,
+    "bytes_written": 46067,
+    "max_bytes": 67108864,
+    "queue_depth": 0,
+    "complete": true,
+    "error": null
+  },
+  "fleet": {
+    "plane-1": {
+      "vehicle_id": "plane-1",
+      "sysid": 1,
+      "vehicle_class": "plane",
+      "lat": 74.69936300408466,
+      "lon": -94.83987064938097,
+      "alt": 90.0,
+      "heading": 3.433176169963417,
+      "groundspeed": 25.0,
+      "battery_remaining": 100.0,
+      "armed": true,
+      "mode": "GUIDED",
+      "role": "search",
+      "connected": true,
+      "mavlink": false
+    },
+    "copter-1": {
+      "vehicle_id": "copter-1",
+      "sysid": 2,
+      "vehicle_class": "copter",
+      "lat": 74.69666212403702,
+      "lon": -94.82803317551758,
+      "alt": 40.0,
+      "heading": 38.32769499420897,
+      "groundspeed": 12.0,
+      "battery_remaining": 100.0,
+      "armed": true,
+      "mode": "GUIDED",
+      "role": "track",
+      "connected": true,
+      "mavlink": false
+    },
+    "rover-1": {
+      "vehicle_id": "rover-1",
+      "sysid": 3,
+      "vehicle_class": "rover",
+      "lat": 74.69504999774999,
+      "lon": -94.83242811762271,
+      "alt": 0.0,
+      "heading": 0.0,
+      "groundspeed": 0.0,
+      "battery_remaining": 100.0,
+      "armed": true,
+      "mode": "GUIDED",
+      "role": "reserve",
+      "connected": true,
+      "mavlink": false
+    },
+    "tower-ne": {
+      "vehicle_id": "tower-ne",
+      "sysid": 13,
+      "vehicle_class": "tower",
+      "lat": 74.7054000081,
+      "lon": -94.79900867674459,
+      "alt": 12.0,
+      "heading": 225.0,
+      "groundspeed": 0.0,
+      "battery_remaining": 100.0,
+      "armed": true,
+      "mode": "GUIDED",
+      "role": "cue",
+      "connected": true,
+      "mavlink": false
+    },
+    "tower-sw": {
+      "vehicle_id": "tower-sw",
+      "sysid": 14,
+      "vehicle_class": "tower",
+      "lat": 74.6891999919,
+      "lon": -94.86039132325541,
+      "alt": 12.0,
+      "heading": 45.0,
+      "groundspeed": 0.0,
+      "battery_remaining": 100.0,
+      "armed": true,
+      "mode": "GUIDED",
+      "role": "cue",
+      "connected": true,
+      "mavlink": false
+    }
+  },
+  "detections": [
+    {
+      "source_id": "tower-ne",
+      "lat": 74.70184363762226,
+      "lon": -94.81247625595671,
+      "class_hint": "vehicle",
+      "confidence": 0.4,
+      "timestamp": 1789846457.8409417,
+      "bearing": 224.9786067407233,
+      "range_m": 558.9792359089377,
+      "observation_id": "fa89c184a442eb56b0704fa5",
+      "frame_id": null,
+      "timestamp_basis": "receipt_unix",
+      "coordinate_frame": "wgs84",
+      "provenance": "synthetic"
+    }
+  ],
+  "track": {
+    "lat": 74.70182981952641,
+    "lon": -94.81253622853615,
+    "vn": 1.0489535903599443,
+    "ve": 1.141725648433869,
+    "speed_mps": 1.5504325496521145,
+    "class_hint": "vehicle",
+    "confidence": 0.3960397446289612,
+    "age_s": 0.0,
+    "hits": 12,
+    "sigma_m": 14.288542573921719,
+    "history": [
+      [
+        74.7018000045,
+        -94.81264926485811
+      ],
+      [
+        74.70180256586423,
+        -94.81264059515883
+      ],
+      [
+        74.70180298464727,
+        -94.81263917766299
+      ],
+      [
+        74.70180512601611,
+        -94.8126317448453
+      ],
+      [
+        74.70180577517954,
+        -94.81262951708013
+      ],
+      [
+        74.70180779311612,
+        -94.81262233030446
+      ],
+      [
+        74.70180845880499,
+        -94.81262000931731
+      ],
+      [
+        74.70181028795041,
+        -94.81261335612957
+      ],
+      [
+        74.70181114092115,
+        -94.81261033667607
+      ],
+      [
+        74.70181299151312,
+        -94.8126034239658
+      ],
+      [
+        74.70181376267819,
+        -94.81260064309146
+      ],
+      [
+        74.70181554186065,
+        -94.81259385089587
+      ],
+      [
+        74.70181632412944,
+        -94.81259097748118
+      ],
+      [
+        74.70181806385733,
+        -94.8125841898041
+      ],
+      [
+        74.70181912606188,
+        -94.8125802136331
+      ],
+      [
+        74.70182100958485,
+        -94.81257263693782
+      ],
+      [
+        74.70182197468414,
+        -94.81256893746175
+      ],
+      [
+        74.70182389682333,
+        -94.81256100471295
+      ],
+      [
+        74.70182488052104,
+        -94.81255714161739
+      ],
+      [
+        74.7018268325686,
+        -94.81254887831982
+      ],
+      [
+        74.70182784031678,
+        -94.81254482310378
+      ],
+      [
+        74.70182981952641,
+        -94.81253622853615
+      ]
+    ]
+  },
+  "truth": {
+    "lat": 74.70184363762226,
+    "lon": -94.81247625595671
+  },
+  "heatmap": [
+    {
+      "lat": 74.68886249156249,
+      "lon": -94.86167012839105,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6899874926875,
+      "lon": -94.85740744460558,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6911124938125,
+      "lon": -94.85740744460558,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6899874926875,
+      "lon": -94.8531447608201,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6911124938125,
+      "lon": -94.8531447608201,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.69223749493749,
+      "lon": -94.8531447608201,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6911124938125,
+      "lon": -94.84888207703463,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.69223749493749,
+      "lon": -94.84888207703463,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.69336249606249,
+      "lon": -94.84888207703463,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.69223749493749,
+      "lon": -94.84461939324916,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6989875016875,
+      "lon": -94.84035670946369,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7001125028125,
+      "lon": -94.84035670946369,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7012375039375,
+      "lon": -94.84035670946369,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70236250506251,
+      "lon": -94.84035670946369,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7012375039375,
+      "lon": -94.83609402567821,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70236250506251,
+      "lon": -94.83609402567821,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6944874971875,
+      "lon": -94.83183134189274,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.6967374994375,
+      "lon": -94.82756865810727,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70236250506251,
+      "lon": -94.81478060675084,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7012375039375,
+      "lon": -94.81051792296537,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70236250506251,
+      "lon": -94.81051792296537,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7034875061875,
+      "lon": -94.81051792296537,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70236250506251,
+      "lon": -94.8062552391799,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7034875061875,
+      "lon": -94.8062552391799,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7046125073125,
+      "lon": -94.8062552391799,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7034875061875,
+      "lon": -94.80199255539442,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.7046125073125,
+      "lon": -94.80199255539442,
+      "heat": 1.0
+    },
+    {
+      "lat": 74.70573750843751,
+      "lon": -94.79772987160895,
+      "heat": 1.0
+    }
+  ],
+  "blackboard": [
+    {
+      "sender": "c2",
+      "recipient": "all",
+      "kind": "handoff",
+      "body": {
+        "from": "find",
+        "to": "fix",
+        "intent": "Cue qualified. Copter tasked; plane keeps searching."
+      },
+      "t": 1789846456.671007
+    },
+    {
+      "sender": "plane-1",
+      "recipient": "c2",
+      "kind": "keep_search",
+      "body": {
+        "note": "ISR continues coverage; copter has custody"
+      },
+      "t": 1789846456.671007
+    },
+    {
+      "sender": "copter-1",
+      "recipient": "c2",
+      "kind": "qrf",
+      "body": {
+        "note": "box search opposite the plane"
+      },
+      "t": 1789846456.671007
+    },
+    {
+      "sender": "rover-1",
+      "recipient": "c2",
+      "kind": "reserve",
+      "body": {
+        "note": "holding; air cues are not PID"
+      },
+      "t": 1789846456.671007
+    },
+    {
+      "sender": "tower-ne",
+      "recipient": "c2",
+      "kind": "cue",
+      "body": {
+        "class_hint": "vehicle",
+        "confidence": 0.4,
+        "bearing": 224.99506399101574,
+        "range_m": 565.9989692413104
+      },
+      "t": 1789846456.671007
+    },
+    {
+      "sender": "c2",
+      "recipient": "all",
+      "kind": "handoff",
+      "body": {
+        "from": "fix",
+        "to": "track",
+        "intent": "Copter has custody. Plane continues coverage. Rover on deck."
+      },
+      "t": 1789846456.7775674
+    },
+    {
+      "sender": "copter-1",
+      "recipient": "c2",
+      "kind": "commit",
+      "body": {
+        "lead_s": 4.0
+      },
+      "t": 1789846456.7775674
+    }
+  ],
+  "advisor": null,
+  "c2": {
+    "phase": "track",
+    "intent": "Copter has custody. Plane continues coverage. Rover on deck."
+  },
+  "intents": {
+    "plane-1": "keep_search",
+    "copter-1": "commit",
+    "rover-1": "reserve",
+    "tower-ne": "cue",
+    "tower-sw": "stare"
+  },
+  "commands": [
+    {
+      "vehicle_id": "plane-1",
+      "type": "search_sector",
+      "lat": 74.70810001080001,
+      "lon": -94.83788435286812,
+      "alt": 90.0,
+      "sector": null,
+      "command_id": "local-kinematic:a465afb275804324b917d2d6e14e5eb1:plane-1"
+    },
+    {
+      "vehicle_id": "copter-1",
+      "type": "goto",
+      "lat": 74.70181793404963,
+      "lon": -94.81258857696312,
+      "alt": 40.0,
+      "sector": null,
+      "command_id": "local-kinematic:86d6c131327b4983ae9ae144b34881f2:copter-1"
+    },
+    {
+      "vehicle_id": "rover-1",
+      "type": "hold",
+      "lat": 74.69504999774999,
+      "lon": -94.83242811762271,
+      "alt": 0.0,
+      "sector": null,
+      "command_id": "local-kinematic:0c7f34ea660541f4bf63e234df739ed8:rover-1"
+    }
+  ],
+  "arena": {
+    "origin_lat": 74.6973,
+    "origin_lon": -94.8297,
+    "half_m": 1500.0,
+    "heading_offset_deg": 0.0
+  }
+}

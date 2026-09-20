@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
+
+logger = logging.getLogger("overwatch.cameras")
 
 
 def _host() -> str:
@@ -37,8 +42,10 @@ class CameraSpec:
 
 
 # Official four-asset heat. Ports = 8600 + 10 * slot.
+# iris_with_ardupilot/model.sdf:10-31: fixed mount, 20 degrees below body forward.
+QUAD_CAMERA_PITCH_DEG = -20.0
 FLEET_CAMERAS: tuple[CameraSpec, ...] = (
-    CameraSpec("quadcopter", 8600, hfov_rad=2.0, pitch_bias_deg=0.0, label="quad gimbal"),
+    CameraSpec("quadcopter", 8600, hfov_rad=2.0, pitch_bias_deg=QUAD_CAMERA_PITCH_DEG, label="quad fixed camera"),
     CameraSpec("fixed-wing", 8610, hfov_rad=1.204, pitch_bias_deg=-8.0, label="plane FPV"),
     CameraSpec("tower-1", 8630, hfov_rad=1.047, pitch_bias_deg=0.0, label="tower-1 EO"),
     CameraSpec("tower-2", 8640, hfov_rad=1.047, pitch_bias_deg=0.0, label="tower-2 EO"),
@@ -57,3 +64,73 @@ async def grab_jpeg(spec: CameraSpec, client: httpx.AsyncClient) -> bytes | None
     except httpx.HTTPError:
         return None
     return None
+
+
+class MjpegTap:
+    """Hold /stream open so CameraStreamPlugin keeps encoding live frames.
+
+    Snapshot-only grabs increment clients for a few milliseconds. The plugin
+    then returns the last JPEG immediately and almost never encodes a new one,
+    so every tower looks like a frozen sky.
+    """
+
+    def __init__(self) -> None:
+        self.latest: dict[str, bytes] = {}
+        self._frames: dict[str, tuple[bytes, float, str]] = {}
+        self._sequence = 0
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+
+    def start(self, specs: tuple[CameraSpec, ...] | list[CameraSpec]) -> None:
+        for spec in specs:
+            task = self._tasks.get(spec.vehicle_id)
+            if task is None or task.done():
+                self._tasks[spec.vehicle_id] = asyncio.create_task(
+                    self._pump(spec), name=f"mjpeg-{spec.vehicle_id}"
+                )
+
+    def get(self, vehicle_id: str) -> bytes | None:
+        jpeg = self.latest.get(vehicle_id)
+        if jpeg and jpeg[:2] == b"\xff\xd8":
+            return jpeg
+        return None
+
+    def get_frame(self, vehicle_id: str) -> tuple[bytes, float, str] | None:
+        """Frame identity and receipt time; MJPEG supplies no capture clock."""
+        return self._frames.get(vehicle_id)
+
+    def _receive(self, vehicle_id: str, jpeg: bytes) -> None:
+        self._sequence += 1
+        self.latest[vehicle_id] = jpeg
+        self._frames[vehicle_id] = (jpeg, time.time(), f"{vehicle_id}:{self._sequence}")
+
+    async def close(self) -> None:
+        tasks, self._tasks = self._tasks, {}
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        self.latest.clear()
+        self._frames.clear()
+
+    async def _pump(self, spec: CameraSpec) -> None:
+        timeout = httpx.Timeout(None, connect=2.0)
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("GET", spec.stream_url()) as resp:
+                        buf = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            buf.extend(chunk)
+                            while True:
+                                start = buf.find(b"\xff\xd8")
+                                end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+                                if start < 0 or end < 0:
+                                    if len(buf) > 2_000_000:
+                                        del buf[:-8000]
+                                    break
+                                self._receive(spec.vehicle_id, bytes(buf[start : end + 2]))
+                                del buf[: end + 2]
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("mjpeg %s dropped: %s", spec.vehicle_id, exc)
+                await asyncio.sleep(1.2)

@@ -1,0 +1,68 @@
+{
+  "run_id": "local-kinematic",
+  "mode": "synthetic",
+  "source": "local",
+  "arena": {
+    "origin_lat": 74.6973,
+    "origin_lon": -94.8297,
+    "half_m": 1500.0,
+    "towers": [
+      {
+        "vehicle_id": "tower-ne",
+        "lat": 74.7054000081,
+        "lon": -94.79900867674459,
+        "heading": 225.0,
+        "fov_deg": 40.0,
+        "range_m": 600.0
+      },
+      {
+        "vehicle_id": "tower-sw",
+        "lat": 74.6891999919,
+        "lon": -94.86039132325541,
+        "heading": 45.0,
+        "fov_deg": 40.0,
+        "range_m": 600.0
+      }
+    ],
+    "no_fly": [],
+    "heading_offset_deg": 0.0
+  },
+  "source_revision": "bf5b64ad63c82835aaa95d18546e1c82bb8ac493",
+  "source_sha256": "57600cbd62232df08d81e3cefe4114dfd8857bccd9a1ceaa05f14845cd4bddfb",
+  "python_version": "3.12.14",
+  "scenario": "development fixture: local synthetic weaving target",
+  "settings": {
+    "brain_hz": 10.0,
+    "observation_max_age_s": 4.0,
+    "command_refresh_s": 1.0,
+    "tracker_gate_m": 220.0
+  },
+  "schema": "overwatch.run",
+  "version": 1,
+  "started_at": 1789846456.646315,
+  "time_convention": {
+    "recorded_at": "unix_seconds",
+    "elapsed_s": "monotonic_run_seconds",
+    "detection_timestamp": "unix_seconds; receipt approximation unless provenance says otherwise",
+    "replay": "constant wall-clock rebase; original elapsed intervals"
+  },
+  "complete": true,
+  "recording": {
+    "enabled": true,
+    "run_id": "local-kinematic",
+    "path": "..\\runs\\fixture-final\\local-kinematic",
+    "state": "closed",
+    "accepted_records": 12,
+    "written_records": 12,
+    "dropped_records": 0,
+    "bytes_written": 46067,
+    "max_bytes": 67108864,
+    "queue_depth": 0,
+    "complete": true,
+    "error": null
+  },
+  "tick_count": 12,
+  "tick_bytes": 46067,
+  "sha256": "2a0f01d5b44f2c94d68ef53d4627a10c1f552ee8840528bcc04ad8847ca3d65a",
+  "closed_at": 1789846457.9549017
+}

@@ -1,14 +1,29 @@
-import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, Tooltip } from "react-leaflet";
+import {
+  Circle,
+  CircleMarker,
+  MapContainer,
+  Polyline,
+  Popup,
+  ScaleControl,
+  TileLayer,
+  Tooltip,
+} from "react-leaflet";
 import { DEFAULT_ARENA } from "../lib/geo";
-import type { HeatCell, StrategyPlan, TelemetrySample, TrackState } from "../lib/types";
+import { sceneColors, type ScenePalette } from "../lib/theme";
+import type {
+  HeatCell,
+  StrategyPlan,
+  TelemetrySample,
+  TrackState,
+} from "../lib/types";
 
-const ROLE_COLOR: Record<string, { color: string; fill: string }> = {
-  search: { color: "#5eead4", fill: "#14b8a6" },
-  track: { color: "#fbbf24", fill: "#f59e0b" },
-  confirm: { color: "#fb7185", fill: "#f43f5e" },
-  cue: { color: "#c4b5fd", fill: "#8b5cf6" },
-  reserve: { color: "#94a3b8", fill: "#64748b" },
-};
+const cartoKey = process.env.NEXT_PUBLIC_CARTO_BASEMAP_API_KEY?.trim();
+const basemapUrl = cartoKey
+  ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(cartoKey)}`
+  : "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const basemapAttribution =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' +
+  (cartoKey ? ' &copy; <a href="https://carto.com/attributions">CARTO</a>' : "");
 
 type Props = {
   fleet: Record<string, TelemetrySample>;
@@ -17,51 +32,133 @@ type Props = {
   heatmap: HeatCell[];
   strategy: StrategyPlan | null;
   arena?: { origin_lat: number; origin_lon: number };
+  scene?: ScenePalette;
 };
 
-export default function TacticalMap({ fleet, track, truth, heatmap, strategy, arena }: Props) {
-  const vehicles = Object.values(fleet).filter((v) => v.lat != null && v.lon != null);
-  const intercept = strategy?.intercept;
+function validPosition(lat: unknown, lon: unknown): boolean {
+  return (
+    typeof lat === "number" &&
+    Number.isFinite(lat) &&
+    Math.abs(lat) <= 90 &&
+    typeof lon === "number" &&
+    Number.isFinite(lon) &&
+    Math.abs(lon) <= 180
+  );
+}
+
+export default function TacticalMap({
+  fleet,
+  track,
+  truth,
+  heatmap,
+  strategy,
+  arena,
+  scene = sceneColors,
+}: Props) {
+  const vehicles = Object.values(fleet).filter((v) =>
+    validPosition(v.lat, v.lon),
+  );
+  const target = track && validPosition(track.lat, track.lon) ? track : null;
+  const evaluationTruth =
+    truth && validPosition(truth.lat, truth.lon) ? truth : null;
+  const plannedIntercept = strategy?.intercept;
+  const intercept =
+    plannedIntercept &&
+    validPosition(plannedIntercept.lat, plannedIntercept.lon)
+      ? plannedIntercept
+      : null;
+  const history =
+    target?.history?.filter(([lat, lon]) => validPosition(lat, lon)) ?? [];
+  const roleColors: Record<
+    string,
+    {
+      color: string;
+      fillColor: string;
+      fillOpacity: number;
+      dashArray?: string;
+    }
+  > = {
+    search: { color: scene.chalk, fillColor: scene.muted, fillOpacity: 0.95 },
+    track: { color: scene.chalk, fillColor: scene.rust, fillOpacity: 1 },
+    confirm: { color: scene.rust, fillColor: scene.chalk, fillOpacity: 0.95 },
+    cue: {
+      color: scene.chalk,
+      fillColor: scene.ink,
+      fillOpacity: 0.85,
+      dashArray: "2 2",
+    },
+    reserve: { color: scene.muted, fillColor: scene.ink, fillOpacity: 0.9 },
+  };
+  const originArena =
+    arena && validPosition(arena.origin_lat, arena.origin_lon)
+      ? arena
+      : DEFAULT_ARENA;
   const origin: [number, number] = [
-    arena?.origin_lat ?? DEFAULT_ARENA.origin_lat,
-    arena?.origin_lon ?? DEFAULT_ARENA.origin_lon,
+    originArena.origin_lat,
+    originArena.origin_lon,
   ];
 
   return (
-    <MapContainer key={`${origin[0]},${origin[1]}`} center={origin} zoom={12} className="h-full w-full" zoomControl attributionControl={false}>
+    <MapContainer
+      key={`${origin[0]},${origin[1]}`}
+      center={origin}
+      zoom={12}
+      className="h-full w-full"
+      style={{ background: scene.void }}
+      zoomControl
+      attributionControl
+    >
       <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution="&copy; OSM &copy; CARTO"
+        url={basemapUrl}
+        attribution={basemapAttribution}
+        maxZoom={cartoKey ? 20 : 19}
       />
+      <ScaleControl position="bottomleft" imperial={false} />
 
-      {heatmap.map((c, i) => (
-        <CircleMarker
-          key={`h-${i}`}
-          center={[c.lat, c.lon]}
-          radius={10}
-          pathOptions={{
-            color: "transparent",
-            fillColor: "#22d3ee",
-            fillOpacity: 0.12 + c.heat * 0.35,
-            weight: 0,
-          }}
-        />
-      ))}
+      {heatmap
+        .filter(
+          (cell) =>
+            validPosition(cell.lat, cell.lon) &&
+            Number.isFinite(cell.heat) &&
+            cell.heat > 0,
+        )
+        .map((c, i) => (
+          <CircleMarker
+            key={`h-${i}`}
+            center={[c.lat, c.lon]}
+            radius={10}
+            interactive={false}
+            pathOptions={{
+              stroke: false,
+              fillColor: scene.muted,
+              fillOpacity: 0.12 + Math.min(1, c.heat) * 0.35,
+              weight: 0,
+            }}
+          />
+        ))}
 
-      <CircleMarker center={origin} radius={4} pathOptions={{ color: "#4b5563", fillOpacity: 0.4 }}>
+      <CircleMarker
+        center={origin}
+        radius={4}
+        pathOptions={{
+          color: scene.muted,
+          fillColor: scene.chalk,
+          fillOpacity: 0.4,
+        }}
+      >
         <Tooltip permanent direction="right" offset={[8, 0]}>
-          origin
+          Arena origin
         </Tooltip>
       </CircleMarker>
 
       {vehicles.map((v) => {
-        const tone = ROLE_COLOR[v.role ?? "reserve"] ?? ROLE_COLOR.reserve;
+        const tone = roleColors[v.role ?? "reserve"] ?? roleColors.reserve;
         return (
           <CircleMarker
             key={v.vehicle_id}
             center={[v.lat as number, v.lon as number]}
             radius={v.vehicle_class === "tower" ? 6 : 9}
-            pathOptions={{ color: tone.color, fillColor: tone.fill, fillOpacity: 0.9, weight: 2 }}
+            pathOptions={{ ...tone, weight: 2 }}
           >
             <Popup>
               <div className="text-xs">
@@ -69,53 +166,116 @@ export default function TacticalMap({ fleet, track, truth, heatmap, strategy, ar
                   {v.vehicle_id} · {v.role ?? "—"}
                 </div>
                 <div>{v.vehicle_class}</div>
-                <div>alt {v.alt?.toFixed(1) ?? "—"} m</div>
+                <div>
+                  Altitude{" "}
+                  {typeof v.alt === "number" && Number.isFinite(v.alt)
+                    ? `${v.alt.toFixed(1)} m`
+                    : "unavailable"}
+                </div>
               </div>
             </Popup>
             <Tooltip>
-              {v.vehicle_id} [{v.role}]
+              {v.vehicle_id} · {v.role ?? "Role unavailable"}
             </Tooltip>
           </CircleMarker>
         );
       })}
 
-      {track && (
+      {target && (
         <>
+          {typeof target.sigma_m === "number" &&
+            Number.isFinite(target.sigma_m) &&
+            target.sigma_m > 0 && (
+              <Circle
+                center={[target.lat, target.lon]}
+                radius={target.sigma_m}
+                pathOptions={{
+                  color: scene.rust,
+                  fillColor: scene.rust,
+                  fillOpacity: 0.12,
+                  weight: 1,
+                  dashArray: "4 4",
+                }}
+              >
+                <Tooltip>
+                  Reported scalar uncertainty · σ {target.sigma_m.toFixed(0)} m
+                </Tooltip>
+              </Circle>
+            )}
           <CircleMarker
-            center={[track.lat, track.lon]}
-            radius={Math.max(12, Math.min(40, (track.sigma_m ?? 40) / 8))}
-            pathOptions={{ color: "#fb7185", fillColor: "#f43f5e", fillOpacity: 0.15, weight: 1 }}
-          />
-          <CircleMarker
-            center={[track.lat, track.lon]}
+            center={[target.lat, target.lon]}
             radius={8}
-            pathOptions={{ color: "#fb7185", fillColor: "#e11d48", fillOpacity: 0.95, weight: 2 }}
+            pathOptions={{
+              color: scene.chalk,
+              fillColor: scene.rust,
+              fillOpacity: 1,
+              weight: 2,
+            }}
           >
-            <Tooltip permanent>track {track.class_hint}</Tooltip>
+            <Tooltip permanent>
+              Target estimate · {target.class_hint || "Unclassified"}
+            </Tooltip>
           </CircleMarker>
-          {track.history && track.history.length > 1 && (
+          {history.length > 1 && (
             <Polyline
-              positions={track.history as [number, number][]}
-              pathOptions={{ color: "#fb7185", weight: 2, opacity: 0.7 }}
+              positions={history}
+              pathOptions={{ color: scene.rust, weight: 2, opacity: 0.75 }}
+              interactive={false}
             />
           )}
         </>
       )}
 
-      {truth && (
-        <CircleMarker center={[truth.lat, truth.lon]} radius={5} pathOptions={{ color: "#fde047", fillOpacity: 0.9 }}>
-          <Tooltip>truth</Tooltip>
+      {evaluationTruth && (
+        <CircleMarker
+          center={[evaluationTruth.lat, evaluationTruth.lon]}
+          radius={6}
+          pathOptions={{
+            color: scene.chalk,
+            fill: false,
+            weight: 2,
+            dashArray: "2 3",
+          }}
+        >
+          <Tooltip>Evaluation truth · local simulation</Tooltip>
         </CircleMarker>
       )}
 
-      {intercept && track && (
-        <Polyline
-          positions={[
-            [track.lat, track.lon],
-            [intercept.lat, intercept.lon],
-          ]}
-          pathOptions={{ color: "#fbbf24", dashArray: "6 8", weight: 1, opacity: 0.6 }}
-        />
+      {intercept && (
+        <>
+          {target && (
+            <Polyline
+              positions={[
+                [target.lat, target.lon],
+                [intercept.lat, intercept.lon],
+              ]}
+              pathOptions={{
+                color: scene.rust,
+                dashArray: "6 8",
+                weight: 1.5,
+                opacity: 0.8,
+              }}
+              interactive={false}
+            />
+          )}
+          <CircleMarker
+            center={[intercept.lat, intercept.lon]}
+            radius={6}
+            pathOptions={{
+              color: scene.rust,
+              fill: false,
+              dashArray: "3 3",
+              weight: 2,
+            }}
+          >
+            <Tooltip>
+              Planned intercept
+              {strategy?.assigned_vehicle
+                ? ` · ${strategy.assigned_vehicle}`
+                : ""}
+            </Tooltip>
+          </CircleMarker>
+        </>
       )}
     </MapContainer>
   );

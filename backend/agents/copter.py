@@ -1,54 +1,46 @@
-"""Close recce / QRF. Holds a sector until C2 grants custody, then leads the track."""
+"""Close vessel tracking only after C2 confirms a tower cue."""
 
 from __future__ import annotations
 
-from behaviors.trees import CRUISE_ALT, box_search_wp, hold_wp, intercept_wp
-from geo import haversine_m
+from behaviors.trees import CRUISE_ALT, camera_follow_wp, cue_ll, reacquire_wp
+from geo import bearing_deg
 from sim.types import Command, VehicleState
 from world import WorldModel
 
 from agents.base import AgentDecision, PlatformAgent
 
-CUSTODY_M = 90.0
-
 
 class CopterAgent(PlatformAgent):
+    def __init__(self, vehicle_id: str, vehicle_class: str) -> None:
+        super().__init__(vehicle_id, vehicle_class)
+        self._reserve_point: tuple[float, float] | None = None
+
     def decide(self, me: VehicleState, world: WorldModel) -> AgentDecision:
-        role = me.role or "reserve"
-        track = world.track
-        plane = self.peer(world, "plane")
-
-        if role == "track" and track:
-            lat, lon = intercept_wp(track)
-            cmd = Command(vehicle_id=me.vehicle_id, type="goto", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-            dist = haversine_m(me.lat, me.lon, track.lat, track.lon)
-            if dist <= CUSTODY_M:
-                self.intent = "custody"
-                call = self.radio(
-                    "custody",
-                    "c2",
-                    {"range_m": round(dist, 1), "class_hint": track.class_hint},
-                )
+        if self._reserve_point is None:
+            self._reserve_point = (me.lat, me.lon)
+        aim = cue_ll(world)
+        if aim:
+            follow = camera_follow_wp(world.track, me)
+            if follow is None:
+                self.intent = "camera_height_pending"
+                return AgentDecision(command=None, intent=self.intent)
+            if world.phase == "reacquire":
+                aim = reacquire_wp(world, me)
+                self.intent = "reacquire"
+            elif world.custody_source == me.vehicle_id:
+                self.intent = "visual_custody"
             else:
-                self.intent = "commit"
-                call = self.radio("commit", "c2", {"lead_s": 4.0})
-            return AgentDecision(command=self.hold_setpoint(cmd, min_m=22.0), calls=self.calls_of(call), intent=self.intent)
+                self.intent = "coasting" if world.phase == "coasting" else "intercept"
+            if world.phase != "reacquire":
+                aim = follow
+            yaw = bearing_deg(me.lat, me.lon, world.track.lat, world.track.lon)
+            cmd = Command(me.vehicle_id, "goto", aim[0], aim[1], CRUISE_ALT["copter"], yaw_deg=yaw)
+            call = self.radio(self.intent, "c2", {"lead_s": 4.0,
+                                                  "custody_confirmed": world.custody_source == me.vehicle_id})
+            return AgentDecision(command=self.hold_setpoint(cmd, min_m=12.0), calls=self.calls_of(call), intent=self.intent)
 
-        if role == "search":
-            lat, lon = box_search_wp(me, avoid=plane)
-            cmd = Command(
-                vehicle_id=me.vehicle_id,
-                type="search_sector",
-                lat=lat,
-                lon=lon,
-                alt=CRUISE_ALT["copter"],
-            )
-            self.intent = "qrf_search"
-            call = self.radio("qrf", "c2", {"note": "box search opposite the plane"})
-            return AgentDecision(command=self.hold_setpoint(cmd, min_m=30.0), calls=self.calls_of(call), intent=self.intent)
-
-        lat, lon = hold_wp("copter")
-        cmd = Command(vehicle_id=me.vehicle_id, type="hold", lat=lat, lon=lon, alt=CRUISE_ALT["copter"])
-        self.intent = "qrf_hold"
-        call = self.radio("hold", "c2", {"note": "QRF on deck"})
-        return AgentDecision(command=self.hold_setpoint(cmd, min_m=30.0), calls=self.calls_of(call), intent=self.intent)
+        self.intent = "reserve_ground" if me.alt < 5.0 else "reserve_hold"
+        if me.alt < 5.0:
+            return AgentDecision(command=None, intent=self.intent)
+        cmd = Command(me.vehicle_id, "hold", *self._reserve_point, CRUISE_ALT["copter"])
+        return AgentDecision(command=self.hold_setpoint(cmd, min_m=30.0), intent=self.intent)

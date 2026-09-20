@@ -1,0 +1,3 @@
+# Optional offline training and terrain export; separate from the live controller.
+numpy>=1.26,<3
+pillow>=10.4

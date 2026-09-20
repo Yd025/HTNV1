@@ -23,5 +23,11 @@ dist/
 /models/
 /datasets/
 /runs/
+/backend/runs/
 *.pt
 *.onnx
+
+# Local training sessions and document inspection renders.
+/frontend/.graph-jobs/
+/tmp/pdfs/
+/frontend/public/experiments/graph-progress.json
