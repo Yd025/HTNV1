@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AttemptReplay, AttemptSummary, GameDashboard, LiveFrame, PathSample } from "../lib/gameLearningTypes";
+import { LEGACY_RULES_VERSION } from "../lib/gameLearningTypes";
 import { advancePlayback, frameIndexAtTime } from "../lib/gamePlayback";
 import styles from "./GameLearning.module.css";
 
@@ -7,6 +8,7 @@ const seconds = (value: number) => `${value.toFixed(1)} s`;
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const outcomeName = { caught: "Captured", escaped: "Escaped", abandoned: "Left early" };
 const ingestionName = { pending: "Waiting to save", uploaded: "Saved in Sentry", imported: "Ready for learning", error: "Needs attention" };
+const isEarlierRun = (attempt: AttemptSummary, currentRules: string) => (attempt.rulesVersion ?? LEGACY_RULES_VERSION) !== currentRules;
 
 export default function Preview({ data, now, connectionStale }: { data: GameDashboard; now: number; connectionStale: boolean }) {
   const attempts = data.attempts.map((attempt, i) => ({ ...attempt, number: data.totals.attempts - data.attempts.length + i + 1 })).reverse();
@@ -25,7 +27,7 @@ export default function Preview({ data, now, connectionStale }: { data: GameDash
         <div><h3 id="game-preview-heading">Player recordings · 2D replay</h3><p>Watch a saved opening run from above, or follow the current player live.</p></div>
         <label className={styles.attemptPicker}>Choose a run<select value={selection} onChange={event => choose(event.target.value)}>
           {selected && !attempts.some(attempt => attempt.id === selected.id) && <option value={selected.id}>Run {selected.number} · {outcomeName[selected.outcome]} · {seconds(selected.seconds)}</option>}
-          {attempts.map(attempt => <option key={attempt.id} value={attempt.id} disabled={!attempt.replayAvailable}>Run {attempt.number} · {outcomeName[attempt.outcome]} · {seconds(attempt.seconds)}{!attempt.replayAvailable ? " · Unavailable" : ""}</option>)}
+          {attempts.map(attempt => <option key={attempt.id} value={attempt.id} disabled={!attempt.replayAvailable}>Run {attempt.number} · {outcomeName[attempt.outcome]} · {seconds(attempt.seconds)}{isEarlierRun(attempt, data.rulesVersion) ? " · Earlier rules" : ""}{!attempt.replayAvailable ? " · Unavailable" : ""}</option>)}
           <option value="live">Live / next player</option>
         </select></label>
       </div>
@@ -36,7 +38,7 @@ export default function Preview({ data, now, connectionStale }: { data: GameDash
       <div className={styles.recordingsHeading}><div><h3 id="game-recordings-heading">Saved player runs</h3><p>Choose a run to play it on the map above.</p></div><span className={styles.status} data-stale={data.sentry?.status === "error"}>{!data.sentry ? "Checking connection" : data.sentry.status === "unconfigured" ? "Setup needed" : data.sentry.status === "syncing" ? "Saving runs" : data.sentry.status === "error" ? "Needs attention" : "Connected to Sentry"}</span></div>
       {data.sentry && <dl className={styles.ingestionCounts}><div><dt>Waiting to sync</dt><dd>{data.sentry.pending}</dd></div><div><dt>Received from Sentry</dt><dd>{data.sentry.imported}</dd></div><div><dt>Needs attention</dt><dd>{data.sentry.failed}</dd></div></dl>}
       {attempts.length ? <div className={styles.tableWrap}><table><caption>Latest {Math.min(10, attempts.length)} opening runs</caption><thead><tr><th>Run</th><th>Result</th><th>Game time</th><th>Learning data</th><th>2D replay</th></tr></thead><tbody>{attempts.slice(0, 10).map(attempt => {
-        const modelStatus = attempt.sentry?.state === "imported" && (!attempt.verified || attempt.outcome === "abandoned") ? "Saved · not used for learning" : attempt.sentry ? ingestionName[attempt.sentry.state] : "Waiting to save";
+        const modelStatus = isEarlierRun(attempt, data.rulesVersion) ? "Earlier rules · kept for replay" : attempt.sentry?.state === "imported" && (!attempt.verified || attempt.outcome === "abandoned") ? "Saved · not used for learning" : attempt.sentry ? ingestionName[attempt.sentry.state] : "Waiting to save";
         return <tr key={attempt.id} data-selected={selection === attempt.id}><th>{attempt.number}<small>Layout {attempt.layoutVersion}</small></th><td>{outcomeName[attempt.outcome]}</td><td>{seconds(attempt.seconds)}</td><td>{modelStatus}</td><td>{attempt.replayAvailable ? <button onClick={() => watch(attempt.id)} aria-label={`Watch run ${attempt.number}`} aria-pressed={selection === attempt.id}>{selection === attempt.id ? "Selected" : "Watch run"}</button> : <span className={styles.recordingUnavailable}>Unavailable</span>}</td></tr>;
       })}</tbody></table></div> : <p className={styles.recordingEmpty}>Completed runs will appear here. Open the game to record the first one.</p>}
       <p className={styles.note}>The 2D replay recreates each run from the player’s saved controls and original tower positions. The model learns from attempt data received from Sentry.</p>
@@ -116,12 +118,15 @@ function ReplayPlayer({ replay, runNumber, data }: { replay: AttemptReplay; runN
   const frame = replay.frames[index];
   const path = useMemo(() => replay.frames.slice(0, index + 1).map(item => ({ t: item.time, x: item.boat.x, z: item.boat.z, detected: item.detected, tagProgress: item.tagProgress })), [replay.frames, index]);
   const atEnd = time >= duration;
+  const earlierRules = isEarlierRun(replay.attempt, data.rulesVersion);
+  const observers = [...frame.towers.flatMap((tower, i) => tower.detecting ? [`Tower ${i + 1}`] : []), ...frame.drones.filter(drone => drone.detecting).map(drone => drone.id), ...(frame.plane.detecting ? ["Plane"] : [])];
   const toggle = () => {
     if (!playing && atEnd) seek(0);
     setPlaying(value => !value);
   };
   const replayData = { ...data, layout: replay.layout };
   return <>
+    {earlierRules && <div className={styles.notice} role="note"><p>This run used earlier rules: aircraft could spot from a distance. New games use overhead-only aircraft spotting. This replay preserves what happened.</p></div>}
     <div className={styles.playbackControls}>
       <div className={styles.playbackActions}>
         <button className={styles.primaryPlayback} onClick={toggle} disabled={duration <= 0} aria-label={playing ? "Pause replay" : "Play replay"}>{playing ? "Pause" : atEnd ? "Play again" : "Play"}</button>
@@ -134,7 +139,7 @@ function ReplayPlayer({ replay, runNumber, data }: { replay: AttemptReplay; runN
     </div>
     <div className={styles.previewLayout}><GameMap data={replayData} frame={frame} path={path} /><aside className={styles.previewInfo}>
       <h4>{runNumber == null ? "Saved opening run" : `Run ${runNumber}`} · {outcomeName[replay.attempt.outcome]}</h4><p>Replay of the player’s saved controls with the tower positions used in this run.</p>
-      <dl><div><dt>At this moment</dt><dd>{atEnd ? outcomeName[replay.attempt.outcome] : "Ship moving through the opening"}</dd></div><div><dt>Radar contact</dt><dd>{frame.detected ? "Detected" : "Clear"}</dd></div><div><dt>Capture progress</dt><dd>{percent(frame.tagProgress)}</dd></div><div><dt>Tower layout</dt><dd>{replay.layout.version}</dd></div><div><dt>First detected</dt><dd>{replay.attempt.firstDetectionSeconds == null ? "Not detected" : seconds(replay.attempt.firstDetectionSeconds)}</dd></div></dl>
+      <dl><div><dt>At this moment</dt><dd>{atEnd ? outcomeName[replay.attempt.outcome] : "Ship moving through the opening"}</dd></div><div><dt>Seen by</dt><dd>{observers.length ? observers.join(", ") : "No current sighting"}</dd></div><div><dt>Capture progress</dt><dd>{percent(frame.tagProgress)}</dd></div><div><dt>Tower layout</dt><dd>{replay.layout.version}</dd></div><div><dt>First detected</dt><dd>{replay.attempt.firstDetectionSeconds == null ? "Not detected" : seconds(replay.attempt.firstDetectionSeconds)}</dd></div><div><dt>Aircraft spotting</dt><dd>{(replay.attempt.rulesVersion ?? LEGACY_RULES_VERSION) === LEGACY_RULES_VERSION ? "Forward camera · earlier rules" : "Overhead only · within 65 m"}</dd></div></dl>
       <p className={styles.note}>Drag the timeline to inspect any moment. Time is measured on the game clock. Repeat plays this run again automatically.</p>
     </aside></div>
   </>;
@@ -149,6 +154,7 @@ function LivePreview({ data, now, connectionStale }: { data: GameDashboard; now:
   const label = !live ? "Waiting for a player" : ended ? "Run finished" : stale ? "Updates paused" : frame?.status === "paused" ? "Player paused" : "Live";
   return <div className={styles.previewLayout}><GameMap data={data} frame={frame} path={live?.path ?? []} /><aside className={styles.previewInfo}>
     <h4>{label}</h4><p>{!live ? "Start a game to see the player move through the opening." : ended ? "Choose a saved run above to replay it from the beginning." : stale ? "Showing the last received position while updates reconnect." : "Following the current player’s ship, towers, drones, and plane."}</p>
+    {live && (live.rulesVersion ?? LEGACY_RULES_VERSION) !== data.rulesVersion && <p>This run started under earlier rules, when aircraft could spot from a distance.</p>}
     <dl><div><dt>Game time</dt><dd>{frame ? seconds(frame.time) : "—"}</dd></div><div><dt>Radar contact</dt><dd>{frame ? frame.detected ? "Detected" : "Clear" : "Awaiting play"}</dd></div><div><dt>Capture progress</dt><dd>{frame ? percent(frame.tagProgress) : "—"}</dd></div><div><dt>Last update</dt><dd>{age == null ? "—" : `${age} s ago`}</dd></div></dl>
     <p className={styles.note}>New completed runs appear in the run picker. Saved playback stays on the run you choose.</p>
   </aside></div>;

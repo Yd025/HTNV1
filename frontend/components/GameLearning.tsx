@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AttemptSummary, GameDashboard, LearningRound } from "../lib/gameLearningTypes";
+import { LEGACY_RULES_VERSION } from "../lib/gameLearningTypes";
 import Preview from "./GamePreview";
 import styles from "./GameLearning.module.css";
 
@@ -60,6 +61,7 @@ export default function GameLearning() {
         <section className={styles.learning} aria-label="Tower learning status">
           <div className={styles.learningTitle}><h3>Layout {data.layout.version}</h3><span className={styles.status} data-stale={stale}>{stale ? "Connection stale" : data.learning.status === "collecting" ? "Collecting player attempts" : data.learning.status === "training" ? "Evaluating placements" : data.learning.status === "error" ? "Evaluation needs attention" : "Ready for the next player"}</span></div>
           <p>{data.learning.message}</p>
+          {data.rulesVersion !== LEGACY_RULES_VERSION && <p>New games use overhead-only aircraft spotting: within 65 m with a clear view. Tower sightings can still send them to investigate. Earlier recordings and runs already in progress keep their original rules; the model learns only from runs using the new rules.</p>}
           {data.learning.status === "training" ? <label className={styles.progress}>Evaluating candidate layouts · {data.learning.completed} / {data.learning.total}<progress max={Math.max(1, data.learning.total)} value={data.learning.completed} /></label> : completed < data.policy.minimumAttempts ? <label className={styles.progress}>{completed} / {data.policy.minimumAttempts} completed runs imported from Sentry before evaluation<progress max={data.policy.minimumAttempts} value={completed} /></label> : null}
           <dl className={styles.summary}>
             <div><dt>Player attempts</dt><dd>{data.totals.attempts}</dd></div>
@@ -69,14 +71,14 @@ export default function GameLearning() {
             <div><dt>Observed capture rate</dt><dd>{percent(data.totals.captureRate)}</dd></div>
             <div><dt>Mean capture time</dt><dd>{seconds(data.totals.meanCaptureSeconds)}</dd></div>
           </dl>
-          <p className={styles.note}>Only tower positions change between runs. Each player keeps the layout they started with. Capture rate excludes abandoned runs; mean capture time includes captures only.</p>
+          <p className={styles.note}>Results include all saved runs, including earlier spotting rules. Each player keeps the layout they started with. Capture rate excludes abandoned runs; mean capture time includes captures only. The model changes only tower positions.</p>
           <details className={styles.data}><summary>View next-run tower positions</summary><div className={styles.tableWrap}><table><caption>Layout {data.layout.version} · game coordinates in metres</caption><thead><tr><th>Tower</th><th>X</th><th>Z</th></tr></thead><tbody>{data.layout.towers.map((tower, i) => <tr key={tower.id}><th>T{i + 1}</th><td>{tower.x.toFixed(1)}</td><td>{tower.z.toFixed(1)}</td></tr>)}</tbody></table></div></details>
         </section>
         <div className={styles.charts}>
           <section className={styles.chartSection}><h3>Player outcomes over attempts</h3><p>Actual time spent in the opening stretch.</p><AttemptChart attempts={data.attempts} total={data.totals.attempts} /></section>
           <section className={styles.chartSection}><h3>Observed captures by layout</h3><p>Player results, with sample size shown for each layout.</p><LayoutChart attempts={data.attempts} /></section>
         </div>
-        <section className={styles.replay}><div><h3>Replay validation</h3><p>Estimated capture time when recorded controls are replayed through candidate tower layouts. These estimates are separate from live player outcomes.</p></div><ReplayChart rounds={data.rounds} maxSeconds={data.policy.maxSeconds} /></section>
+        <section className={styles.replay}><div><h3>Replay validation</h3><p>Estimated capture time when recorded controls are replayed through candidate tower layouts under the current game rules. These estimates are separate from live player outcomes.</p></div><ReplayChart rounds={data.rounds.filter(round => (round.rulesVersion ?? LEGACY_RULES_VERSION) === data.rulesVersion)} maxSeconds={data.policy.maxSeconds} /></section>
         <section className={styles.preview} aria-labelledby="game-preview-heading">
           <Preview data={data} now={now} connectionStale={stale} />
         </section>

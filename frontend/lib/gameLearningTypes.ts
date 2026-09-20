@@ -1,5 +1,6 @@
 /** Version the dataset whenever terrain or game mechanics change. */
-export const RULES_VERSION = 'opening-physics-loop-pace2-v1';
+export const LEGACY_RULES_VERSION = 'opening-physics-loop-pace2-v1';
+export const RULES_VERSION = 'opening-overhead-spotting-v2';
 export const WORLD_VERSION = 'fort-ross-257-v1';
 export const LEARNING_POLICY = {
   minimumAttempts: 8,
@@ -33,6 +34,7 @@ export type SentryAttemptStatus = {
   replayId?: string; replayUrl?: string; error?: string;
 };
 export type AttemptSummary = {
+  rulesVersion?: string;
   id: string; layoutVersion: number; endedAt: string; outcome: FinishRequest['outcome'];
   seconds: number; firstDetectionSeconds: number | null; verified: boolean; replayAvailable?: boolean; sentry?: SentryAttemptStatus;
 };
@@ -43,6 +45,7 @@ export type ReplayScore = {
   captureRate: number; meanCaptureSeconds: number | null; cappedMeanSeconds: number;
 };
 export type LearningRound = {
+  rulesVersion?: string;
   id: number; at: string; attempts: number; candidateCount: number; promoted: boolean;
   previousVersion: number; selectedVersion: number; reason: string;
   baseline: ReplayScore; candidate: ReplayScore;
@@ -54,6 +57,6 @@ export type GameDashboard = {
   totals: { attempts: number; captured: number; escaped: number; abandoned: number; captureRate: number | null; meanCaptureSeconds: number | null };
   attempts: AttemptSummary[]; rounds: LearningRound[];
   sentry: { configured: boolean; status: 'unconfigured' | 'syncing' | 'ready' | 'error'; pending: number; imported: number; failed: number; message: string };
-  live: { attemptId: string; layoutVersion: number; receivedAt: string; stale: boolean; frame: LiveFrame; path: PathSample[] } | null;
+  live: { attemptId: string; rulesVersion?: string; layoutVersion: number; receivedAt: string; stale: boolean; frame: LiveFrame; path: PathSample[] } | null;
   world: { half: number; size: number; heights: number[]; waterLevel: number; spawn: { x: number; z: number; heading: number } };
 };
